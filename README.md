@@ -63,6 +63,8 @@ Flags:
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor`. |
 | `--parallel` | Run the reviewers concurrently. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
+| `--max-rounds N` | Hard cap on review rounds per PR (default `3`, or `$PR_RELAY_MAX_ROUNDS`). |
+| `--reset` | Reset the round counter for this PR (force another round past the cap). |
 
 ## Make it automatic (the handoff)
 
@@ -100,6 +102,16 @@ companion command:
 pr-review-fetch         # prints the cross-review comments for the current branch's PR
 pr-review-fetch 47      # …for a specific PR
 ```
+
+### Loop safety (no runaway iteration)
+
+Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
+
+- **Soft:** the agent is told to stop once there are no Blockers/Should-fix left.
+- **Hard:** the relay enforces a **per-PR round cap** (default 3). Once hit, it refuses to run
+  reviewers and prints a clear STOP message, so the agent ends the loop. The counter lives in
+  `$XDG_CACHE_HOME/pr-review-relay/`, **auto-resets after 6h** of inactivity (a fresh session), and
+  can be cleared with `--reset`. Tune with `--max-rounds N` or `PR_RELAY_MAX_ROUNDS`.
 
 ## How it works
 
