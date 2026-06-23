@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# pr-review-relay — hand a PR off to the OTHER agents for cross-review.
+#
+# Whoever created the PR calls this with --author <self>. The other agents
+# (claude / codex / cursor) review the PR headless + read-only and post their
+# review as a PR comment. The author auto-excludes itself.
+#
+# Usage:
+#   pr-review-relay [--author claude|codex|cursor] [--pr <number|url>] \
+#                   [--reviewers claude,codex,cursor] [--parallel] [--dry-run]
+#   (no --pr → uses the PR for the current branch; run from inside the repo)
+set -uo pipefail
+
+AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor"; PARALLEL=0; DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --author)    AUTHOR="$2"; shift 2;;
+    --pr)        PR="$2"; shift 2;;
+    --reviewers) REVIEWERS="$2"; shift 2;;
+    --parallel)  PARALLEL=1; shift;;
+    --dry-run)   DRY=1; shift;;
+    -h|--help)   sed -n '2,11p' "$0"; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+command -v gh >/dev/null || { echo "gh not found"; exit 1; }
+[ -z "$PR" ] && PR=$(gh pr view --json number -q .number 2>/dev/null)
+[ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
+PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none}"
+
+DIFF=$(gh pr diff "$PR" 2>/dev/null)
+[ -z "$DIFF" ] && { echo "Empty diff or cannot read PR #$PR."; exit 1; }
+echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes"
+
+read -r -d '' PROMPT <<'P' || true
+You are reviewing a pull request. Review the diff (provided on stdin) for correctness
+bugs, security issues, broken edge cases, and clear design/maintainability problems.
+You may read files in the current repo for context, but DO NOT modify anything.
+Be concise. Group findings by severity: Blocker / Should-fix / Nit.
+If it looks good, say so in one line.
+P
+
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; *) echo "";; esac; }
+
+review_with() {
+  local name="$1" out=""
+  case "$name" in
+    claude) out=$(printf '%s' "$DIFF" | claude -p "$PROMPT" 2>/dev/null);;
+    codex)  out=$(printf '%s' "$DIFF" | codex exec -s read-only "$PROMPT" 2>/dev/null);;
+    cursor) out=$(cursor-agent -p --trust "$PROMPT"$'\n\n'"$DIFF" 2>/dev/null);;
+  esac
+  if [ -z "${out// }" ]; then echo "  ! $name: no output (skipped)" >&2; return 0; fi
+  local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; *) icon="🤖";; esac
+  # idempotent: remove any previous review from the SAME agent on this PR
+  if [ -n "$REPO" ]; then
+    for id in $(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+                  --jq ".[] | select(.body|contains(\"${name^} review (automated cross-review)\")) | .id" 2>/dev/null); do
+      gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1 || true
+    done
+  fi
+  gh pr comment "$PR" --body "## ${icon} ${name^} review (automated cross-review)
+
+${out}
+
+<sub>via pr-review-relay · author: ${AUTHOR:-?}</sub>" >/dev/null \
+    && echo "  ✓ $name review posted" || echo "  ! $name: failed to post comment" >&2
+}
+
+IFS=',' read -ra LIST <<< "$REVIEWERS"
+for r in "${LIST[@]}"; do
+  r="${r// }"
+  [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
+  local_tool=$(tool_for "$r")
+  [ -z "$local_tool" ] && { echo "  ! unknown reviewer '$r' (skip)"; continue; }
+  command -v "$local_tool" >/dev/null || { echo "  ! $local_tool not installed (skip $r)"; continue; }
+  if [ "$DRY" = 1 ]; then echo "  · would run: $r ($local_tool)"; continue; fi
+  echo "  → $r reviewing…"
+  if [ "$PARALLEL" = 1 ]; then review_with "$r" & else review_with "$r"; fi
+done
+[ "$PARALLEL" = 1 ] && wait
+echo "✔ Relay done."
