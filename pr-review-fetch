@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# pr-review-fetch [PR] — print the relay cross-review comments for a PR.
+# Use it to re-read the latest reviews (e.g. when a slower reviewer lands late)
+# so the builder agent can analyze them and iterate. Read-only.
+set -uo pipefail
+PR="${1:-$(gh pr view --json number -q .number 2>/dev/null)}"
+[ -z "$PR" ] && { echo "No PR found for the current branch. Pass a PR number."; exit 1; }
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+[ -z "$REPO" ] && { echo "Run me from inside the repo."; exit 1; }
+
+found=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+  --jq '.[] | select(.body|contains("(automated cross-review)")) | "\n===== " + .user.login + " =====\n" + .body' 2>/dev/null)
+if [ -z "$found" ]; then
+  echo "No cross-review comments yet on PR #$PR (reviewers may still be running)."
+  exit 0
+fi
+printf '%s\n' "$found"

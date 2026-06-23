@@ -80,6 +80,27 @@ instructions file (these are global, so they apply in every repo):
 
 Now whoever opens the PR, the other two review it — no manual step.
 
+## Closing the loop: read the reviews and iterate
+
+The relay runs the reviewers **synchronously** and **prints every review to stdout** (in addition to
+posting them as PR comments). So the agent that launched the relay gets the full feedback back **in
+its own command output** — it can analyze the findings, fix them, push, and re-run. Because the relay
+is idempotent, re-running just refreshes the comments (one per agent).
+
+A typical agent instruction to make this a loop:
+
+> After opening a PR, run `pr-review-relay --author <self>`. Read the reviews it prints, address every
+> **Blocker** and **Should-fix**, commit and push, then run it again. Repeat until no blockers remain
+> (max ~3 rounds), then summarize what you changed.
+
+Need to re-read the latest reviews later (e.g. a slower reviewer landed after you moved on)? Use the
+companion command:
+
+```bash
+pr-review-fetch         # prints the cross-review comments for the current branch's PR
+pr-review-fetch 47      # …for a specific PR
+```
+
 ## How it works
 
 1. Resolves the PR (current branch or `--pr`) and fetches the diff with `gh pr diff`.
