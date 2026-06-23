@@ -80,6 +80,13 @@ Flags:
 | `--max-rounds N` | Hard cap on review rounds per PR (default `3`, or `$PR_RELAY_MAX_ROUNDS`). |
 | `--reset` | Reset the round counter for this PR (force another round past the cap). |
 
+Environment:
+
+| Variable | Meaning |
+|----------|---------|
+| `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
+| `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. |
+
 ## 🔁 Make it automatic (the handoff)
 
 Tell each agent to call the relay right after it opens a PR. Add a line to each agent's
@@ -140,8 +147,8 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 ## 📋 Notes & caveats
 
 - **Read-only:** reviewers never modify code. They run with `codex exec -s read-only`,
-  `claude -p` (no auto-approve), and `cursor-agent -p --trust` (trust the workspace to read it, but
-  not run-everything).
+  `claude -p` (no auto-approve), and `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
+  keep the agent in Q&A/read-only mode).
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - Reviews are **diff-centric** (the agent gets the diff and can read repo files). For deeper context

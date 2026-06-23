@@ -11,7 +11,7 @@
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 set -uo pipefail
 
-AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0
+AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --author)     AUTHOR="$2"; shift 2;;
@@ -71,9 +71,9 @@ tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo
 review_with() {
   local name="$1" out=""
   case "$name" in
-    claude) out=$(printf '%s' "$DIFF" | claude -p "$PROMPT" 2>/dev/null);;
-    codex)  out=$(printf '%s' "$DIFF" | codex exec -s read-only "$PROMPT" 2>/dev/null);;
-    cursor) out=$(cursor-agent -p --trust "$PROMPT"$'\n\n'"$DIFF" 2>/dev/null);;
+    claude) out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null);;
+    codex)  out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null);;
+    cursor) out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null);;
   esac
   if [ -z "${out// }" ]; then echo "  ! $name: no output (skipped)" >&2; return 0; fi
   local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; *) icon="🤖";; esac
