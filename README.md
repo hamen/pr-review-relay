@@ -10,6 +10,7 @@
 [![Works with Codex](https://img.shields.io/badge/works%20with-Codex%20CLI-green?logo=openai&logoColor=white)](https://github.com/openai/codex)
 [![Works with Cursor](https://img.shields.io/badge/works%20with-Cursor-0098FF?logo=cursor&logoColor=white)](https://cursor.com)
 [![Works with Antigravity](https://img.shields.io/badge/works%20with-Antigravity-orange)](https://antigravity.dev)
+[![Works with OpenCode](https://img.shields.io/badge/works%20with-OpenCode-white)](https://opencode.ai)
 
 **Hand a pull request off to your *other* AI coding agents for an automated cross-review.**
 
@@ -27,7 +28,7 @@ PR comments. Local, free (it uses the agent CLIs you already pay for), and idemp
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
    claude -p                       codex exec                      cursor-agent -p
-   agy -p                                                                │
+   agy -p                        opencode run                            │
          └───────────────────────────────┴───────────────────────────────┘
                                          │
                               each posts its review as a PR comment
@@ -50,6 +51,7 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`
   - 🟠 [`agy`](https://antigravity.dev) (Antigravity CLI) — uses `agy -p`
+  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode run`
 
 You only need the agents you actually want as reviewers.
 
@@ -110,6 +112,9 @@ instructions file (these are global, so they apply in every repo):
 **🟠 Antigravity** — `~/.antigravity/AGENTS.md` (or equivalent):
 > After you open a Pull Request, run `pr-review-relay --author antigravity`.
 
+**⚪ OpenCode** — `~/.opencode/AGENTS.md`:
+> After you open a Pull Request, run `pr-review-relay --author opencode`.
+
 Now whoever opens the PR, the others review it — no manual step.
 
 ## 🔄 Closing the loop: read the reviews and iterate
@@ -148,17 +153,16 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 1. Resolves the PR (current branch or `--pr`) and fetches the diff with `gh pr diff`.
 2. For each reviewer (except `--author`), runs the agent **headless and read-only**, feeding it the
    diff plus a focused review prompt. The agent runs in the repo, so it can read files for context.
-3. Posts each review as a PR comment via `gh pr comment`, tagged per agent (🟣 Claude / 🟢 Codex /
-   🔵 Cursor / 🟠 Antigravity).
-4. **Idempotent:** before posting, it deletes any previous review from the *same* agent on that PR,
+3. Posts each review as a PR comment via `gh pr comment`, tagged per agent (🟣 Claude / 🟢 Codex / 🔵 Cursor / 🟠 Antigravity / ⚪ OpenCode).
+4. **Idempotent:**
    so re-runs replace rather than duplicate — one current review per agent.
 
 ## 📋 Notes & caveats
 
 - **Read-only:** reviewers never modify code. They run with `codex exec -s read-only`,
   `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
-  keep the agent in Q&A/read-only mode), and `agy --dangerously-skip-permissions -p` (skips interactive
-  permission prompts; the prompt itself is read-only).
+ keep the agent in Q&A/read-only mode), `agy --dangerously-skip-permissions -p` (skips interactive
+ permission prompts; the prompt itself is read-only), and `opencode run --dangerously-skip-permissions` (skips permission prompts).
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - Reviews are **diff-centric** (the agent gets the diff and can read repo files). For deeper context
