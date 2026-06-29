@@ -8,10 +8,15 @@
 # Usage:
 #   pr-review-relay [--author claude|codex|cursor] [--pr <number|url>] \
 #                   [--reviewers claude,codex,cursor] [--parallel] [--dry-run]
+#   pr-review-relay --mode google-style --kb-path /path/to/knowledge ...
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 set -uo pipefail
 
-AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor"; PARALLEL=0; DRY=0
+MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0
+AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+MODE="code"; KB_PATH=""
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --author)     AUTHOR="$2"; shift 2;;
@@ -21,32 +26,46 @@ while [ $# -gt 0 ]; do
     --dry-run)    DRY=1; shift;;
     --max-rounds) MAX_ROUNDS="$2"; shift 2;;
     --reset)      RESET=1; shift;;
-    -h|--help)    sed -n '2,11p' "$0"; exit 0;;
+    --mode)       MODE="$2"; shift 2;;
+    --kb-path)    KB_PATH="$2"; shift 2;;
+    -h|--help)    sed -n '2,13p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
+
+[ "$MODE" = "google-style" ] && AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-600}"
 
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 [ -z "$PR" ] && PR=$(gh pr view --json number -q .number 2>/dev/null)
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none}"
+echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE"
 
 DIFF=$(gh pr diff "$PR" 2>/dev/null)
 [ -z "$DIFF" ] && { echo "Empty diff or cannot read PR #$PR."; exit 1; }
 echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes"
 
-# --- Hard loop guard: cap the number of review rounds per PR ---------------
-# Prevents an endless read→fix→re-run cycle. Counter is per repo+PR, kept in a
-# cache file; auto-resets after 6h of inactivity (a fresh working session), or
-# manually with --reset. A real run (not --dry-run) consumes one round.
+# --- Google style mode setup --------------------------------------------------
+SKILL_ROOT=""; BUILD_PROMPT=""; KB_VERSION="?"
+if [ "$MODE" = "google-style" ]; then
+  KB_PATH="${KB_PATH:-${DAC_KB_PATH:-}}"
+  [ -z "$KB_PATH" ] && { echo "--mode google-style requires --kb-path or DAC_KB_PATH" >&2; exit 1; }
+  [ -f "$KB_PATH/manifest.json" ] || { echo "Invalid kb-path: no manifest.json in $KB_PATH" >&2; exit 1; }
+  SKILL_ROOT="${DAC_AUDIT_SKILL_PATH:-$(cd "$KB_PATH/.." && pwd)}"
+  BUILD_PROMPT="$SKILL_ROOT/scripts/build-style-prompt.mjs"
+  [ -f "$BUILD_PROMPT" ] || { echo "Missing $BUILD_PROMPT (dac-audit-skill scripts)" >&2; exit 1; }
+  KB_VERSION="$(node -e "const m=require('$KB_PATH/manifest.json'); console.log(m.generated_at||'?')" 2>/dev/null || echo '?')"
+  echo "  kb: $KB_PATH ($KB_VERSION)"
+fi
+
+# --- Hard loop guard ----------------------------------------------------------
 ROUND_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review-relay"; mkdir -p "$ROUND_DIR"
-ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
+ROUND_KEY=$(printf '%s#%s#%s' "${REPO:-unknown}" "$PR" "$MODE" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
 [ "$RESET" = 1 ] && rm -f "$ROUND_FILE"
 if [ -f "$ROUND_FILE" ] && [ $(( $(date +%s) - $(stat -c %Y "$ROUND_FILE" 2>/dev/null || echo 0) )) -gt 21600 ]; then
-  rm -f "$ROUND_FILE"   # stale (>6h): new session, start fresh
+  rm -f "$ROUND_FILE"
 fi
 ROUND=$(cat "$ROUND_FILE" 2>/dev/null || echo 0)
 if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
@@ -58,7 +77,7 @@ fi
 [ "$DRY" = 0 ] && echo $((ROUND + 1)) > "$ROUND_FILE"
 echo "  review round: $((ROUND + ( DRY==0 ? 1 : 0 )))/$MAX_ROUNDS"
 
-read -r -d '' PROMPT <<'P' || true
+read -r -d '' CODE_PROMPT <<'P' || true
 You are reviewing a pull request. Review the diff (provided on stdin) for correctness
 bugs, security issues, broken edge cases, and clear design/maintainability problems.
 You may read files in the current repo for context, but DO NOT modify anything.
@@ -68,31 +87,54 @@ P
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; *) echo "";; esac; }
 
+build_style_prompt() {
+  local reviewer="$1"
+  node "$BUILD_PROMPT" --pr-mode 1 --pr "$PR" --reviewer "$reviewer" \
+    --kb-root "$KB_PATH" --kb-version "$KB_VERSION" --url "$PR_URL"
+}
+
+review_tag() {
+  local name="$1"
+  if [ "$MODE" = "google-style" ]; then
+    printf '%s style review (automated cross-review)' "${name^}"
+  else
+    printf '%s review (automated cross-review)' "${name^}"
+  fi
+}
+
 review_with() {
-  local name="$1" out=""
-  case "$name" in
-    claude) out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null);;
-    codex)  out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null);;
-    cursor) out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null);;
-  esac
+  local name="$1" out="" prompt="" input=""
+  if [ "$MODE" = "google-style" ]; then
+    prompt="$(build_style_prompt "$name")"
+    input=$(printf '%s\n\n## PR diff\n\n%s' "$prompt" "$DIFF")
+    case "$name" in
+      claude) out=$(printf '%s' "$input" | timeout "$AGENT_TIMEOUT" claude -p 2>/dev/null);;
+      codex)  out=$(printf '%s' "$input" | timeout "$AGENT_TIMEOUT" codex exec -s read-only 2>/dev/null);;
+      cursor) out=$(timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask \
+        --workspace "$SKILL_ROOT" "$input" 2>/dev/null);;
+    esac
+  else
+    case "$name" in
+      claude) out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$CODE_PROMPT" 2>/dev/null);;
+      codex)  out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$CODE_PROMPT" 2>/dev/null);;
+      cursor) out=$(printf '%s\n\n%s' "$CODE_PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null);;
+    esac
+  fi
   if [ -z "${out// }" ]; then echo "  ! $name: no output (skipped)" >&2; return 0; fi
-  local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; *) icon="🤖";; esac
-  # Echo the review to stdout so the agent that launched the relay can read it,
-  # address the findings, push, and re-run (the iterate loop). Single printf to
-  # stay roughly atomic under --parallel.
-  printf '\n========== %s review ==========\n%s\n===============================\n' "${name^}" "$out"
-  # idempotent: remove any previous review from the SAME agent on this PR
+  local icon tag; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; *) icon="🤖";; esac
+  tag="$(review_tag "$name")"
+  printf '\n========== %s ==========\n%s\n===============================\n' "$tag" "$out"
   if [ -n "$REPO" ]; then
     for id in $(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-                  --jq ".[] | select(.body|contains(\"${name^} review (automated cross-review)\")) | .id" 2>/dev/null); do
+                  --jq ".[] | select(.body|contains(\"$tag\")) | .id" 2>/dev/null); do
       gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1 || true
     done
   fi
-  gh pr comment "$PR" --body "## ${icon} ${name^} review (automated cross-review)
+  gh pr comment "$PR" --body "## ${icon} ${tag}
 
 ${out}
 
-<sub>via pr-review-relay · author: ${AUTHOR:-?}</sub>" >/dev/null \
+<sub>via pr-review-relay · mode: ${MODE} · author: ${AUTHOR:-?}</sub>" >/dev/null \
     && echo "  ✓ $name review posted" || echo "  ! $name: failed to post comment" >&2
 }
 
