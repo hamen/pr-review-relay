@@ -66,8 +66,6 @@ pr-review-relay --author claude            # claude opened the PR → codex + cu
 pr-review-relay --pr 47 --parallel         # explicit PR, reviewers run concurrently
 pr-review-relay --pr 47 --reviewers codex  # only one reviewer
 pr-review-relay --dry-run                  # show what it would do, run no agents
-pr-review-relay --mode google-style \
-  --kb-path ~/code/dac-audit-skill/knowledge --author claude --parallel
 ```
 
 Flags:
@@ -79,8 +77,6 @@ Flags:
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor`. |
 | `--parallel` | Run the reviewers concurrently. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
-| `--mode code\|google-style` | `code` = bugs/security (default). `google-style` = doc prose vs [dac-audit-skill](https://github.com/hamen/dac-audit-skill) knowledge base. |
-| `--kb-path <dir>` | Knowledge root (`manifest.json` inside). Required for `google-style` unless `DAC_KB_PATH` is set. |
 | `--max-rounds N` | Hard cap on review rounds per PR (default `3`, or `$PR_RELAY_MAX_ROUNDS`). |
 | `--reset` | Reset the round counter for this PR (force another round past the cap). |
 
