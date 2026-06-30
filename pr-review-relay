@@ -100,6 +100,12 @@ If it looks good, say so in one line.
 P
 fi
 PROMPT="${CONTEXT_BLOCK}${BASE}"
+# Link mode embeds the diff as a FALLBACK so no reviewer comes back empty if its
+# sandbox can't run `gh` (e.g. codex read-only). Capable agents still fetch the
+# full PR per the prompt; this is only a safety net.
+if [ "$MODE" = link ]; then
+  PROMPT=$(printf '%s\n\n---\n## Fallback: the PR diff\nPrefer fetching the full PR with the `gh` commands above — you get the whole changed files, not just these hunks. If your sandbox cannot run `gh`, review this diff instead so you never return empty:\n\n```diff\n%s\n```\n' "$PROMPT" "$DIFF")
+fi
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity) echo agy;; *) echo "";; esac; }
 

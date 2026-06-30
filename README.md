@@ -84,7 +84,7 @@ Flags:
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
-| `--link` *(default)* | Hand reviewers the PR reference; each fetches it itself (`gh pr view`/`gh pr diff`) and reads the full files in context. |
+| `--link` *(default)* | Hand reviewers the PR reference; each fetches it itself (`gh pr view`/`gh pr diff`) and reads the full files in context. The diff is also embedded as a fallback so a reviewer whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still reviews something. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
 | `--parallel` | Run the reviewers concurrently. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
@@ -155,8 +155,9 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 2. For each reviewer (except `--author`), runs the agent **headless and read-only** with a focused
    review prompt. By default (**`--link`**) the prompt hands the agent the PR reference and tells it to
    fetch the PR itself (`gh pr view`/`gh pr diff`) and read the changed files in context — so it reviews
-   the *whole* PR, not just a diff snapshot. With **`--diff`** the raw diff is piped instead. A
-   **`--context-file`** is prepended to the prompt so every reviewer reads and verifies against it.
+   the *whole* PR, not just a diff snapshot. The diff is also embedded as a **fallback** so a reviewer
+   whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still returns a review. With **`--diff`**
+   only the raw diff is sent. A **`--context-file`** is prepended so every reviewer verifies against it.
 3. Posts each review as a PR comment via `gh pr comment`, tagged per agent (🟣 Claude / 🟢 Codex /
    🔵 Cursor / 🟠 Antigravity).
 4. **Idempotent:** before posting, it deletes any previous review from the *same* agent on that PR,
@@ -171,8 +172,9 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in
-  context — deeper than a diff snapshot. Pass `--diff` for the older diff-on-stdin behaviour (faster,
-  but the agent only sees the diff unless it opens files). Either way the agent runs in the repo.
+  context — deeper than a diff snapshot. The diff is embedded as a fallback, so a sandbox that can't run
+  `gh` (notably `codex exec --read-only`) still reviews the diff instead of returning nothing. Pass
+  `--diff` for the older diff-only behaviour. Either way the agent runs in the repo.
 - **Verify against sources** with `--context-file <path>`: the document is prepended to every
   reviewer's prompt, so they cross-check the PR against e.g. an official spec or API reference instead
   of relying on memory. The reviewer comment is footnoted with the context file's name.
