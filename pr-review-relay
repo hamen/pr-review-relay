@@ -2,26 +2,37 @@
 # pr-review-relay — hand a PR off to the OTHER agents for cross-review.
 #
 # Whoever created the PR calls this with --author <self>. The other agents
-# (claude / codex / cursor) review the PR headless + read-only and post their
-# review as a PR comment. The author auto-excludes itself.
+# (claude / codex / cursor / antigravity) review the PR headless + read-only and
+# post their review as a PR comment. The author auto-excludes itself.
+#
+# By default the reviewers are handed the PR *reference* and fetch it themselves
+# (gh pr view/diff) — they get the full PR: title, body, discussion, and every
+# changed file in context, not just a diff snapshot. Pass --diff for the older
+# diff-on-stdin behaviour. Pass --context-file <path> to prepend a document
+# (docs, specs, API references) that every reviewer must read and verify against.
 #
 # Usage:
-#   pr-review-relay [--author claude|codex|cursor] [--pr <number|url>] \
-#                   [--reviewers claude,codex,cursor] [--parallel] [--dry-run]
+#   pr-review-relay [--author claude|codex|cursor|antigravity] [--pr <number|url>] \
+#                   [--reviewers claude,codex,cursor,antigravity] [--parallel] \
+#                   [--context-file <path>] [--diff] [--dry-run]
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 set -uo pipefail
 
 AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+CONTEXT_FILE=""; MODE="link"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --author)     AUTHOR="$2"; shift 2;;
-    --pr)         PR="$2"; shift 2;;
-    --reviewers)  REVIEWERS="$2"; shift 2;;
-    --parallel)   PARALLEL=1; shift;;
-    --dry-run)    DRY=1; shift;;
-    --max-rounds) MAX_ROUNDS="$2"; shift 2;;
-    --reset)      RESET=1; shift;;
-    -h|--help)    sed -n '2,11p' "$0"; exit 0;;
+    --author)       AUTHOR="$2"; shift 2;;
+    --pr)           PR="$2"; shift 2;;
+    --reviewers)    REVIEWERS="$2"; shift 2;;
+    --parallel)     PARALLEL=1; shift;;
+    --context-file) CONTEXT_FILE="$2"; shift 2;;
+    --diff)         MODE="diff"; shift;;
+    --link)         MODE="link"; shift;;
+    --dry-run)      DRY=1; shift;;
+    --max-rounds)   MAX_ROUNDS="$2"; shift 2;;
+    --reset)        RESET=1; shift;;
+    -h|--help)      sed -n '2,18p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -31,11 +42,19 @@ command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none}"
+echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE"
 
 DIFF=$(gh pr diff "$PR" 2>/dev/null)
 [ -z "$DIFF" ] && { echo "Empty diff or cannot read PR #$PR."; exit 1; }
 echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes"
+
+# --- Optional context document prepended to every reviewer's prompt ----------
+CONTEXT_BLOCK=""
+if [ -n "$CONTEXT_FILE" ]; then
+  [ -f "$CONTEXT_FILE" ] || { echo "context file not found: $CONTEXT_FILE" >&2; exit 1; }
+  CONTEXT_BLOCK=$(printf '## Provided context — read this and verify the PR against it\n\n%s\n\n---\n\n' "$(cat "$CONTEXT_FILE")")
+  echo "  context: $CONTEXT_FILE ($(wc -c < "$CONTEXT_FILE") bytes)"
+fi
 
 # --- Hard loop guard: cap the number of review rounds per PR ---------------
 # Prevents an endless read→fix→re-run cycle. Counter is per repo+PR, kept in a
@@ -58,23 +77,50 @@ fi
 [ "$DRY" = 0 ] && echo $((ROUND + 1)) > "$ROUND_FILE"
 echo "  review round: $((ROUND + ( DRY==0 ? 1 : 0 )))/$MAX_ROUNDS"
 
-read -r -d '' PROMPT <<'P' || true
+# --- Build the review prompt -------------------------------------------------
+if [ "$MODE" = diff ]; then
+  read -r -d '' BASE <<'P' || true
 You are reviewing a pull request. Review the diff (provided on stdin) for correctness
 bugs, security issues, broken edge cases, and clear design/maintainability problems.
 You may read files in the current repo for context, but DO NOT modify anything.
 Be concise. Group findings by severity: Blocker / Should-fix / Nit.
 If it looks good, say so in one line.
 P
+else
+  read -r -d '' BASE <<P || true
+You are reviewing an OPEN pull request: PR #$PR in $REPO ${PR_URL:+($PR_URL)}.
+Go read it YOURSELF before reviewing — you have read-only repo + gh access:
+  gh pr view $PR      # title, body, discussion
+  gh pr diff $PR      # the change
+Read the files the diff touches (and anything the PR or the context above references)
+for full context — not just the diff. Then review for correctness bugs, security
+issues, broken edge cases, and clear design/maintainability problems. DO NOT modify
+anything. Be concise. Group findings by severity: Blocker / Should-fix / Nit.
+If it looks good, say so in one line.
+P
+fi
+PROMPT="${CONTEXT_BLOCK}${BASE}"
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity) echo agy;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out=""
+  local name="$1" out="" feed=""
+  [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
   case "$name" in
-    claude)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null);;
-    codex)        out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null);;
-    cursor)       out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null);;
-    antigravity)  out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>/dev/null);;
+    claude)       out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null);;
+    codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null);;
+    cursor)
+      if [ "$MODE" = diff ]; then
+        out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null)
+      else
+        out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null)
+      fi;;
+    antigravity)
+      if [ "$MODE" = diff ]; then
+        out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>/dev/null)
+      else
+        out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>/dev/null)
+      fi;;
   esac
   if [ -z "${out// }" ]; then echo "  ! $name: no output (skipped)" >&2; return 0; fi
   local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; antigravity) icon="🟠";; *) icon="🤖";; esac
@@ -93,7 +139,7 @@ review_with() {
 
 ${out}
 
-<sub>via pr-review-relay · author: ${AUTHOR:-?}</sub>" >/dev/null \
+<sub>via pr-review-relay · author: ${AUTHOR:-?}${CONTEXT_FILE:+ · context: $(basename "$CONTEXT_FILE")}</sub>" >/dev/null \
     && echo "  ✓ $name review posted" || echo "  ! $name: failed to post comment" >&2
 }
 

@@ -71,6 +71,8 @@ pr-review-relay --author claude                    # claude opened the PR → co
 pr-review-relay --pr 47 --parallel                 # explicit PR, reviewers run concurrently
 pr-review-relay --pr 47 --reviewers codex          # only one reviewer
 pr-review-relay --pr 47 --reviewers claude,agy     # pick specific reviewers
+pr-review-relay --context-file SPEC.md             # make every reviewer read & verify against SPEC.md
+pr-review-relay --diff                             # old behaviour: pipe the diff instead of a PR link
 pr-review-relay --dry-run                          # show what it would do, run no agents
 ```
 
@@ -81,6 +83,9 @@ Flags:
 | `--author <name>` | The agent that opened the PR. It auto-excludes itself from reviewing. |
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. |
+| `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
+| `--link` *(default)* | Hand reviewers the PR reference; each fetches it itself (`gh pr view`/`gh pr diff`) and reads the full files in context. |
+| `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
 | `--parallel` | Run the reviewers concurrently. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
 | `--max-rounds N` | Hard cap on review rounds per PR (default `3`, or `$PR_RELAY_MAX_ROUNDS`). |
@@ -145,9 +150,13 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 
 ## 🔍 How it works
 
-1. Resolves the PR (current branch or `--pr`) and fetches the diff with `gh pr diff`.
-2. For each reviewer (except `--author`), runs the agent **headless and read-only**, feeding it the
-   diff plus a focused review prompt. The agent runs in the repo, so it can read files for context.
+1. Resolves the PR (current branch or `--pr`) and reads the diff with `gh pr diff` (used as a sanity
+   guard and for the line/byte summary).
+2. For each reviewer (except `--author`), runs the agent **headless and read-only** with a focused
+   review prompt. By default (**`--link`**) the prompt hands the agent the PR reference and tells it to
+   fetch the PR itself (`gh pr view`/`gh pr diff`) and read the changed files in context — so it reviews
+   the *whole* PR, not just a diff snapshot. With **`--diff`** the raw diff is piped instead. A
+   **`--context-file`** is prepended to the prompt so every reviewer reads and verifies against it.
 3. Posts each review as a PR comment via `gh pr comment`, tagged per agent (🟣 Claude / 🟢 Codex /
    🔵 Cursor / 🟠 Antigravity).
 4. **Idempotent:** before posting, it deletes any previous review from the *same* agent on that PR,
@@ -161,8 +170,12 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
   permission prompts; the prompt itself is read-only).
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
-- Reviews are **diff-centric** (the agent gets the diff and can read repo files). For deeper context
-  you can `gh pr checkout` the PR branch before running.
+- **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in
+  context — deeper than a diff snapshot. Pass `--diff` for the older diff-on-stdin behaviour (faster,
+  but the agent only sees the diff unless it opens files). Either way the agent runs in the repo.
+- **Verify against sources** with `--context-file <path>`: the document is prepended to every
+  reviewer's prompt, so they cross-check the PR against e.g. an official spec or API reference instead
+  of relying on memory. The reviewer comment is footnoted with the context file's name.
 - Runs on your machine, so it works when your machine is on. It's a local relay, not a hosted bot.
 
 ## 📄 License
