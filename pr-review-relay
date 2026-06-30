@@ -11,12 +11,19 @@
 # diff-on-stdin behaviour. Pass --context-file <path> to prepend a document
 # (docs, specs, API references) that every reviewer must read and verify against.
 #
+# Each review is posted COLLAPSED (<details>/<summary>, forum-style hide/show)
+# so the PR page stays clean — expand a comment to read it. After consensus,
+# put the synthesized work card in the PR description with pr-review-consensus.
+#
 # Usage:
 #   pr-review-relay [--author claude|codex|cursor|antigravity] [--pr <number|url>] \
 #                   [--reviewers claude,codex,cursor,antigravity] [--parallel] \
 #                   [--context-file <path>] [--diff] [--dry-run]
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WRAP_COMMENT="$SCRIPT_DIR/wrap-collapsed-pr-comment.mjs"
 
 AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 CONTEXT_FILE=""; MODE="link"
@@ -32,12 +39,13 @@ while [ $# -gt 0 ]; do
     --dry-run)      DRY=1; shift;;
     --max-rounds)   MAX_ROUNDS="$2"; shift 2;;
     --reset)        RESET=1; shift;;
-    -h|--help)      sed -n '2,18p' "$0"; exit 0;;
+    -h|--help)      sed -n '2,22p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
 
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
+case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
 [ -z "$PR" ] && PR=$(gh pr view --json number -q .number 2>/dev/null)
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
@@ -107,7 +115,7 @@ if [ "$MODE" = link ]; then
   PROMPT=$(printf '%s\n\n---\n## Fallback: the PR diff\nPrefer fetching the full PR with the `gh` commands above — you get the whole changed files, not just these hunks. If your sandbox cannot run `gh`, review this diff instead so you never return empty:\n\n```diff\n%s\n```\n' "$PROMPT" "$DIFF")
 fi
 
-tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity) echo agy;; *) echo "";; esac; }
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; *) echo "";; esac; }
 
 review_with() {
   local name="$1" out="" feed=""
@@ -141,17 +149,26 @@ review_with() {
       gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1 || true
     done
   fi
-  gh pr comment "$PR" --body "## ${icon} ${name^} review (automated cross-review)
-
-${out}
-
-<sub>via pr-review-relay · author: ${AUTHOR:-?}${CONTEXT_FILE:+ · context: $(basename "$CONTEXT_FILE")}</sub>" >/dev/null \
-    && echo "  ✓ $name review posted" || echo "  ! $name: failed to post comment" >&2
+  # Post the review COLLAPSED: wrap it in <details>/<summary> via the helper so
+  # the PR page shows a one-line toggle (forum-style hide/show) per reviewer.
+  local footer comment_body out_file
+  footer="<sub>via pr-review-relay · author: ${AUTHOR:-?}${CONTEXT_FILE:+ · context: $(basename "$CONTEXT_FILE")}</sub>"
+  comment_body="$(mktemp)"; out_file="$(mktemp)"
+  printf '%s' "$out" > "$out_file"
+  node "$WRAP_COMMENT" \
+    --summary "${icon} ${name^} review (automated cross-review)" \
+    --footer "$footer" \
+    --file "$out_file" > "$comment_body"
+  rm -f "$out_file"
+  gh pr comment "$PR" --body-file "$comment_body" >/dev/null \
+    && echo "  ✓ $name review posted (collapsed)" || echo "  ! $name: failed to post comment" >&2
+  rm -f "$comment_body"
 }
 
 IFS=',' read -ra LIST <<< "$REVIEWERS"
 for r in "${LIST[@]}"; do
   r="${r// }"
+  [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
   local_tool=$(tool_for "$r")
   [ -z "$local_tool" ] && { echo "  ! unknown reviewer '$r' (skip)"; continue; }

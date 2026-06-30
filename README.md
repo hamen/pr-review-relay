@@ -49,18 +49,26 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟣 [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code) — uses `claude -p`
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`
-  - 🟠 [`agy`](https://antigravity.dev) (Antigravity CLI) — uses `agy -p`
+  - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
 
 You only need the agents you actually want as reviewers.
 
 ## ⚡ Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hamen/pr-review-relay/main/pr-review-relay \
-  -o ~/.local/bin/pr-review-relay
-chmod +x ~/.local/bin/pr-review-relay
+BIN=~/.local/bin
+mkdir -p "$BIN"
+REPO=https://raw.githubusercontent.com/hamen/pr-review-relay/main
+curl -fsSL "$REPO/pr-review-relay" -o "$BIN/pr-review-relay"
+curl -fsSL "$REPO/pr-review-fetch" -o "$BIN/pr-review-fetch"
+curl -fsSL "$REPO/pr-review-collapse-comments" -o "$BIN/pr-review-collapse-comments"
+curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
+curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
+chmod +x "$BIN/pr-review-relay" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
 # make sure ~/.local/bin is on your PATH
 ```
+
+`pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too.
 
 ## 🚀 Usage
 
@@ -113,7 +121,10 @@ instructions file (these are global, so they apply in every repo):
 > After you open a Pull Request, run `pr-review-relay --author cursor`.
 
 **🟠 Antigravity** — `~/.antigravity/AGENTS.md` (or equivalent):
-> After you open a Pull Request, run `pr-review-relay --author antigravity`.
+> After you open a Pull Request, run `pr-review-relay --author antigravity` (or `--author agy`).
+> Use `agy -p` from a normal shell — not from inside the interactive agy chat.
+
+> **Note:** the relay invokes Antigravity as `agy --dangerously-skip-permissions -p` (headless, read-only review).
 
 Now whoever opens the PR, the others review it — no manual step.
 
@@ -129,6 +140,10 @@ A typical agent instruction to make this a loop:
 > After opening a PR, run `pr-review-relay --author <self>`. Read the reviews it prints, address every
 > **Blocker** and **Should-fix**, commit and push, then run it again. Repeat until no blockers remain
 > (max ~3 rounds), then summarize what you changed.
+>
+> When reviewers agree on what still matters, save a **consensus work card** (only agreed Blockers /
+> Should-fix / Nits) and run `pr-review-consensus --consensus-file path.md` so the PR description
+> shows the consensus and cross-review comments stay collapsed.
 
 Need to re-read the latest reviews later (e.g. a slower reviewer landed after you moved on)? Use the
 companion command:
@@ -137,6 +152,36 @@ companion command:
 pr-review-fetch         # prints the cross-review comments for the current branch's PR
 pr-review-fetch 47      # …for a specific PR
 ```
+
+## 📋 Consensus + collapsed reviews (clean PR page)
+
+Cross-review comments are posted **collapsed** by default (`<details>/<summary>` — click to expand, like forum hide/show). The **PR description** stays the place readers focus on after you synthesize consensus.
+
+**Workflow:**
+
+1. Open PR → `pr-review-relay --author <self>` (iterate fix/push/re-run until blockers are gone).
+2. Read all review comments (`pr-review-fetch`) and write a **consensus work card** (only items multiple reviewers agreed on — Blockers / Should-fix / Nits).
+3. Apply consensus to the PR description and collapse any still-expanded review comments:
+
+```bash
+pr-review-consensus --consensus-file reviews/pr-47-consensus.md
+# or: pr-review-consensus --pr 47 --consensus-file path.md
+```
+
+| Command | Purpose |
+|---------|---------|
+| `pr-review-consensus` | Replace PR body with consensus markdown; collapse cross-review comments |
+| `pr-review-collapse-comments` | Collapse existing relay comments only (no body change) |
+| `--append-original` | Keep original PR description in a collapsed block at the bottom |
+| `--no-collapse` | Update body only, leave comment expand state unchanged |
+
+Retrofit old PRs (comments only):
+
+```bash
+pr-review-collapse-comments 47
+```
+
+Consensus file format: same idea as dac-audit-skill issue bodies — summary table, **Blockers (consensus)**, **Should-fix (consensus)**, optional Consider. The file becomes the PR description (plus a PR link header).
 
 ## 🛡️ Loop safety (no runaway iteration)
 
@@ -158,7 +203,8 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
    the *whole* PR, not just a diff snapshot. The diff is also embedded as a **fallback** so a reviewer
    whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still returns a review. With **`--diff`**
    only the raw diff is sent. A **`--context-file`** is prepended so every reviewer verifies against it.
-3. Posts each review as a PR comment via `gh pr comment`, tagged per agent (🟣 Claude / 🟢 Codex /
+3. Posts each review as a **collapsed** PR comment via `gh pr comment` (forum-style `<details>`),
+   tagged per agent (🟣 Claude / 🟢 Codex /
    🔵 Cursor / 🟠 Antigravity).
 4. **Idempotent:** before posting, it deletes any previous review from the *same* agent on that PR,
    so re-runs replace rather than duplicate — one current review per agent.
@@ -178,6 +224,7 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 - **Verify against sources** with `--context-file <path>`: the document is prepended to every
   reviewer's prompt, so they cross-check the PR against e.g. an official spec or API reference instead
   of relying on memory. The reviewer comment is footnoted with the context file's name.
+- **Antigravity** needs `agy` on PATH; invoke `agy -p` from zsh/bash (not inside the agy TUI). In some sandboxes it may hang — run relay from your Mac terminal if needed.
 - Runs on your machine, so it works when your machine is on. It's a local relay, not a hosted bot.
 
 ## 📄 License
