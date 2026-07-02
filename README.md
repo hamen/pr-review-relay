@@ -80,12 +80,19 @@ The scripts are bash-only (`#!/usr/bin/env bash`) — there is no native PowerSh
 run everything below.
 
 1. Clone (or download) this repo somewhere permanent, e.g. `C:\Users\<you>\Project\Work\pr-review-relay`.
-2. Add that repo folder to your **user PATH** so the scripts can be found by name from any directory:
+   This repo ships a `.gitattributes` that forces LF line endings on the scripts, so a normal
+   `git clone` is safe even if your global `core.autocrlf` is set to `true` — no CRLF-related
+   `\r`-in-shebang errors under Bash.
+2. Add that repo folder to your **user PATH** so the scripts can be found by name from any directory.
+   Read and update the *user*-scoped PATH explicitly — don't use `$env:Path`, since that's the merged
+   effective PATH (machine + user) for the current process, and writing it back would copy
+   machine-level entries into the user PATH and bloat it over time:
 
    ```powershell
+   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
    [Environment]::SetEnvironmentVariable(
      'Path',
-     $env:Path + ';C:\Users\<you>\Project\Work\pr-review-relay',
+     $userPath + ';C:\Users\<you>\Project\Work\pr-review-relay',
      'User'
    )
    ```
@@ -93,9 +100,10 @@ run everything below.
    PATH yet — add it the same way:
 
    ```powershell
+   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
    [Environment]::SetEnvironmentVariable(
      'Path',
-     $env:Path + ';C:\Program Files\Git\bin',
+     $userPath + ';C:\Program Files\Git\bin',
      'User'
    )
    ```
