@@ -79,35 +79,37 @@ The scripts are bash-only (`#!/usr/bin/env bash`) — there is no native PowerSh
 [Git for Windows](https://git-scm.com/download/win) for its bundled Git Bash, which is enough to
 run everything below.
 
-1. Clone (or download) this repo somewhere permanent, e.g. `C:\Users\<you>\Project\Work\pr-review-relay`.
+1. `git clone` this repo somewhere permanent, e.g. `C:\Users\<you>\Project\Work\pr-review-relay`.
    This repo ships a `.gitattributes` that forces LF line endings on the scripts, so a normal
    `git clone` is safe even if your global `core.autocrlf` is set to `true` — no CRLF-related
-   `\r`-in-shebang errors under Bash.
+   `\r`-in-shebang errors under Bash. (If you instead download a ZIP, its extracted files won't go
+   through Git's checkout filters, so verify the scripts have LF endings before running them.)
 2. Add that repo folder to your **user PATH** so the scripts can be found by name from any directory.
    Read and update the *user*-scoped PATH explicitly — don't use `$env:Path`, since that's the merged
    effective PATH (machine + user) for the current process, and writing it back would copy
-   machine-level entries into the user PATH and bloat it over time:
+   machine-level entries into the user PATH and bloat it over time. Guard the append so re-running
+   this doesn't duplicate the entry:
 
    ```powershell
+   $repoDir = 'C:\Users\<you>\Project\Work\pr-review-relay'
    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-   [Environment]::SetEnvironmentVariable(
-     'Path',
-     $userPath + ';C:\Users\<you>\Project\Work\pr-review-relay',
-     'User'
-   )
+   if ($userPath -notlike "*$repoDir*") {
+     [Environment]::SetEnvironmentVariable('Path', "$userPath;$repoDir", 'User')
+   }
    ```
-3. If PowerShell reports `bash: The term 'bash' is not recognized`, Git's bin folder isn't on your
-   PATH yet — add it the same way:
+3. Make `bash` resolve without putting all of Git's `bin` (a large pile of GNU tooling) on your
+   PATH, which would change command resolution globally in every PowerShell/cmd session. Instead,
+   add a small function to your PowerShell profile (`notepad $PROFILE`) that points at `bash.exe`
+   directly:
 
    ```powershell
-   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-   [Environment]::SetEnvironmentVariable(
-     'Path',
-     $userPath + ';C:\Program Files\Git\bin',
-     'User'
-   )
+   function bash { & "C:\Program Files\Git\bin\bash.exe" @args }
    ```
-4. **Open a new PowerShell window.** PATH changes only apply to new processes, not the current session.
+
+   (Adjust the path if Git for Windows is installed elsewhere.) This gives you a `bash` command in
+   PowerShell without exposing the rest of Git's `bin` directory on PATH.
+4. **Open a new PowerShell window.** PATH changes and profile edits only apply to new processes,
+   not the current session.
 
 From then on, invoke every script from PowerShell with an explicit `bash` prefix, e.g.:
 
