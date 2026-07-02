@@ -55,6 +55,8 @@ You only need the agents you actually want as reviewers.
 
 ## ⚡ Install
 
+### 🐧 Linux / macOS
+
 ```bash
 BIN=~/.local/bin
 mkdir -p "$BIN"
@@ -69,6 +71,57 @@ chmod +x "$BIN/pr-review-relay" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-
 ```
 
 `pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too.
+
+### 🪟 Windows
+
+The scripts are bash-only (`#!/usr/bin/env bash`) — there is no native PowerShell support, so
+**PowerShell cannot execute them directly** (no shebang support). You need
+[Git for Windows](https://git-scm.com/download/win) for its bundled Git Bash, which is enough to
+run everything below.
+
+1. `git clone` this repo somewhere permanent, e.g. `C:\Users\<you>\Project\Work\pr-review-relay`.
+   This repo ships a `.gitattributes` that forces LF line endings on the scripts, so a normal
+   `git clone` is safe even if your global `core.autocrlf` is set to `true` — no CRLF-related
+   `\r`-in-shebang errors under Bash. (If you instead download a ZIP, its extracted files won't go
+   through Git's checkout filters, so verify the scripts have LF endings before running them.)
+2. Add that repo folder to your **user PATH** so the scripts can be found by name from any directory.
+   Read and update the *user*-scoped PATH explicitly — don't use `$env:Path`, since that's the merged
+   effective PATH (machine + user) for the current process, and writing it back would copy
+   machine-level entries into the user PATH and bloat it over time. Guard the append so re-running
+   this doesn't duplicate the entry:
+
+   ```powershell
+   $repoDir = 'C:\Users\<you>\Project\Work\pr-review-relay'
+   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+   if ($userPath -notlike "*$repoDir*") {
+     [Environment]::SetEnvironmentVariable('Path', "$userPath;$repoDir", 'User')
+   }
+   ```
+3. Make `bash` resolve without putting all of Git's `bin` (a large pile of GNU tooling) on your
+   PATH, which would change command resolution globally in every PowerShell/cmd session. Instead,
+   add a small function to your PowerShell profile (`notepad $PROFILE`) that points at `bash.exe`
+   directly:
+
+   ```powershell
+   function bash { & "C:\Program Files\Git\bin\bash.exe" @args }
+   ```
+
+   (Adjust the path if Git for Windows is installed elsewhere.) This gives you a `bash` command in
+   PowerShell without exposing the rest of Git's `bin` directory on PATH.
+4. **Open a new PowerShell window.** PATH changes and profile edits only apply to new processes,
+   not the current session.
+
+From then on, invoke every script from PowerShell with an explicit `bash` prefix, e.g.:
+
+```powershell
+bash pr-review-relay --author claude
+bash pr-review-relay --dry-run --author claude
+```
+
+Run it from **inside the repo you want reviewed** (`cd` there first) — not from inside the
+pr-review-relay repo itself — since the relay resolves the PR for the current working repo's branch.
+
+`wrap-collapsed-pr-comment.mjs` still needs to sit next to the scripts, same as on Linux/macOS.
 
 ## 🚀 Usage
 
