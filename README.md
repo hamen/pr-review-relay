@@ -55,6 +55,8 @@ You only need the agents you actually want as reviewers.
 
 ## ⚡ Install
 
+### 🐧 Linux / macOS
+
 ```bash
 BIN=~/.local/bin
 mkdir -p "$BIN"
@@ -69,6 +71,47 @@ chmod +x "$BIN/pr-review-relay" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-
 ```
 
 `pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too.
+
+### 🪟 Windows
+
+The scripts are bash-only (`#!/usr/bin/env bash`) — there is no native PowerShell support, so
+**PowerShell cannot execute them directly** (no shebang support). You need
+[Git for Windows](https://git-scm.com/download/win) for its bundled Git Bash, which is enough to
+run everything below.
+
+1. Clone (or download) this repo somewhere permanent, e.g. `C:\Users\<you>\Project\Work\pr-review-relay`.
+2. Add that repo folder to your **user PATH** so the scripts can be found by name from any directory:
+
+   ```powershell
+   [Environment]::SetEnvironmentVariable(
+     'Path',
+     $env:Path + ';C:\Users\<you>\Project\Work\pr-review-relay',
+     'User'
+   )
+   ```
+3. If PowerShell reports `bash: The term 'bash' is not recognized`, Git's bin folder isn't on your
+   PATH yet — add it the same way:
+
+   ```powershell
+   [Environment]::SetEnvironmentVariable(
+     'Path',
+     $env:Path + ';C:\Program Files\Git\bin',
+     'User'
+   )
+   ```
+4. **Open a new PowerShell window.** PATH changes only apply to new processes, not the current session.
+
+From then on, invoke every script from PowerShell with an explicit `bash` prefix, e.g.:
+
+```powershell
+bash pr-review-relay --author claude
+bash pr-review-relay --dry-run --author claude
+```
+
+Run it from **inside the repo you want reviewed** (`cd` there first) — not from inside the
+pr-review-relay repo itself — since the relay resolves the PR for the current working repo's branch.
+
+`wrap-collapsed-pr-comment.mjs` still needs to sit next to the scripts, same as on Linux/macOS.
 
 ## 🚀 Usage
 
