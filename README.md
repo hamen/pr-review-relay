@@ -62,15 +62,16 @@ BIN=~/.local/bin
 mkdir -p "$BIN"
 REPO=https://raw.githubusercontent.com/hamen/pr-review-relay/main
 curl -fsSL "$REPO/pr-review-relay" -o "$BIN/pr-review-relay"
+curl -fsSL "$REPO/review-local" -o "$BIN/review-local"
 curl -fsSL "$REPO/pr-review-fetch" -o "$BIN/pr-review-fetch"
 curl -fsSL "$REPO/pr-review-collapse-comments" -o "$BIN/pr-review-collapse-comments"
 curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
 curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
-chmod +x "$BIN/pr-review-relay" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
+chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
 # make sure ~/.local/bin is on your PATH
 ```
 
-`pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too.
+`pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too. `review-local` doesn't need it (it never posts anywhere).
 
 ### 🪟 Windows
 
@@ -116,6 +117,7 @@ From then on, invoke every script from PowerShell with an explicit `bash` prefix
 ```powershell
 bash pr-review-relay --author claude
 bash pr-review-relay --dry-run --author claude
+bash review-local --author claude
 ```
 
 Run it from **inside the repo you want reviewed** (`cd` there first) — not from inside the
@@ -158,6 +160,33 @@ Environment:
 |----------|---------|
 | `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. |
+
+## 🧪 Review before there's a PR (`review-local`)
+
+Same cross-review, but for a branch you haven't opened a PR for yet — no `gh`, no PR number, no
+posted comments. It diffs your **current checked-out branch** against a base ref, sends that diff
+to the other agents read-only, and prints each review straight to the screen. Use it to get a clean,
+already-reviewed branch before you push and open the PR.
+
+```bash
+review-local --author claude                        # claude wrote this branch → codex + cursor + antigravity review
+review-local --author claude --base develop          # diff against a different base ref (default: main)
+review-local --author claude --reviewers codex,agy   # pick specific reviewers
+review-local --author claude --parallel              # run reviewers concurrently
+```
+
+Flags:
+
+| Flag | Meaning |
+|------|---------|
+| `--author <name>` | The agent that wrote the branch. It auto-excludes itself from reviewing. |
+| `--base <ref>` | Ref to diff against. Default: `main`. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. |
+| `--parallel` | Run the reviewers concurrently. |
+
+The diff is piped to each reviewer over stdin (not embedded as a giant CLI argument), so it scales
+to large branches the same way `pr-review-relay --diff` does. Nothing is pushed or posted anywhere —
+`review-local` only ever prints to your terminal.
 
 ## 🔁 Make it automatic (the handoff)
 
