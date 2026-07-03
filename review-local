@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# review-local — cross-review the CURRENT CHECKED-OUT BRANCH, no PR required.
+#
+# Same idea as pr-review-relay --author <self>, but for branches that aren't
+# pushed / don't have a PR open yet. Diffs the current branch against a base
+# ref (default: main), sends that diff to the other agents (claude / codex /
+# cursor / antigravity) for a read-only review, and prints each review to the
+# screen. Nothing is pushed, nothing is posted anywhere — this is purely so
+# you get a clean, reviewed branch before you open the PR.
+#
+# Usage:
+#   review-local [--author claude|codex|cursor|antigravity] [--base <ref>] \
+#                [--reviewers claude,codex,cursor,antigravity] [--parallel]
+#   (run from inside the repo, on the branch you want reviewed)
+set -uo pipefail
+
+AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0
+AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --author)    AUTHOR="$2"; shift 2;;
+    --base)      BASE="$2"; shift 2;;
+    --reviewers) REVIEWERS="$2"; shift 2;;
+    --parallel)  PARALLEL=1; shift;;
+    -h|--help)   sed -n '2,17p' "$0"; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+[ -z "$BRANCH" ] && { echo "Not inside a git repo."; exit 1; }
+git rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "Base ref '$BASE' not found."; exit 1; }
+
+echo "▶ Local review for branch '$BRANCH' vs '$BASE' — author: ${AUTHOR:-none}"
+
+DIFF=$(git diff "$BASE...$BRANCH")
+[ -z "$DIFF" ] && { echo "No diff between $BASE and $BRANCH."; exit 1; }
+echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes"
+
+read -r -d '' PROMPT <<P || true
+You are reviewing an in-progress local branch ('$BRANCH', diffed against '$BASE')
+that has not yet been opened as a pull request. The diff is provided below.
+Review it for correctness bugs, security issues, broken edge cases, and clear
+design/maintainability problems. You may read files in the current repo for
+context, but DO NOT modify anything. Be concise. Group findings by severity:
+Blocker / Should-fix / Nit. If it looks good, say so in one line.
+
+\`\`\`diff
+$DIFF
+\`\`\`
+P
+
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; *) echo "";; esac; }
+
+review_with() {
+  local name="$1" out=""
+  case "$name" in
+    claude) out=$(timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null);;
+    codex)  out=$(timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null);;
+    cursor) out=$(timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask "$PROMPT" 2>/dev/null);;
+    antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>/dev/null);;
+  esac
+  if [ -z "${out// }" ]; then echo "  ! $name: no output (skipped)" >&2; return 0; fi
+  local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; antigravity) icon="🟠";; *) icon="🤖";; esac
+  printf '\n========== %s review ==========\n%s\n===============================\n' "${name^}" "$out"
+}
+
+IFS=',' read -ra LIST <<< "$REVIEWERS"
+for r in "${LIST[@]}"; do
+  r="${r// }"
+  [ "$r" = "agy" ] && r=antigravity
+  [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
+  local_tool=$(tool_for "$r")
+  [ -z "$local_tool" ] && { echo "  ! unknown reviewer '$r' (skip)"; continue; }
+  command -v "$local_tool" >/dev/null || { echo "  ! $local_tool not installed (skip $r)"; continue; }
+  echo "  → $r reviewing…"
+  if [ "$PARALLEL" = 1 ]; then review_with "$r" & else review_with "$r"; fi
+done
+[ "$PARALLEL" = 1 ] && wait
+echo "✔ Local review done."
