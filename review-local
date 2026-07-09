@@ -46,24 +46,49 @@ echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -
 read -r -d '' PROMPT <<P || true
 You are reviewing an in-progress local branch ('$BRANCH_LABEL', diffed against
 '$BASE') that has not yet been opened as a pull request. The diff is provided
-on stdin. Review it for correctness bugs, security issues, broken edge cases,
+below. Review it for correctness bugs, security issues, broken edge cases,
 and clear design/maintainability problems. You may read files in the current
 repo for context, but DO NOT modify anything. Be concise. Group findings by
 severity: Blocker / Should-fix / Nit. If it looks good, say so in one line.
 P
 
+# Prompt + diff go to every agent as ONE document on STDIN, never as an argv
+# element: Windows caps a process command line at ~32K chars, so a large diff
+# passed as an argument dies with "Argument list too long" before the agent
+# even starts.
+INPUT=$(printf '%s\n\n```diff\n%s\n```' "$PROMPT" "$DIFF")
+
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out=""
+  local name="$1" out="" rc=0 errf
+  errf="$(mktemp)"
   case "$name" in
-    claude) out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null);;
-    codex)  out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null);;
-    cursor) out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null);;
-    antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>/dev/null);;
+    claude)      out=$(printf '%s' "$INPUT" | timeout "$AGENT_TIMEOUT" claude -p 2>"$errf"); rc=$?;;
+    codex)       out=$(printf '%s' "$INPUT" | timeout "$AGENT_TIMEOUT" codex exec -s read-only - 2>"$errf"); rc=$?;;
+    cursor)      out=$(printf '%s' "$INPUT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
+    antigravity) out=$(printf '%s' "$INPUT" | timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p 2>"$errf"); rc=$?;;
   esac
-  if [ -z "${out// }" ]; then echo "  ! $name: no output (skipped)" >&2; return 0; fi
-  local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; antigravity) icon="🟠";; *) icon="🤖";; esac
+  # Never fail silently: if the agent produced no review, say why in human terms
+  # and show what it wrote on stderr.
+  if [ -z "${out// }" ]; then
+    local why="exited with code $rc"
+    case "$rc" in
+      0)   why="ran fine but returned an empty review";;
+      124) why="timed out after ${AGENT_TIMEOUT}s (raise PR_RELAY_AGENT_TIMEOUT)";;
+      126) why="found but could not be executed (exit 126)";;
+      127) why="command not found";;
+    esac
+    echo "  ! $name: no review — $why" >&2
+    # On timeout stderr only holds the agent's partial transcript — skip it.
+    if [ "$rc" != 124 ] && [ -s "$errf" ]; then
+      echo "    $name stderr (last 15 lines):" >&2
+      tail -n 15 "$errf" | sed 's/^/    │ /' >&2
+    fi
+    rm -f "$errf"; return 0
+  fi
+  [ "$rc" -ne 0 ] && echo "  ! $name: exited with code $rc — review may be truncated" >&2
+  rm -f "$errf"
   printf '\n========== %s review ==========\n%s\n===============================\n' "${name^}" "$out"
 }
 
