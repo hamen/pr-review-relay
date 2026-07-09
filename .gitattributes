@@ -1,4 +1,5 @@
 pr-review-relay text eol=lf
+review-local text eol=lf
 pr-review-fetch text eol=lf
 pr-review-collapse-comments text eol=lf
 pr-review-consensus text eol=lf
