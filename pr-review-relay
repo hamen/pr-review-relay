@@ -88,7 +88,7 @@ echo "  review round: $((ROUND + ( DRY==0 ? 1 : 0 )))/$MAX_ROUNDS"
 # --- Build the review prompt -------------------------------------------------
 if [ "$MODE" = diff ]; then
   read -r -d '' BASE <<'P' || true
-You are reviewing a pull request. Review the diff (provided on stdin) for correctness
+You are reviewing a pull request. Review the diff (provided below) for correctness
 bugs, security issues, broken edge cases, and clear design/maintainability problems.
 You may read files in the current repo for context, but DO NOT modify anything.
 Be concise. Group findings by severity: Blocker / Should-fix / Nit.
@@ -115,28 +115,47 @@ if [ "$MODE" = link ]; then
   PROMPT=$(printf '%s\n\n---\n## Fallback: the PR diff\nPrefer fetching the full PR with the `gh` commands above — you get the whole changed files, not just these hunks. If your sandbox cannot run `gh`, review this diff instead so you never return empty:\n\n```diff\n%s\n```\n' "$PROMPT" "$DIFF")
 fi
 
+# The whole prompt goes to every agent on STDIN, never as an argv element:
+# Windows caps a process command line at ~32K chars, so a prompt with an
+# embedded diff dies with "Argument list too long" before the agent starts.
+# Diff mode appends the diff to the prompt here; link mode already embeds it.
+if [ "$MODE" = diff ]; then
+  INPUT=$(printf '%s\n\n```diff\n%s\n```' "$PROMPT" "$DIFF")
+else
+  INPUT="$PROMPT"
+fi
+
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out="" feed=""
-  [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
+  local name="$1" out="" rc=0 errf
+  errf="$(mktemp)"
   case "$name" in
-    claude)       out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null);;
-    codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null);;
-    cursor)
-      if [ "$MODE" = diff ]; then
-        out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null)
-      else
-        out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null)
-      fi;;
-    antigravity)
-      if [ "$MODE" = diff ]; then
-        out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>/dev/null)
-      else
-        out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>/dev/null)
-      fi;;
+    claude)       out=$(printf '%s' "$INPUT" | timeout "$AGENT_TIMEOUT" claude -p 2>"$errf"); rc=$?;;
+    codex)        out=$(printf '%s' "$INPUT" | timeout "$AGENT_TIMEOUT" codex exec -s read-only - 2>"$errf"); rc=$?;;
+    cursor)       out=$(printf '%s' "$INPUT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
+    antigravity)  out=$(printf '%s' "$INPUT" | timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p 2>"$errf"); rc=$?;;
   esac
-  if [ -z "${out// }" ]; then echo "  ! $name: no output (skipped)" >&2; return 0; fi
+  # Never fail silently: if the agent produced no review, say why in human terms
+  # and show what it wrote on stderr.
+  if [ -z "${out// }" ]; then
+    local why="exited with code $rc"
+    case "$rc" in
+      0)   why="ran fine but returned an empty review";;
+      124) why="timed out after ${AGENT_TIMEOUT}s (raise PR_RELAY_AGENT_TIMEOUT)";;
+      126) why="found but could not be executed (exit 126)";;
+      127) why="command not found";;
+    esac
+    echo "  ! $name: no review — $why" >&2
+    # On timeout stderr only holds the agent's partial transcript — skip it.
+    if [ "$rc" != 124 ] && [ -s "$errf" ]; then
+      echo "    $name stderr (last 15 lines):" >&2
+      tail -n 15 "$errf" | sed 's/^/    │ /' >&2
+    fi
+    rm -f "$errf"; return 0
+  fi
+  [ "$rc" -ne 0 ] && echo "  ! $name: exited with code $rc — review may be truncated" >&2
+  rm -f "$errf"
   local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; antigravity) icon="🟠";; *) icon="🤖";; esac
   # Echo the review to stdout so the agent that launched the relay can read it,
   # address the findings, push, and re-run (the iterate loop). Single printf to
