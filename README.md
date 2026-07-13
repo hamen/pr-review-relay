@@ -145,7 +145,7 @@ Flags:
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
-| `--link` *(default)* | Hand reviewers the PR reference; each fetches it itself (`gh pr view`/`gh pr diff`) and reads the full files in context. The diff is also embedded as a fallback so a reviewer whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still reviews something — **but only when the diff is under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 40000).** Above that the fallback is omitted so a huge inline diff can't blow past an agent's prompt limit and make it return empty; reviewers just fetch the PR via `gh`. |
+| `--link` *(default)* | Hand reviewers the PR reference; each fetches it itself (`gh pr view`/`gh pr diff`) and reads the full files in context. The diff is also embedded as a fallback so a reviewer whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still reviews something — **but only when the diff is under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000).** Above that the fallback is omitted so a huge inline diff can't blow past an agent's prompt limit and make it return empty; reviewers just fetch the PR via `gh`. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
 | `--parallel` | Run the reviewers concurrently. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
@@ -255,7 +255,7 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
    fetch the PR itself (`gh pr view`/`gh pr diff`) and read the changed files in context — so it reviews
    the *whole* PR, not just a diff snapshot. The diff is also embedded as a **fallback** so a reviewer
    whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still returns a review — but the fallback
-   is **omitted for large diffs** (over `LINK_DIFF_FALLBACK_MAX_BYTES`, default 40000) so an oversized
+   is **omitted for large diffs** (over `LINK_DIFF_FALLBACK_MAX_BYTES`, default 100000) so an oversized
    inline diff can't exceed an agent's prompt limit and make it silently return empty; those reviewers
    fetch the PR via `gh` instead. With **`--diff`** only the raw diff is sent. A **`--context-file`** is
    prepended so every reviewer verifies against it.

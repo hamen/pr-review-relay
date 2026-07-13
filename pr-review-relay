@@ -115,8 +115,8 @@ PROMPT="${CONTEXT_BLOCK}${BASE}"
 # return empty (observed with codex/antigravity on 100KB+ PRs). Above a size
 # threshold, omit the fallback so the prompt stays small and reviewers fetch the
 # PR themselves via `gh` (the whole point of link mode). Tune via env
-# LINK_DIFF_FALLBACK_MAX_BYTES (default 40000; set 0 to always omit).
-LINK_DIFF_FALLBACK_MAX_BYTES="${LINK_DIFF_FALLBACK_MAX_BYTES:-40000}"
+# LINK_DIFF_FALLBACK_MAX_BYTES (default 100000; set 0 to always omit).
+LINK_DIFF_FALLBACK_MAX_BYTES="${LINK_DIFF_FALLBACK_MAX_BYTES:-100000}"
 if [ "$MODE" = link ]; then
   _diff_bytes=$(printf '%s' "$DIFF" | wc -c | tr -d ' ')
   if [ "$_diff_bytes" -le "$LINK_DIFF_FALLBACK_MAX_BYTES" ]; then
