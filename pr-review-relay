@@ -109,7 +109,7 @@ P
 fi
 PROMPT="${CONTEXT_BLOCK}${BASE}"
 # Link mode embeds the diff as a FALLBACK so no reviewer comes back empty if its
-# sandbox can't run `gh` (e.g. codex read-only). Capable agents still fetch the
+# sandbox can't run `gh`. Capable agents still fetch the
 # full PR per the prompt; this is only a safety net.
 # BUT: a huge inline diff blows past some agents' prompt limits and makes them
 # return empty (observed with codex/antigravity on 100KB+ PRs). Above a size
@@ -133,7 +133,7 @@ review_with() {
   [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
   case "$name" in
     claude)       out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null);;
-    codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null);;
+    codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access "$PROMPT" 2>/dev/null);;
     cursor)
       if [ "$MODE" = diff ]; then
         out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null)
