@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# review-local — cross-review the CURRENT CHECKED-OUT BRANCH, no PR required.
+#
+# Same idea as pr-review-relay --author <self>, but for branches that aren't
+# pushed / don't have a PR open yet. Diffs the current branch against a base
+# ref (default: main), sends that diff to the other agents (claude / codex /
+# cursor / antigravity / opencode) for a read-only review, and prints each
+# review to the screen. Nothing is pushed, nothing is posted anywhere — this is
+# purely so you get a clean, reviewed branch before you open the PR.
+#
+# Usage:
+#   review-local [--author claude|codex|cursor|antigravity|opencode] [--base <ref>] \
+#                [--reviewers claude,codex,cursor,antigravity] [--parallel]
+#   (run from inside the repo, on the branch you want reviewed)
+set -uo pipefail
+
+AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0
+AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --author)    need_value "$@"; AUTHOR="$2"; shift 2;;
+    --base)      need_value "$@"; BASE="$2"; shift 2;;
+    --reviewers) need_value "$@"; REVIEWERS="$2"; shift 2;;
+    --parallel)  PARALLEL=1; shift;;
+    -h|--help)   sed -n '2,14p' "$0"; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+[ -z "$BRANCH" ] && { echo "Not inside a git repo."; exit 1; }
+BRANCH_LABEL="$BRANCH"
+if [ "$BRANCH" = "HEAD" ]; then
+  BRANCH_LABEL="detached@$(git rev-parse --short HEAD 2>/dev/null)"
+fi
+git rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "Base ref '$BASE' not found."; exit 1; }
+
+echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHOR:-none}"
+
+DIFF=$(git diff "$BASE...$BRANCH")
+[ -z "$DIFF" ] && { echo "No diff between $BASE and $BRANCH_LABEL."; exit 1; }
+echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes"
+
+read -r -d '' PROMPT <<P || true
+You are reviewing an in-progress local branch ('$BRANCH_LABEL', diffed against
+'$BASE') that has not yet been opened as a pull request. The diff is provided
+to you (on stdin or appended below). Review it for correctness bugs, security
+issues, broken edge cases, and clear design/maintainability problems. You may
+read files in the current repo for context, but DO NOT modify anything. Be
+concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
+good, say so in one line.
+P
+
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
+
+# Agents that read stdin (claude / codex / cursor) get the diff piped in, so a
+# large diff never hits the process argv limit (Windows caps it at ~32K chars).
+# agy / opencode don't read a prompt from stdin, so they take prompt+diff as an
+# argument — same behaviour as pr-review-relay's --diff mode.
+review_with() {
+  local name="$1" out="" rc=0 errf
+  errf="$(mktemp)"
+  case "$name" in
+    claude)      out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>"$errf"); rc=$?;;
+    codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>"$errf"); rc=$?;;
+    cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
+    antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
+    opencode)    out=$(timeout "$AGENT_TIMEOUT" opencode run --dangerously-skip-permissions "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
+  esac
+  # Never fail silently: if the agent produced no review, say why in human terms
+  # and show what it wrote on stderr.
+  if [ -z "${out// }" ]; then
+    local why="exited with code $rc"
+    case "$rc" in
+      0)   why="ran fine but returned an empty review";;
+      124) why="timed out after ${AGENT_TIMEOUT}s (raise PR_RELAY_AGENT_TIMEOUT)";;
+      126) why="found but could not be executed (exit 126)";;
+      127) why="command not found";;
+    esac
+    echo "  ! $name: no review — $why" >&2
+    # On timeout stderr only holds the agent's partial transcript — skip it.
+    if [ "$rc" != 124 ] && [ -s "$errf" ]; then
+      echo "    $name stderr (last 15 lines):" >&2
+      tail -n 15 "$errf" | sed 's/^/    │ /' >&2
+    fi
+    rm -f "$errf"; return 0
+  fi
+  [ "$rc" -ne 0 ] && echo "  ! $name: exited with code $rc — review may be truncated" >&2
+  rm -f "$errf"
+  printf '\n========== %s review ==========\n%s\n===============================\n' "${name^}" "$out"
+}
+
+IFS=',' read -ra LIST <<< "$REVIEWERS"
+for r in "${LIST[@]}"; do
+  r="${r// }"
+  [ "$r" = "agy" ] && r=antigravity
+  [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
+  local_tool=$(tool_for "$r")
+  [ -z "$local_tool" ] && { echo "  ! unknown reviewer '$r' (skip)"; continue; }
+  command -v "$local_tool" >/dev/null || { echo "  ! $local_tool not installed (skip $r)"; continue; }
+  echo "  → $r reviewing…"
+  if [ "$PARALLEL" = 1 ]; then review_with "$r" & else review_with "$r"; fi
+done
+[ "$PARALLEL" = 1 ] && wait
+echo "✔ Local review done."
