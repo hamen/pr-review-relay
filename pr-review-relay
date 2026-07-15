@@ -2,8 +2,8 @@
 # pr-review-relay — hand a PR off to the OTHER agents for cross-review.
 #
 # Whoever created the PR calls this with --author <self>. The other agents
-# (claude / codex / cursor / antigravity) review the PR headless + read-only and
-# post their review as a PR comment. The author auto-excludes itself.
+# (claude / codex / cursor / antigravity / opencode) review the PR headless +
+# read-only and post their review as a PR comment. The author auto-excludes itself.
 #
 # By default the reviewers are handed the PR *reference* and fetch it themselves
 # (gh pr view/diff) — they get the full PR: title, body, discussion, and every
@@ -126,7 +126,7 @@ if [ "$MODE" = link ]; then
   fi
 fi
 
-tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; *) echo "";; esac; }
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
 
 review_with() {
   local name="$1" out="" feed=""
@@ -146,9 +146,15 @@ review_with() {
       else
         out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>/dev/null)
       fi;;
+    opencode)
+      if [ "$MODE" = diff ]; then
+        out=$(timeout "$AGENT_TIMEOUT" opencode run --dangerously-skip-permissions "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>/dev/null)
+      else
+        out=$(timeout "$AGENT_TIMEOUT" opencode run --dangerously-skip-permissions "$PROMPT" 2>/dev/null)
+      fi;;
   esac
   if [ -z "${out// }" ]; then echo "  ! $name: no output (skipped)" >&2; return 0; fi
-  local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; antigravity) icon="🟠";; *) icon="🤖";; esac
+  local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; antigravity) icon="🟠";; opencode) icon="⚪";; *) icon="🤖";; esac
   # Echo the review to stdout so the agent that launched the relay can read it,
   # address the findings, push, and re-run (the iterate loop). Single printf to
   # stay roughly atomic under --parallel.
