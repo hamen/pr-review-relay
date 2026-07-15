@@ -36,6 +36,23 @@ PR comments. Local, free (it uses the agent CLIs you already pay for), and idemp
 
 No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your machine.
 
+## 🆕 What's new
+
+**v1.0.0** — first tagged release. Everything below is in it:
+
+- **Five reviewers**: 🟣 Claude, 🟢 Codex, 🔵 Cursor, 🟠 Antigravity, and ⚪ **OpenCode** (opt-in).
+- **Link mode (default)**: each reviewer fetches the *whole* PR itself (`gh pr view`/`gh pr diff`) and
+  reads the changed files in context — not just a diff snapshot. A size-capped inline diff is embedded
+  as a fallback so a sandboxed reviewer never returns empty.
+- **`review-local`**: run the same cross-review on your **current branch before you open a PR** — no
+  `gh`, no PR number, nothing posted; reviews print straight to your terminal.
+- **No more silent skips**: when a reviewer produces nothing you now get a human-readable reason
+  (empty / timed out / not found / not executable) plus the tail of its stderr.
+- **Collapsed comments + consensus**: each review posts as a forum-style `<details>` block, and
+  `pr-review-consensus` synthesizes a single work card into the PR description.
+- **`--context-file`**: prepend a doc/spec/API reference so every reviewer verifies the PR against it.
+- **Bounded loop**: a per-PR round cap keeps read→fix→re-run from spiraling; re-runs are idempotent.
+
 ## 🤔 Why
 
 AI agents are great at *writing* code and decent at *reviewing* it — but a second (and third)
