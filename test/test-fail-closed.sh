@@ -12,7 +12,8 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RELAY="$HERE/../pr-review-relay"
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
+[ -n "$WORK" ] && [ -d "$WORK" ] || { echo "no temp dir" >&2; exit 1; }
 BIN="$WORK/bin"; mkdir -p "$BIN"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -119,6 +120,23 @@ if [ -e "$WORK/PWNED" ] || [ -e "$HOME/PWNED" ] || [ -e ./PWNED ]; then
 else
   echo "  ok   [-] traversal contained (no stray PWNED file)"; PASS=$((PASS+1))
 fi
+
+runx 0 "sequential run (no --parallel) → clean pass"    --reviewers claude,codex
+
+# default set with only a subset of CLIs installed → skip the missing ones, exit 0.
+# PATH excludes the real agent dir; BIN2 has gh+claude+codex (+node for the wrapper).
+BIN2="$WORK/bin2"; mkdir -p "$BIN2"
+for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN2/$t"; done
+ln -sf "$(command -v node)" "$BIN2/node" 2>/dev/null
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --parallel >/dev/null 2>&1
+rc=$?; if [ "$rc" = 0 ]; then echo "  ok   [0] default set, subset installed → skip missing, pass"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 0] default subset"; FAIL=$((FAIL+1)); fi
+
+# wrap helper: a review that merely MENTIONS <details> must still be wrapped with our summary.
+printf '## Heading\nThis review discusses a <details> element in the code.\n' > "$WORK/rev.md"
+wout=$(node "$HERE/../wrap-collapsed-pr-comment.mjs" --summary "MARK-42" --footer "<sub>f</sub>" --file "$WORK/rev.md")
+if printf '%s' "$wout" | grep -q "<summary>MARK-42</summary>"; then echo "  ok   [-] wrap keeps summary when body mentions <details>"; PASS=$((PASS+1)); else echo "  FAIL wrap dropped summary"; FAIL=$((FAIL+1)); fi
 
 # cap: pre-seed the round file at the cap, then a normal run must exit 4
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"

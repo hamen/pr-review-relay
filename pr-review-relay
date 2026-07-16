@@ -98,7 +98,9 @@ fi
 # --- Hard loop guard: cap the number of review rounds per PR ---------------
 # Prevents an endless read→fix→re-run cycle. Counter is per repo+PR, kept in a
 # cache file; auto-resets after 6h of inactivity (a fresh working session), or
-# manually with --reset. A real run (not --dry-run) consumes one round.
+# manually with --reset. A round is only CONSUMED once at least one reviewer
+# actually ran (see end of file) — a misconfigured machine where nobody runs
+# won't march the counter to the cap without ever getting a review.
 ROUND_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review-relay"; mkdir -p "$ROUND_DIR"
 ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
@@ -113,8 +115,7 @@ if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
   echo "   remaining items manually, or pass --reset to force another round." >&2
   exit 4   # distinct code: not a clean pass — escalate, don't treat as consensus
 fi
-[ "$DRY" = 0 ] && echo $((ROUND + 1)) > "$ROUND_FILE"
-echo "  review round: $((ROUND + ( DRY==0 ? 1 : 0 )))/$MAX_ROUNDS"
+echo "  review round: $((ROUND + 1))/$MAX_ROUNDS"
 
 # --- Build the review prompt -------------------------------------------------
 if [ "$MODE" = diff ]; then
@@ -232,10 +233,16 @@ review_with() {
   footer="<sub>via pr-review-relay · author: ${AUTHOR:-?}${CONTEXT_FILE:+ · context: $(basename "$CONTEXT_FILE")}${HEAD_SHA:+ · reviewed sha: ${HEAD_SHA:0:7}}</sub>"
   comment_body="$(mktemp)"; out_file="$(mktemp)"
   printf '%s' "$out" > "$out_file"
-  node "$WRAP_COMMENT" \
-    --summary "${icon} ${name^} review (automated cross-review)" \
-    --footer "$footer" \
-    --file "$out_file" > "$comment_body"
+  # If the wrapper fails (node missing/broken) or yields an empty body, do NOT post
+  # a broken/partial comment and mark ok — treat it as a failed reviewer.
+  if ! node "$WRAP_COMMENT" \
+        --summary "${icon} ${name^} review (automated cross-review)" \
+        --footer "$footer" \
+        --file "$out_file" > "$comment_body" || [ ! -s "$comment_body" ]; then
+    echo "  ! $name: could not render comment (wrapper failed / empty output)" >&2
+    echo fail > "$STATUS_DIR/$skey"
+    rm -f "$out_file" "$comment_body"; return 0
+  fi
   rm -f "$out_file"
   if gh pr comment "$PR" --body-file "$comment_body" >/dev/null; then
     echo "  ✓ $name review posted (collapsed)"
@@ -248,16 +255,18 @@ review_with() {
 }
 
 IFS=',' read -ra LIST <<< "$REVIEWERS"
-declare -A SEEN=()   # dedupe: same reviewer twice would share one status file (race)
-would_run=0          # reviewers that would actually run (for the dry-run verdict)
+# dedupe: same reviewer twice would share one status file (race under --parallel).
+# Space-delimited string, not an assoc array, so this stays Bash 3.2-safe (macOS).
+SEEN_LIST=""
+would_run=0; skipped=0   # reviewers that would run / were tolerated-skipped (default set)
 for r in "${LIST[@]}"; do
   r="${r// }"
   [ -z "$r" ] && continue           # tolerate empty items (e.g. "claude,,codex")
   [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
-  rkey="$(status_key "$r")"
-  [ -n "${SEEN[$rkey]:-}" ] && { echo "  – skip $r (duplicate)"; continue; }
-  SEEN[$rkey]=1
+  rkey="$(status_key "$r")"          # rkey has no spaces, so the string check is safe
+  case " $SEEN_LIST " in *" $rkey "*) echo "  – skip $r (duplicate)"; continue;; esac
+  SEEN_LIST="$SEEN_LIST $rkey"
   local_tool=$(tool_for "$r")
   if [ -z "$local_tool" ]; then
     if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! unknown reviewer '$r' (explicitly requested → fail)" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! unknown reviewer '$r' (skip)"; fi
@@ -266,7 +275,7 @@ for r in "${LIST[@]}"; do
   if ! command -v "$local_tool" >/dev/null; then
     # Not installed: a hard failure only if the user explicitly asked for this
     # reviewer; for the default set it's a tolerated skip (users have different CLIs).
-    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! $local_tool not installed but explicitly requested → fail" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! $local_tool not installed (skip $r)"; fi
+    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! $local_tool not installed but explicitly requested → fail" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! $local_tool not installed (skip $r)"; skipped=$((skipped + 1)); fi
     continue
   fi
   would_run=$((would_run + 1))
@@ -298,6 +307,11 @@ if [ "$DRY" = 1 ]; then
   echo "✔ Dry run complete (config valid; $would_run reviewer(s) would run)."; exit 0
 fi
 
+# A real round that actually ran reviewers consumes one cap slot — whatever the
+# verdict below (a persistently failing/flaky reviewer must still hit the cap).
+# A round where nobody ran (misconfig) is NOT consumed (it exits 3 later).
+[ "$ran" -gt 0 ] && echo $((ROUND + 1)) > "$ROUND_FILE"
+
 # SHA binding is fail-closed: we must be able to read HEAD before AND after. If
 # either read fails we cannot prove HEAD stayed put, so we do NOT pass.
 NEW_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
@@ -318,7 +332,8 @@ if [ "$failed" -gt 0 ]; then
   echo "✖ Relay round NOT clean: $failed/$ran reviewer(s) failed —$failed_names. Fix and re-run." >&2
   exit 3
 fi
-echo "✔ Relay done — $ran/$ran reviewer(s) posted, reviewed sha ${HEAD_SHA:0:7}."
+echo "✔ Relay done — $ran/$ran reviewer(s) posted${skipped:+, $skipped skipped (not installed)}, reviewed sha ${HEAD_SHA:0:7}."
+[ "$skipped" -gt 0 ] && echo "  ⚠ $skipped default reviewer(s) were skipped — this was NOT a full cross-review." >&2
 echo "  This confirms every reviewer RAN, not that the PR is approved: read the reviews and"
 echo "  resolve every Blocker/Should-fix before merging."
 exit 0
