@@ -38,25 +38,13 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 
 ## 🆕 What's new
 
-**Unreleased** — **fail-closed exit codes.** `✔ Relay done.` used to print (and exit `0`) even if every
-reviewer timed out — so a caller couldn't tell "all reviewed" from "everything broke". Now the relay
-exits `0` only when every reviewer that ran actually posted and the PR head didn't move; `3` for any
-failure / stale-SHA / no-reviewers; `4` when the round cap is hit. See [Exit codes](#-exit-codes-fail-closed).
+**v1.1.0** — **fail-closed exit codes.** `✔ Relay done.` used to print and exit `0` even if every reviewer
+timed out, so a caller couldn't tell *"all reviewed"* from *"everything broke"*. The relay now signals its
+outcome through the exit code — `0` clean, `3` not-clean (failure / stale SHA / no reviewers), `4` cap
+reached — plus macOS Bash 3.2 compatibility and a fail-closed test suite. See
+[Exit codes](#-exit-codes-fail-closed).
 
-**v1.0.0** — first tagged release. Everything below is in it:
-
-- **Five reviewers**: 🟣 Claude, 🟢 Codex, 🔵 Cursor, 🟠 Antigravity, and ⚪ **OpenCode** (opt-in).
-- **Link mode (default)**: each reviewer fetches the *whole* PR itself (`gh pr view`/`gh pr diff`) and
-  reads the changed files in context — not just a diff snapshot. A size-capped inline diff is embedded
-  as a fallback so a sandboxed reviewer never returns empty.
-- **`review-local`**: run the same cross-review on your **current branch before you open a PR** — no
-  `gh`, no PR number, nothing posted; reviews print straight to your terminal.
-- **No more silent skips**: when a reviewer produces nothing you now get a human-readable reason
-  (empty / timed out / not found / not executable) plus the tail of its stderr.
-- **Collapsed comments + consensus**: each review posts as a forum-style `<details>` block, and
-  `pr-review-consensus` synthesizes a single work card into the PR description.
-- **`--context-file`**: prepend a doc/spec/API reference so every reviewer verifies the PR against it.
-- **Bounded loop**: a per-PR round cap keeps read→fix→re-run from spiraling; re-runs are idempotent.
+Full history in the [**CHANGELOG**](CHANGELOG.md).
 
 ## 🤔 Why
 
@@ -345,7 +333,8 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 > **Note:** reviews are posted as they complete, *before* the end-of-round SHA re-check. So a round that
 > ends in `3` (a reviewer failed, or HEAD moved mid-round) may still have left comments on the PR — tagged
 > with the SHA they reviewed. Trust the **exit code**, not the mere presence of comments: on `3`, re-run
-> and read the fresh round.
+> and read the fresh round. A round that actually dispatched reviewers **consumes one cap slot even when it
+> ends in `3`** (a persistently flaky reviewer must still hit the cap) — a round where *nobody* ran does not.
 
 ## 📋 Notes & caveats
 

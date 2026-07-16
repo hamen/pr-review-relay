@@ -147,6 +147,13 @@ env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_cou
   bash "$RELAY" --pr 1 --author antigravity --reviewers bogus --parallel >/dev/null 2>&1
 if [ ! -f "$WORK/cache/pr-review-relay/owner_repo#1.round" ]; then echo "  ok   [-] preflight-only failure does not burn a round"; PASS=$((PASS+1)); else echo "  FAIL bogus consumed a round"; FAIL=$((FAIL+1)); fi
 
+# contrast: a round that actually dispatched reviewers but failed DOES consume a slot
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" FAIL_EMPTY=codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+rf="$WORK/cache/pr-review-relay/owner_repo#1.round"
+if [ -f "$rf" ] && [ "$(cat "$rf")" = 1 ]; then echo "  ok   [-] failed round (reviewers ran) consumes a slot"; PASS=$((PASS+1)); else echo "  FAIL failed round did not consume a slot"; FAIL=$((FAIL+1)); fi
+
 # wrapper (node) failure → reviewer recorded as failed → exit 3 (not posted as ok)
 BIN4="$WORK/bin4"; mkdir -p "$BIN4"
 for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN4/$t"; done

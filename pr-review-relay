@@ -66,11 +66,8 @@ REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
 # leave green reviews standing on stale code (checked again at the end).
 HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
 echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
-# Fail-closed early: if we can't even read the head SHA now, we'll never be able to
-# prove HEAD stayed put — abort before spending reviewer runs (a dry-run needs no SHA).
-if [ "$DRY" = 0 ] && [ -z "$HEAD_SHA" ]; then
-  echo "✖ Could not read PR head SHA — cannot prove HEAD stability. Re-run." >&2; exit 3
-fi
+# (The fail-closed early-abort on an unreadable HEAD SHA lives AFTER the round-cap
+#  check below, so a PR already at the cap still reports exit 4, not 3.)
 
 # Per-reviewer outcome, written as files so it survives subshells under --parallel:
 # $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
@@ -127,6 +124,13 @@ if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
 fi
 echo "  review round: $((ROUND + 1))/$MAX_ROUNDS"
 
+# Fail-closed early (but AFTER the cap check above, so an at-cap PR still exits 4):
+# if we can't read the head SHA now, we can never prove HEAD stayed put — abort
+# before spending reviewer runs (a dry-run needs no SHA).
+if [ "$DRY" = 0 ] && [ -z "$HEAD_SHA" ]; then
+  echo "✖ Could not read PR head SHA — cannot prove HEAD stability. Re-run." >&2; exit 3
+fi
+
 # --- Build the review prompt -------------------------------------------------
 if [ "$MODE" = diff ]; then
   read -r -d '' BASE <<'P' || true
@@ -171,7 +175,7 @@ fi
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out="" feed="" rc=0 errf skey Name
+  local name="$1" out="" feed="" rc=0 errf skey Name id
   skey="$(status_key "$name")"
   # Capitalize first letter — Bash 3.2-safe (no ${name^}, which is Bash 4+).
   Name="$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}"
@@ -266,6 +270,12 @@ review_with() {
   rm -f "$comment_body"
 }
 
+# Passing the default list explicitly flips missing CLIs from tolerated skips to
+# hard failures — warn, since it's an easy copy-paste-from-help footgun.
+if [ "$REVIEWERS_EXPLICIT" = 1 ] && [ "$REVIEWERS" = "claude,codex,cursor,antigravity" ]; then
+  echo "  note: --reviewers matches the default, so a missing default CLI is now a hard failure (exit 3), not a skip. Omit --reviewers to tolerate missing agents." >&2
+fi
+
 IFS=',' read -ra LIST <<< "$REVIEWERS"
 # dedupe: same reviewer twice would share one status file (race under --parallel).
 # Space-delimited string, not an assoc array, so this stays Bash 3.2-safe (macOS).
@@ -346,9 +356,12 @@ if [ "$failed" -gt 0 ]; then
   echo "✖ Relay round NOT clean: $failed/$ran reviewer(s) failed —$failed_names. Fix and re-run." >&2
   exit 3
 fi
-skip_note=""; [ "$skipped" -gt 0 ] && skip_note=", $skipped skipped (not installed)"
-echo "✔ Relay done — $ran/$ran reviewer(s) posted${skip_note}, reviewed sha ${HEAD_SHA:0:7}."
-[ "$skipped" -gt 0 ] && echo "  ⚠ $skipped default reviewer(s) were skipped — this was NOT a full cross-review." >&2
+if [ "$skipped" -gt 0 ]; then
+  echo "✔ Relay done (PARTIAL cross-review) — $ran/$ran reviewer(s) posted, $skipped skipped (not installed), reviewed sha ${HEAD_SHA:0:7}."
+  echo "  ⚠ $skipped default reviewer(s) were skipped — this was NOT a full cross-review." >&2
+else
+  echo "✔ Relay done — $ran/$ran reviewer(s) posted, reviewed sha ${HEAD_SHA:0:7}."
+fi
 echo "  This confirms every reviewer RAN, not that the PR is approved: read the reviews and"
 echo "  resolve every Blocker/Should-fix before merging."
 exit 0
