@@ -11,7 +11,11 @@ import { readFileSync } from 'node:fs';
 
 export function wrapCollapsedComment(content, { summary, footer = '', defaultSummary = 'Review report' } = {}) {
   let body = content.replace(/\r\n/g, '\n').trimEnd();
-  if (body.includes('<details')) return body;
+  // Skip only when the comment is ALREADY a wrapped block (starts with <details>).
+  // A review that merely *mentions* <details> elsewhere must still be wrapped, or
+  // it loses its summary + footer (e.g. the reviewed-SHA line) and can't be
+  // identified/replaced on later runs.
+  if (body.trimStart().startsWith('<details')) return body;
 
   let extractedFooter = footer;
   if (!summary) {

@@ -52,7 +52,9 @@ make_agent() {
 #!/usr/bin/env bash
 self="\$(basename "\$0")"
 case "\$self" in cursor-agent) key=cursor;; agy) key=antigravity;; *) key="\$self";; esac
+case ",\${SLEEP_KEYS:-}," in *",\$key,"*) sleep 5;; esac        # outlast a short timeout → rc 124
 case ",\${FAIL_EMPTY:-}," in *",\$key,"*) exit 0;; esac      # empty output, rc 0 → "no review"
+case ",\${WS_ONLY:-}," in *",\$key,"*) printf '\t\n  \n';  exit 0;; esac  # whitespace-only "review"
 case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output but rc!=0
 echo "LGTM from \$key."
 exit 0
@@ -82,6 +84,8 @@ run 3 "SHA drift during round → stale, fail"            GH_SHA_DRIFT=1
 run 3 "SHA unreadable at start → cannot prove stability" GH_SHA_FAIL=start
 run 3 "SHA unreadable at end → cannot prove stability"   GH_SHA_FAIL=end
 run 3 "comment posting fails → not clean"               GH_POST_FAIL=1
+run 3 "whitespace-only review → not a valid review"     WS_ONLY=codex
+run 3 "reviewer times out → not clean"                  SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1
 
 # bespoke runs: <expected> <desc> -- <args...>  (custom --reviewers / --dry-run)
 runx() {
@@ -96,8 +100,19 @@ runx() {
 
 runx 3 "explicitly requested unknown reviewer → fail"   --reviewers claude,bogus --parallel
 runx 3 "malicious reviewer name is contained, still fails" --reviewers 'claude,../../PWNED' --parallel
+runx 0 "duplicate reviewer is deduped → clean pass"     --reviewers claude,claude --parallel
 runx 0 "dry-run + valid explicit config → clean preflight" --reviewers claude,codex --dry-run
 runx 3 "dry-run + invalid explicit config → fail preflight" --reviewers claude,bogus --dry-run
+
+# author-only reviewer list → nobody runs → exit 3 (real run and dry-run)
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author claude --reviewers claude --parallel >/dev/null 2>&1
+rc=$?; if [ "$rc" = 3 ]; then echo "  ok   [3] author-only list → no reviewers ran"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 3] author-only"; FAIL=$((FAIL+1)); fi
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author claude --reviewers claude --dry-run >/dev/null 2>&1
+rc=$?; if [ "$rc" = 3 ]; then echo "  ok   [3] dry-run + zero runnable reviewers → fail"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 3] dry-run zero runnable"; FAIL=$((FAIL+1)); fi
 # the traversal attempt must NOT create a file outside the temp status dir
 if [ -e "$WORK/PWNED" ] || [ -e "$HOME/PWNED" ] || [ -e ./PWNED ]; then
   echo "  FAIL path traversal escaped STATUS_DIR"; FAIL=$((FAIL+1))

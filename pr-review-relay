@@ -66,6 +66,11 @@ REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
 # leave green reviews standing on stale code (checked again at the end).
 HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
 echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
+# Fail-closed early: if we can't even read the head SHA now, we'll never be able to
+# prove HEAD stayed put — abort before spending reviewer runs (a dry-run needs no SHA).
+if [ "$DRY" = 0 ] && [ -z "$HEAD_SHA" ]; then
+  echo "✖ Could not read PR head SHA — cannot prove HEAD stability. Re-run." >&2; exit 3
+fi
 
 # Per-reviewer outcome, written as files so it survives subshells under --parallel:
 # $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
@@ -182,8 +187,9 @@ review_with() {
       fi; rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
-  # and show what it wrote on stderr.
-  if [ -z "${out// }" ]; then
+  # and show what it wrote on stderr. "Empty" means no non-whitespace content, so
+  # a tab/newline-only reply doesn't slip through as a valid review.
+  if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
     local why="exited with code $rc"
     case "$rc" in
       0)   why="ran fine but returned an empty review";;
@@ -242,12 +248,16 @@ review_with() {
 }
 
 IFS=',' read -ra LIST <<< "$REVIEWERS"
+declare -A SEEN=()   # dedupe: same reviewer twice would share one status file (race)
+would_run=0          # reviewers that would actually run (for the dry-run verdict)
 for r in "${LIST[@]}"; do
   r="${r// }"
   [ -z "$r" ] && continue           # tolerate empty items (e.g. "claude,,codex")
   [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
   rkey="$(status_key "$r")"
+  [ -n "${SEEN[$rkey]:-}" ] && { echo "  – skip $r (duplicate)"; continue; }
+  SEEN[$rkey]=1
   local_tool=$(tool_for "$r")
   if [ -z "$local_tool" ]; then
     if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! unknown reviewer '$r' (explicitly requested → fail)" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! unknown reviewer '$r' (skip)"; fi
@@ -259,6 +269,7 @@ for r in "${LIST[@]}"; do
     if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! $local_tool not installed but explicitly requested → fail" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! $local_tool not installed (skip $r)"; fi
     continue
   fi
+  would_run=$((would_run + 1))
   if [ "$DRY" = 1 ]; then echo "  · would run: $r ($local_tool)"; continue; fi
   echo "  → $r reviewing…"
   # Pre-seed "pending": if the reviewer is hard-killed before it can record its
@@ -280,10 +291,11 @@ done
 
 # In --dry-run no reviewer executes, but explicitly-requested reviewers that are
 # unknown/missing DO record a failure above — surface that as a non-zero preflight
-# instead of a false clean pass.
+# instead of a false clean pass. Zero runnable reviewers is also a failed preflight.
 if [ "$DRY" = 1 ]; then
   if [ "$failed" -gt 0 ]; then echo "✖ Dry run: invalid --reviewers config —$failed_names." >&2; exit 3; fi
-  echo "✔ Dry run complete (config valid; no reviewers executed)."; exit 0
+  if [ "$would_run" = 0 ]; then echo "✖ Dry run: no runnable reviewers (none installed / all excluded)." >&2; exit 3; fi
+  echo "✔ Dry run complete (config valid; $would_run reviewer(s) would run)."; exit 0
 fi
 
 # SHA binding is fail-closed: we must be able to read HEAD before AND after. If

@@ -342,6 +342,11 @@ A missing CLI from the **default** reviewer set is a tolerated skip (users have 
 installed); only reviewers named explicitly via `--reviewers` are required to be present. Each posted
 review's footer records the **reviewed SHA** so you can tell whether a review predates a later push.
 
+> **Note:** reviews are posted as they complete, *before* the end-of-round SHA re-check. So a round that
+> ends in `3` (a reviewer failed, or HEAD moved mid-round) may still have left comments on the PR — tagged
+> with the SHA they reviewed. Trust the **exit code**, not the mere presence of comments: on `3`, re-run
+> and read the fresh round.
+
 ## 📋 Notes & caveats
 
 - **Read-only:** reviewers never modify code. They run with `codex exec -s read-only`,
