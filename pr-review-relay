@@ -101,14 +101,24 @@ fi
 # manually with --reset. A round is only CONSUMED once at least one reviewer
 # actually ran (see end of file) — a misconfigured machine where nobody runs
 # won't march the counter to the cap without ever getting a review.
+# This is a best-effort SOFT guard, not a concurrency boundary: the counter is an
+# unlocked read-modify-write, so two relays launched on the same PR at the same
+# instant could both read the same value. Worst case the cap is exceeded by one —
+# one extra review round — which is harmless, so we don't pay for locking here.
+# --max-rounds must be a non-negative integer, else the arithmetic below breaks and
+# silently bypasses the cap — reject it as a usage error instead.
+case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
 ROUND_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review-relay"; mkdir -p "$ROUND_DIR"
 ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
 [ "$RESET" = 1 ] && rm -f "$ROUND_FILE"
-if [ -f "$ROUND_FILE" ] && [ $(( $(date +%s) - $(stat -c %Y "$ROUND_FILE" 2>/dev/null || echo 0) )) -gt 21600 ]; then
+# mtime: GNU `stat -c %Y`, BSD/macOS `stat -f %m`.
+_round_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+if [ -f "$ROUND_FILE" ] && [ $(( $(date +%s) - $(_round_mtime "$ROUND_FILE") )) -gt 21600 ]; then
   rm -f "$ROUND_FILE"   # stale (>6h): new session, start fresh
 fi
 ROUND=$(cat "$ROUND_FILE" 2>/dev/null || echo 0)
+case "$ROUND" in ''|*[!0-9]*) ROUND=0;; esac   # ignore a corrupted counter file
 if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
   echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS)." >&2
   echo "   STOP the review loop: do NOT run the relay again on this PR. Address any" >&2
@@ -161,8 +171,10 @@ fi
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out="" feed="" rc=0 errf skey
+  local name="$1" out="" feed="" rc=0 errf skey Name
   skey="$(status_key "$name")"
+  # Capitalize first letter — Bash 3.2-safe (no ${name^}, which is Bash 4+).
+  Name="$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}"
   errf="$(mktemp)"
   [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
   case "$name" in
@@ -219,11 +231,11 @@ review_with() {
   # Echo the review to stdout so the agent that launched the relay can read it,
   # address the findings, push, and re-run (the iterate loop). Single printf to
   # stay roughly atomic under --parallel.
-  printf '\n========== %s review ==========\n%s\n===============================\n' "${name^}" "$out"
+  printf '\n========== %s review ==========\n%s\n===============================\n' "$Name" "$out"
   # idempotent: remove any previous review from the SAME agent on this PR
   if [ -n "$REPO" ]; then
     for id in $(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-                  --jq ".[] | select(.body|contains(\"${name^} review (automated cross-review)\")) | .id" 2>/dev/null); do
+                  --jq ".[] | select(.body|contains(\"$Name review (automated cross-review)\")) | .id" 2>/dev/null); do
       gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1 || true
     done
   fi
@@ -236,7 +248,7 @@ review_with() {
   # If the wrapper fails (node missing/broken) or yields an empty body, do NOT post
   # a broken/partial comment and mark ok — treat it as a failed reviewer.
   if ! node "$WRAP_COMMENT" \
-        --summary "${icon} ${name^} review (automated cross-review)" \
+        --summary "${icon} $Name review (automated cross-review)" \
         --footer "$footer" \
         --file "$out_file" > "$comment_body" || [ ! -s "$comment_body" ]; then
     echo "  ! $name: could not render comment (wrapper failed / empty output)" >&2
@@ -307,10 +319,12 @@ if [ "$DRY" = 1 ]; then
   echo "✔ Dry run complete (config valid; $would_run reviewer(s) would run)."; exit 0
 fi
 
-# A real round that actually ran reviewers consumes one cap slot — whatever the
-# verdict below (a persistently failing/flaky reviewer must still hit the cap).
-# A round where nobody ran (misconfig) is NOT consumed (it exits 3 later).
-[ "$ran" -gt 0 ] && echo $((ROUND + 1)) > "$ROUND_FILE"
+# A real round that actually DISPATCHED reviewers consumes one cap slot — whatever
+# the verdict below (a persistently failing/flaky reviewer must still hit the cap).
+# Gate on would_run (agents actually launched), NOT ran: a preflight-only failure
+# like `--reviewers bogus` writes a fail file (ran>0) but launched nobody, and must
+# not burn a round.
+[ "$would_run" -gt 0 ] && echo $((ROUND + 1)) > "$ROUND_FILE"
 
 # SHA binding is fail-closed: we must be able to read HEAD before AND after. If
 # either read fails we cannot prove HEAD stayed put, so we do NOT pass.
@@ -332,7 +346,8 @@ if [ "$failed" -gt 0 ]; then
   echo "✖ Relay round NOT clean: $failed/$ran reviewer(s) failed —$failed_names. Fix and re-run." >&2
   exit 3
 fi
-echo "✔ Relay done — $ran/$ran reviewer(s) posted${skipped:+, $skipped skipped (not installed)}, reviewed sha ${HEAD_SHA:0:7}."
+skip_note=""; [ "$skipped" -gt 0 ] && skip_note=", $skipped skipped (not installed)"
+echo "✔ Relay done — $ran/$ran reviewer(s) posted${skip_note}, reviewed sha ${HEAD_SHA:0:7}."
 [ "$skipped" -gt 0 ] && echo "  ⚠ $skipped default reviewer(s) were skipped — this was NOT a full cross-review." >&2
 echo "  This confirms every reviewer RAN, not that the PR is approved: read the reviews and"
 echo "  resolve every Blocker/Should-fix before merging."

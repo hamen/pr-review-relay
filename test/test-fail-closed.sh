@@ -138,6 +138,24 @@ printf '## Heading\nThis review discusses a <details> element in the code.\n' > 
 wout=$(node "$HERE/../wrap-collapsed-pr-comment.mjs" --summary "MARK-42" --footer "<sub>f</sub>" --file "$WORK/rev.md")
 if printf '%s' "$wout" | grep -q "<summary>MARK-42</summary>"; then echo "  ok   [-] wrap keeps summary when body mentions <details>"; PASS=$((PASS+1)); else echo "  FAIL wrap dropped summary"; FAIL=$((FAIL+1)); fi
 
+# invalid --max-rounds is a usage error (must not silently bypass the cap)
+runx 2 "invalid --max-rounds → usage error"             --reviewers claude,codex --max-rounds nope
+
+# a preflight-only failure (--reviewers bogus) must NOT consume a cap round
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers bogus --parallel >/dev/null 2>&1
+if [ ! -f "$WORK/cache/pr-review-relay/owner_repo#1.round" ]; then echo "  ok   [-] preflight-only failure does not burn a round"; PASS=$((PASS+1)); else echo "  FAIL bogus consumed a round"; FAIL=$((FAIL+1)); fi
+
+# wrapper (node) failure → reviewer recorded as failed → exit 3 (not posted as ok)
+BIN4="$WORK/bin4"; mkdir -p "$BIN4"
+for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN4/$t"; done
+printf '#!/usr/bin/env bash\nexit 1\n' > "$BIN4/node"; chmod +x "$BIN4/node"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN4:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+rc=$?; if [ "$rc" = 3 ]; then echo "  ok   [3] comment wrapper failure → not clean"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 3] wrapper failure"; FAIL=$((FAIL+1)); fi
+
 # cap: pre-seed the round file at the cap, then a normal run must exit 4
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"
 printf '3' > "$WORK/cache/pr-review-relay/owner_repo#1.round"
