@@ -247,9 +247,12 @@ is idempotent, re-running just refreshes the comments (one per agent).
 
 A typical agent instruction to make this a loop:
 
-> After opening a PR, run `pr-review-relay --author <self>`. Read the reviews it prints, address every
-> **Blocker** and **Should-fix**, commit and push, then run it again. Repeat until no blockers remain
-> (max ~3 rounds), then summarize what you changed.
+> After opening a PR, run `pr-review-relay --author <self>`. **Branch on its exit code — only `0` is a
+> clean round** (every reviewer actually ran and posted, PR head unchanged). On `3` the round is not
+> trustworthy (a reviewer failed / the SHA couldn't be confirmed / HEAD moved) — **don't act on the
+> posted reviews, re-run against the current head**. On `4` the round cap is hit — stop and escalate.
+> On a clean `0`, read the reviews it prints, address every **Blocker** and **Should-fix**, commit and
+> push, then run it again. Repeat until no blockers remain (max ~3 rounds), then summarize what you changed.
 >
 > When reviewers agree on what still matters, save a **consensus work card** (only agreed Blockers /
 > Should-fix / Nits) and run `pr-review-consensus --consensus-file path.md` so the PR description

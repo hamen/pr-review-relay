@@ -51,7 +51,7 @@ while [ $# -gt 0 ]; do
     --dry-run)      DRY=1; shift;;
     --max-rounds)   MAX_ROUNDS="$2"; shift 2;;
     --reset)        RESET=1; shift;;
-    -h|--help)      sed -n '2,22p' "$0"; exit 0;;
+    -h|--help)      awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -68,9 +68,15 @@ HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true
 echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
 
 # Per-reviewer outcome, written as files so it survives subshells under --parallel:
-# $STATUS_DIR/<name> contains "ok" or "fail". Absence = reviewer never attempted.
-STATUS_DIR="$(mktemp -d)"
+# $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
+# hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
+STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
 trap 'rm -rf "$STATUS_DIR"' EXIT
+# Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
+# "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
+# prefix also guarantees the key is never a dotfile (which the tally glob "*"
+# would silently skip) or "."/".." — either would reopen a fail-open hole.
+status_key() { printf 'k_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
 
 DIFF=$(gh pr diff "$PR" 2>/dev/null)
 [ -z "$DIFF" ] && { echo "Empty diff or cannot read PR #$PR."; exit 1; }
@@ -149,7 +155,8 @@ fi
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out="" feed="" rc=0 errf
+  local name="$1" out="" feed="" rc=0 errf skey
+  skey="$(status_key "$name")"
   errf="$(mktemp)"
   [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
   case "$name" in
@@ -190,7 +197,7 @@ review_with() {
       echo "    $name stderr (last 15 lines):" >&2
       tail -n 15 "$errf" | sed 's/^/    │ /' >&2
     fi
-    echo fail > "$STATUS_DIR/$name"   # no output → round is not clean
+    echo fail > "$STATUS_DIR/$skey"   # no output → round is not clean
     rm -f "$errf"; return 0
   fi
   local unclean=0
@@ -226,10 +233,10 @@ review_with() {
   rm -f "$out_file"
   if gh pr comment "$PR" --body-file "$comment_body" >/dev/null; then
     echo "  ✓ $name review posted (collapsed)"
-    [ "$unclean" = 1 ] && echo fail > "$STATUS_DIR/$name" || echo ok > "$STATUS_DIR/$name"
+    [ "$unclean" = 1 ] && echo fail > "$STATUS_DIR/$skey" || echo ok > "$STATUS_DIR/$skey"
   else
     echo "  ! $name: failed to post comment" >&2
-    echo fail > "$STATUS_DIR/$name"   # review not visible on the PR → not clean
+    echo fail > "$STATUS_DIR/$skey"   # review not visible on the PR → not clean
   fi
   rm -f "$comment_body"
 }
@@ -237,44 +244,59 @@ review_with() {
 IFS=',' read -ra LIST <<< "$REVIEWERS"
 for r in "${LIST[@]}"; do
   r="${r// }"
+  [ -z "$r" ] && continue           # tolerate empty items (e.g. "claude,,codex")
   [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
+  rkey="$(status_key "$r")"
   local_tool=$(tool_for "$r")
   if [ -z "$local_tool" ]; then
-    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! unknown reviewer '$r' (explicitly requested → fail)" >&2; echo fail > "$STATUS_DIR/$r"; else echo "  ! unknown reviewer '$r' (skip)"; fi
+    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! unknown reviewer '$r' (explicitly requested → fail)" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! unknown reviewer '$r' (skip)"; fi
     continue
   fi
   if ! command -v "$local_tool" >/dev/null; then
     # Not installed: a hard failure only if the user explicitly asked for this
     # reviewer; for the default set it's a tolerated skip (users have different CLIs).
-    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! $local_tool not installed but explicitly requested → fail" >&2; echo fail > "$STATUS_DIR/$r"; else echo "  ! $local_tool not installed (skip $r)"; fi
+    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! $local_tool not installed but explicitly requested → fail" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! $local_tool not installed (skip $r)"; fi
     continue
   fi
   if [ "$DRY" = 1 ]; then echo "  · would run: $r ($local_tool)"; continue; fi
   echo "  → $r reviewing…"
+  # Pre-seed "pending": if the reviewer is hard-killed before it can record its
+  # own outcome, this file survives and the tally counts it as a failure (not a
+  # silent exclusion that could let the round pass clean).
+  echo pending > "$STATUS_DIR/$rkey"
   if [ "$PARALLEL" = 1 ]; then review_with "$r" & else review_with "$r"; fi
 done
 [ "$PARALLEL" = 1 ] && wait
 
 # --- Fail-closed verdict -----------------------------------------------------
-# In --dry-run nothing actually ran, so there is nothing to verdict.
-if [ "$DRY" = 1 ]; then echo "✔ Dry run complete (no reviewers executed)."; exit 0; fi
-
-# SHA drift: if HEAD moved while we were reviewing, the posted reviews describe
-# stale code. Fail so the caller re-runs against the new head.
-NEW_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
-if [ -n "$HEAD_SHA" ] && [ -n "$NEW_SHA" ] && [ "$HEAD_SHA" != "$NEW_SHA" ]; then
-  echo "✖ HEAD moved during the round (${HEAD_SHA:0:7} → ${NEW_SHA:0:7}): reviews are stale. Re-run." >&2
-  exit 3
-fi
-
-# Tally per-reviewer outcomes recorded under $STATUS_DIR.
+# Tally per-reviewer outcomes recorded under $STATUS_DIR (pending/ok/fail).
 ran=0; failed=0; failed_names=""
 for f in "$STATUS_DIR"/*; do
   [ -e "$f" ] || continue
   ran=$((ran + 1))
-  if [ "$(cat "$f")" != ok ]; then failed=$((failed + 1)); failed_names="$failed_names ${f##*/}"; fi
+  if [ "$(cat "$f")" != ok ]; then n="${f##*/}"; failed=$((failed + 1)); failed_names="$failed_names ${n#k_}"; fi
 done
+
+# In --dry-run no reviewer executes, but explicitly-requested reviewers that are
+# unknown/missing DO record a failure above — surface that as a non-zero preflight
+# instead of a false clean pass.
+if [ "$DRY" = 1 ]; then
+  if [ "$failed" -gt 0 ]; then echo "✖ Dry run: invalid --reviewers config —$failed_names." >&2; exit 3; fi
+  echo "✔ Dry run complete (config valid; no reviewers executed)."; exit 0
+fi
+
+# SHA binding is fail-closed: we must be able to read HEAD before AND after. If
+# either read fails we cannot prove HEAD stayed put, so we do NOT pass.
+NEW_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
+if [ -z "$HEAD_SHA" ] || [ -z "$NEW_SHA" ]; then
+  echo "✖ Could not read PR head SHA (${HEAD_SHA:+start ok}${HEAD_SHA:-start FAILED}/${NEW_SHA:+end ok}${NEW_SHA:-end FAILED}): cannot prove HEAD stability. Re-run." >&2
+  exit 3
+fi
+if [ "$HEAD_SHA" != "$NEW_SHA" ]; then
+  echo "✖ HEAD moved during the round (${HEAD_SHA:0:7} → ${NEW_SHA:0:7}): reviews are stale. Re-run." >&2
+  exit 3
+fi
 
 if [ "$ran" = 0 ]; then
   echo "✖ No reviewers ran — cannot form consensus from nobody. Check installed CLIs / --reviewers." >&2
