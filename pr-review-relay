@@ -20,18 +20,30 @@
 #                   [--reviewers claude,codex,cursor,antigravity] [--parallel] \
 #                   [--context-file <path>] [--diff] [--dry-run]
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
+#
+# Fail-closed exit codes (so callers can trust the outcome, not just the banner):
+#   0  every reviewer that ran produced AND posted a review; PR head did not move.
+#      NOTE: this means everyone RAN — not that the PR is approved. You still must
+#      read the reviews and resolve every Blocker/Should-fix before merging.
+#   3  not a clean round: a reviewer returned empty / timed out / exited non-zero /
+#      failed to post, OR an explicitly-requested reviewer was missing, OR no
+#      reviewer ran, OR HEAD moved during the round (reviews now describe stale code).
+#   4  review-round cap reached — stop looping and escalate to a human.
+#   1/2 usage or precondition error (no gh, no PR, empty diff, bad arg).
+# A missing CLI from the DEFAULT reviewer set is a tolerated skip; only reviewers
+# named explicitly via --reviewers are required to be present.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WRAP_COMMENT="$SCRIPT_DIR/wrap-collapsed-pr-comment.mjs"
 
 AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
-CONTEXT_FILE=""; MODE="link"
+CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --author)       AUTHOR="$2"; shift 2;;
     --pr)           PR="$2"; shift 2;;
-    --reviewers)    REVIEWERS="$2"; shift 2;;
+    --reviewers)    REVIEWERS="$2"; REVIEWERS_EXPLICIT=1; shift 2;;
     --parallel)     PARALLEL=1; shift;;
     --context-file) CONTEXT_FILE="$2"; shift 2;;
     --diff)         MODE="diff"; shift;;
@@ -39,7 +51,7 @@ while [ $# -gt 0 ]; do
     --dry-run)      DRY=1; shift;;
     --max-rounds)   MAX_ROUNDS="$2"; shift 2;;
     --reset)        RESET=1; shift;;
-    -h|--help)      sed -n '2,22p' "$0"; exit 0;;
+    -h|--help)      awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -50,7 +62,23 @@ case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE"
+# Reviewed SHA: bind every review to the exact PR head so a concurrent push can't
+# leave green reviews standing on stale code (checked again at the end).
+HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
+echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
+# (The fail-closed early-abort on an unreadable HEAD SHA lives AFTER the round-cap
+#  check below, so a PR already at the cap still reports exit 4, not 3.)
+
+# Per-reviewer outcome, written as files so it survives subshells under --parallel:
+# $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
+# hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
+STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
+trap 'rm -rf "$STATUS_DIR"' EXIT
+# Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
+# "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
+# prefix also guarantees the key is never a dotfile (which the tally glob "*"
+# would silently skip) or "."/".." — either would reopen a fail-open hole.
+status_key() { printf 'k_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
 
 DIFF=$(gh pr diff "$PR" 2>/dev/null)
 [ -z "$DIFF" ] && { echo "Empty diff or cannot read PR #$PR."; exit 1; }
@@ -67,23 +95,41 @@ fi
 # --- Hard loop guard: cap the number of review rounds per PR ---------------
 # Prevents an endless read→fix→re-run cycle. Counter is per repo+PR, kept in a
 # cache file; auto-resets after 6h of inactivity (a fresh working session), or
-# manually with --reset. A real run (not --dry-run) consumes one round.
+# manually with --reset. A round is only CONSUMED once at least one reviewer
+# actually ran (see end of file) — a misconfigured machine where nobody runs
+# won't march the counter to the cap without ever getting a review.
+# This is a best-effort SOFT guard, not a concurrency boundary: the counter is an
+# unlocked read-modify-write, so two relays launched on the same PR at the same
+# instant could both read the same value. Worst case the cap is exceeded by one —
+# one extra review round — which is harmless, so we don't pay for locking here.
+# --max-rounds must be a non-negative integer, else the arithmetic below breaks and
+# silently bypasses the cap — reject it as a usage error instead.
+case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
 ROUND_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review-relay"; mkdir -p "$ROUND_DIR"
 ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
 [ "$RESET" = 1 ] && rm -f "$ROUND_FILE"
-if [ -f "$ROUND_FILE" ] && [ $(( $(date +%s) - $(stat -c %Y "$ROUND_FILE" 2>/dev/null || echo 0) )) -gt 21600 ]; then
+# mtime: GNU `stat -c %Y`, BSD/macOS `stat -f %m`.
+_round_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+if [ -f "$ROUND_FILE" ] && [ $(( $(date +%s) - $(_round_mtime "$ROUND_FILE") )) -gt 21600 ]; then
   rm -f "$ROUND_FILE"   # stale (>6h): new session, start fresh
 fi
 ROUND=$(cat "$ROUND_FILE" 2>/dev/null || echo 0)
+case "$ROUND" in ''|*[!0-9]*) ROUND=0;; esac   # ignore a corrupted counter file
 if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
-  echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS)."
-  echo "   STOP the review loop: do NOT run the relay again on this PR. Address any"
-  echo "   remaining items manually, or pass --reset to force another round."
-  exit 0
+  echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS)." >&2
+  echo "   STOP the review loop: do NOT run the relay again on this PR. Address any" >&2
+  echo "   remaining items manually, or pass --reset to force another round." >&2
+  exit 4   # distinct code: not a clean pass — escalate, don't treat as consensus
 fi
-[ "$DRY" = 0 ] && echo $((ROUND + 1)) > "$ROUND_FILE"
-echo "  review round: $((ROUND + ( DRY==0 ? 1 : 0 )))/$MAX_ROUNDS"
+echo "  review round: $((ROUND + 1))/$MAX_ROUNDS"
+
+# Fail-closed early (but AFTER the cap check above, so an at-cap PR still exits 4):
+# if we can't read the head SHA now, we can never prove HEAD stayed put — abort
+# before spending reviewer runs (a dry-run needs no SHA).
+if [ "$DRY" = 0 ] && [ -z "$HEAD_SHA" ]; then
+  echo "✖ Could not read PR head SHA — cannot prove HEAD stability. Re-run." >&2; exit 3
+fi
 
 # --- Build the review prompt -------------------------------------------------
 if [ "$MODE" = diff ]; then
@@ -129,7 +175,10 @@ fi
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out="" feed="" rc=0 errf
+  local name="$1" out="" feed="" rc=0 errf skey Name id
+  skey="$(status_key "$name")"
+  # Capitalize first letter — Bash 3.2-safe (no ${name^}, which is Bash 4+).
+  Name="$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}"
   errf="$(mktemp)"
   [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
   case "$name" in
@@ -155,8 +204,9 @@ review_with() {
       fi; rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
-  # and show what it wrote on stderr.
-  if [ -z "${out// }" ]; then
+  # and show what it wrote on stderr. "Empty" means no non-whitespace content, so
+  # a tab/newline-only reply doesn't slip through as a valid review.
+  if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
     local why="exited with code $rc"
     case "$rc" in
       0)   why="ran fine but returned an empty review";;
@@ -170,49 +220,148 @@ review_with() {
       echo "    $name stderr (last 15 lines):" >&2
       tail -n 15 "$errf" | sed 's/^/    │ /' >&2
     fi
+    echo fail > "$STATUS_DIR/$skey"   # no output → round is not clean
     rm -f "$errf"; return 0
   fi
-  [ "$rc" -ne 0 ] && echo "  ! $name: exited with code $rc — review may be truncated" >&2
+  local unclean=0
+  if [ "$rc" -ne 0 ]; then
+    # Produced a review but the CLI exited non-zero: the review may be truncated,
+    # so the round is NOT clean even though we still post what we got (informative).
+    echo "  ! $name: exited with code $rc — review may be truncated (round not clean)" >&2
+    unclean=1
+  fi
   rm -f "$errf"
   local icon; case "$name" in claude) icon="🟣";; codex) icon="🟢";; cursor) icon="🔵";; antigravity) icon="🟠";; opencode) icon="⚪";; *) icon="🤖";; esac
   # Echo the review to stdout so the agent that launched the relay can read it,
   # address the findings, push, and re-run (the iterate loop). Single printf to
   # stay roughly atomic under --parallel.
-  printf '\n========== %s review ==========\n%s\n===============================\n' "${name^}" "$out"
+  printf '\n========== %s review ==========\n%s\n===============================\n' "$Name" "$out"
   # idempotent: remove any previous review from the SAME agent on this PR
   if [ -n "$REPO" ]; then
     for id in $(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-                  --jq ".[] | select(.body|contains(\"${name^} review (automated cross-review)\")) | .id" 2>/dev/null); do
+                  --jq ".[] | select(.body|contains(\"$Name review (automated cross-review)\")) | .id" 2>/dev/null); do
       gh api -X DELETE "repos/$REPO/issues/comments/$id" >/dev/null 2>&1 || true
     done
   fi
   # Post the review COLLAPSED: wrap it in <details>/<summary> via the helper so
   # the PR page shows a one-line toggle (forum-style hide/show) per reviewer.
   local footer comment_body out_file
-  footer="<sub>via pr-review-relay · author: ${AUTHOR:-?}${CONTEXT_FILE:+ · context: $(basename "$CONTEXT_FILE")}</sub>"
+  footer="<sub>via pr-review-relay · author: ${AUTHOR:-?}${CONTEXT_FILE:+ · context: $(basename "$CONTEXT_FILE")}${HEAD_SHA:+ · reviewed sha: ${HEAD_SHA:0:7}}</sub>"
   comment_body="$(mktemp)"; out_file="$(mktemp)"
   printf '%s' "$out" > "$out_file"
-  node "$WRAP_COMMENT" \
-    --summary "${icon} ${name^} review (automated cross-review)" \
-    --footer "$footer" \
-    --file "$out_file" > "$comment_body"
+  # If the wrapper fails (node missing/broken) or yields an empty body, do NOT post
+  # a broken/partial comment and mark ok — treat it as a failed reviewer.
+  if ! node "$WRAP_COMMENT" \
+        --summary "${icon} $Name review (automated cross-review)" \
+        --footer "$footer" \
+        --file "$out_file" > "$comment_body" || [ ! -s "$comment_body" ]; then
+    echo "  ! $name: could not render comment (wrapper failed / empty output)" >&2
+    echo fail > "$STATUS_DIR/$skey"
+    rm -f "$out_file" "$comment_body"; return 0
+  fi
   rm -f "$out_file"
-  gh pr comment "$PR" --body-file "$comment_body" >/dev/null \
-    && echo "  ✓ $name review posted (collapsed)" || echo "  ! $name: failed to post comment" >&2
+  if gh pr comment "$PR" --body-file "$comment_body" >/dev/null; then
+    echo "  ✓ $name review posted (collapsed)"
+    [ "$unclean" = 1 ] && echo fail > "$STATUS_DIR/$skey" || echo ok > "$STATUS_DIR/$skey"
+  else
+    echo "  ! $name: failed to post comment" >&2
+    echo fail > "$STATUS_DIR/$skey"   # review not visible on the PR → not clean
+  fi
   rm -f "$comment_body"
 }
 
+# Passing the default list explicitly flips missing CLIs from tolerated skips to
+# hard failures — warn, since it's an easy copy-paste-from-help footgun.
+if [ "$REVIEWERS_EXPLICIT" = 1 ] && [ "$REVIEWERS" = "claude,codex,cursor,antigravity" ]; then
+  echo "  note: --reviewers matches the default, so a missing default CLI is now a hard failure (exit 3), not a skip. Omit --reviewers to tolerate missing agents." >&2
+fi
+
 IFS=',' read -ra LIST <<< "$REVIEWERS"
+# dedupe: same reviewer twice would share one status file (race under --parallel).
+# Space-delimited string, not an assoc array, so this stays Bash 3.2-safe (macOS).
+SEEN_LIST=""
+would_run=0; skipped=0   # reviewers that would run / were tolerated-skipped (default set)
 for r in "${LIST[@]}"; do
   r="${r// }"
+  [ -z "$r" ] && continue           # tolerate empty items (e.g. "claude,,codex")
   [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
+  rkey="$(status_key "$r")"          # rkey has no spaces, so the string check is safe
+  case " $SEEN_LIST " in *" $rkey "*) echo "  – skip $r (duplicate)"; continue;; esac
+  SEEN_LIST="$SEEN_LIST $rkey"
   local_tool=$(tool_for "$r")
-  [ -z "$local_tool" ] && { echo "  ! unknown reviewer '$r' (skip)"; continue; }
-  command -v "$local_tool" >/dev/null || { echo "  ! $local_tool not installed (skip $r)"; continue; }
+  if [ -z "$local_tool" ]; then
+    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! unknown reviewer '$r' (explicitly requested → fail)" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! unknown reviewer '$r' (skip)"; fi
+    continue
+  fi
+  if ! command -v "$local_tool" >/dev/null; then
+    # Not installed: a hard failure only if the user explicitly asked for this
+    # reviewer; for the default set it's a tolerated skip (users have different CLIs).
+    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! $local_tool not installed but explicitly requested → fail" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! $local_tool not installed (skip $r)"; skipped=$((skipped + 1)); fi
+    continue
+  fi
+  would_run=$((would_run + 1))
   if [ "$DRY" = 1 ]; then echo "  · would run: $r ($local_tool)"; continue; fi
   echo "  → $r reviewing…"
+  # Pre-seed "pending": if the reviewer is hard-killed before it can record its
+  # own outcome, this file survives and the tally counts it as a failure (not a
+  # silent exclusion that could let the round pass clean).
+  echo pending > "$STATUS_DIR/$rkey"
   if [ "$PARALLEL" = 1 ]; then review_with "$r" & else review_with "$r"; fi
 done
 [ "$PARALLEL" = 1 ] && wait
-echo "✔ Relay done."
+
+# --- Fail-closed verdict -----------------------------------------------------
+# Tally per-reviewer outcomes recorded under $STATUS_DIR (pending/ok/fail).
+ran=0; failed=0; failed_names=""
+for f in "$STATUS_DIR"/*; do
+  [ -e "$f" ] || continue
+  ran=$((ran + 1))
+  if [ "$(cat "$f")" != ok ]; then n="${f##*/}"; failed=$((failed + 1)); failed_names="$failed_names ${n#k_}"; fi
+done
+
+# In --dry-run no reviewer executes, but explicitly-requested reviewers that are
+# unknown/missing DO record a failure above — surface that as a non-zero preflight
+# instead of a false clean pass. Zero runnable reviewers is also a failed preflight.
+if [ "$DRY" = 1 ]; then
+  if [ "$failed" -gt 0 ]; then echo "✖ Dry run: invalid --reviewers config —$failed_names." >&2; exit 3; fi
+  if [ "$would_run" = 0 ]; then echo "✖ Dry run: no runnable reviewers (none installed / all excluded)." >&2; exit 3; fi
+  echo "✔ Dry run complete (config valid; $would_run reviewer(s) would run)."; exit 0
+fi
+
+# A real round that actually DISPATCHED reviewers consumes one cap slot — whatever
+# the verdict below (a persistently failing/flaky reviewer must still hit the cap).
+# Gate on would_run (agents actually launched), NOT ran: a preflight-only failure
+# like `--reviewers bogus` writes a fail file (ran>0) but launched nobody, and must
+# not burn a round.
+[ "$would_run" -gt 0 ] && echo $((ROUND + 1)) > "$ROUND_FILE"
+
+# SHA binding is fail-closed: we must be able to read HEAD before AND after. If
+# either read fails we cannot prove HEAD stayed put, so we do NOT pass.
+NEW_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
+if [ -z "$HEAD_SHA" ] || [ -z "$NEW_SHA" ]; then
+  echo "✖ Could not read PR head SHA (${HEAD_SHA:+start ok}${HEAD_SHA:-start FAILED}/${NEW_SHA:+end ok}${NEW_SHA:-end FAILED}): cannot prove HEAD stability. Re-run." >&2
+  exit 3
+fi
+if [ "$HEAD_SHA" != "$NEW_SHA" ]; then
+  echo "✖ HEAD moved during the round (${HEAD_SHA:0:7} → ${NEW_SHA:0:7}): reviews are stale. Re-run." >&2
+  exit 3
+fi
+
+if [ "$ran" = 0 ]; then
+  echo "✖ No reviewers ran — cannot form consensus from nobody. Check installed CLIs / --reviewers." >&2
+  exit 3
+fi
+if [ "$failed" -gt 0 ]; then
+  echo "✖ Relay round NOT clean: $failed/$ran reviewer(s) failed —$failed_names. Fix and re-run." >&2
+  exit 3
+fi
+if [ "$skipped" -gt 0 ]; then
+  echo "✔ Relay done (PARTIAL cross-review) — $ran/$ran reviewer(s) posted, $skipped skipped (not installed), reviewed sha ${HEAD_SHA:0:7}."
+  echo "  ⚠ $skipped default reviewer(s) were skipped — this was NOT a full cross-review." >&2
+else
+  echo "✔ Relay done — $ran/$ran reviewer(s) posted, reviewed sha ${HEAD_SHA:0:7}."
+fi
+echo "  This confirms every reviewer RAN, not that the PR is approved: read the reviews and"
+echo "  resolve every Blocker/Should-fix before merging."
+exit 0

@@ -38,20 +38,13 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 
 ## 🆕 What's new
 
-**v1.0.0** — first tagged release. Everything below is in it:
+**v1.1.0** — **fail-closed exit codes.** `✔ Relay done.` used to print and exit `0` even if every reviewer
+timed out, so a caller couldn't tell *"all reviewed"* from *"everything broke"*. The relay now signals its
+outcome through the exit code — `0` clean, `3` not-clean (failure / stale SHA / no reviewers), `4` cap
+reached — plus macOS Bash 3.2 compatibility and a fail-closed test suite. See
+[Exit codes](#-exit-codes-fail-closed).
 
-- **Five reviewers**: 🟣 Claude, 🟢 Codex, 🔵 Cursor, 🟠 Antigravity, and ⚪ **OpenCode** (opt-in).
-- **Link mode (default)**: each reviewer fetches the *whole* PR itself (`gh pr view`/`gh pr diff`) and
-  reads the changed files in context — not just a diff snapshot. A size-capped inline diff is embedded
-  as a fallback so a sandboxed reviewer never returns empty.
-- **`review-local`**: run the same cross-review on your **current branch before you open a PR** — no
-  `gh`, no PR number, nothing posted; reviews print straight to your terminal.
-- **No more silent skips**: when a reviewer produces nothing you now get a human-readable reason
-  (empty / timed out / not found / not executable) plus the tail of its stderr.
-- **Collapsed comments + consensus**: each review posts as a forum-style `<details>` block, and
-  `pr-review-consensus` synthesizes a single work card into the PR description.
-- **`--context-file`**: prepend a doc/spec/API reference so every reviewer verifies the PR against it.
-- **Bounded loop**: a per-PR round cap keeps read→fix→re-run from spiraling; re-runs are idempotent.
+Full history in the [**CHANGELOG**](CHANGELOG.md).
 
 ## 🤔 Why
 
@@ -242,9 +235,12 @@ is idempotent, re-running just refreshes the comments (one per agent).
 
 A typical agent instruction to make this a loop:
 
-> After opening a PR, run `pr-review-relay --author <self>`. Read the reviews it prints, address every
-> **Blocker** and **Should-fix**, commit and push, then run it again. Repeat until no blockers remain
-> (max ~3 rounds), then summarize what you changed.
+> After opening a PR, run `pr-review-relay --author <self>`. **Branch on its exit code — only `0` is a
+> clean round** (every reviewer actually ran and posted, PR head unchanged). On `3` the round is not
+> trustworthy (a reviewer failed / the SHA couldn't be confirmed / HEAD moved) — **don't act on the
+> posted reviews, re-run against the current head**. On `4` the round cap is hit — stop and escalate.
+> On a clean `0`, read the reviews it prints, address every **Blocker** and **Should-fix**, commit and
+> push, then run it again. Repeat until no blockers remain (max ~3 rounds), then summarize what you changed.
 >
 > When reviewers agree on what still matters, save a **consensus work card** (only agreed Blockers /
 > Should-fix / Nits) and run `pr-review-consensus --consensus-file path.md` so the PR description
@@ -294,9 +290,10 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 
 - **Soft:** the agent is told to stop once there are no Blockers/Should-fix left.
 - **Hard:** the relay enforces a **per-PR round cap** (default 3). Once hit, it refuses to run
-  reviewers and prints a clear ⛔ STOP message, so the agent ends the loop. The counter lives in
-  `$XDG_CACHE_HOME/pr-review-relay/`, **auto-resets after 6h** of inactivity (a fresh session), and
-  can be cleared with `--reset`. Tune with `--max-rounds N` or `PR_RELAY_MAX_ROUNDS`.
+  reviewers, prints a clear ⛔ STOP message, and **exits `4`** so the agent ends the loop instead of
+  mistaking it for a pass. The counter lives in `$XDG_CACHE_HOME/pr-review-relay/`, **auto-resets after
+  6h** of inactivity (a fresh session), and can be cleared with `--reset`. Tune with `--max-rounds N` or
+  `PR_RELAY_MAX_ROUNDS`.
 
 ## 🔍 How it works
 
@@ -316,6 +313,28 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
    🔵 Cursor / 🟠 Antigravity / ⚪ OpenCode).
 4. **Idempotent:** before posting, it deletes any previous review from the *same* agent on that PR,
    so re-runs replace rather than duplicate — one current review per agent.
+
+## 🚦 Exit codes (fail-closed)
+
+`✔ Relay done.` alone doesn't mean "everyone reviewed" — so the relay signals the outcome through its
+**exit code**, and fails closed (any doubt → non-zero). A script driving the handoff should branch on it:
+
+| Code | Meaning | What to do |
+|------|---------|------------|
+| `0` | Every reviewer that ran produced **and posted** a review, and the PR head didn't move. | Everyone *ran* — not that it's approved. Read the reviews, resolve every Blocker/Should-fix, then merge. |
+| `3` | Not a clean round: a reviewer returned empty / timed out / exited non-zero / failed to post, **or** an explicitly-requested reviewer was missing, **or** no reviewer ran, **or** HEAD moved mid-round (reviews now describe stale code). | Fix the cause and re-run; don't treat as reviewed. |
+| `4` | Review-round cap reached. | Stop looping; escalate to a human. |
+| `1`/`2` | Usage/precondition error (no `gh`, no PR, empty diff, bad arg). | Fix the invocation. |
+
+A missing CLI from the **default** reviewer set is a tolerated skip (users have different agents
+installed); only reviewers named explicitly via `--reviewers` are required to be present. Each posted
+review's footer records the **reviewed SHA** so you can tell whether a review predates a later push.
+
+> **Note:** reviews are posted as they complete, *before* the end-of-round SHA re-check. So a round that
+> ends in `3` (a reviewer failed, or HEAD moved mid-round) may still have left comments on the PR — tagged
+> with the SHA they reviewed. Trust the **exit code**, not the mere presence of comments: on `3`, re-run
+> and read the fresh round. A round that actually dispatched reviewers **consumes one cap slot even when it
+> ends in `3`** (a persistently flaky reviewer must still hit the cap) — a round where *nobody* ran does not.
 
 ## 📋 Notes & caveats
 

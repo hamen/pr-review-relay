@@ -1,0 +1,21 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  fail-closed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4   # wrap-collapsed-pr-comment.mjs needs node
+        with:
+          node-version: '20'
+      - name: bash syntax check
+        run: |
+          bash -n pr-review-relay
+          bash -n test/test-fail-closed.sh
+      - name: fail-closed exit-code tests
+        run: bash test/test-fail-closed.sh

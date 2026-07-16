@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Fail-closed verdict tests for pr-review-relay.
+#
+# Stubs `gh` and the agent CLIs on PATH, runs the relay against a fake PR, and
+# asserts the exit code for each scenario:
+#   0  every reviewer ran and posted
+#   3  a reviewer failed / no reviewers ran / HEAD moved (SHA drift)
+#   4  review-round cap reached
+#
+# No network, no real agents. Run: bash test/test-fail-closed.sh
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+RELAY="$HERE/../pr-review-relay"
+WORK="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
+[ -n "$WORK" ] && [ -d "$WORK" ] || { echo "no temp dir" >&2; exit 1; }
+BIN="$WORK/bin"; mkdir -p "$BIN"
+trap 'rm -rf "$WORK"' EXIT
+
+# --- stub: gh ----------------------------------------------------------------
+cat > "$BIN/gh" <<'GH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "pr view")
+    if printf '%s\n' "$@" | grep -q headRefOid; then
+      c=$(cat "$GH_SHA_COUNTER" 2>/dev/null || echo 0); c=$((c+1)); echo "$c" > "$GH_SHA_COUNTER"
+      # Simulate a failed SHA read (empty output) at start (call 1) or end (call 2).
+      case "${GH_SHA_FAIL:-}" in
+        start) [ "$c" -le 1 ] && exit 0 ;;
+        end)   [ "$c" -ge 2 ] && exit 0 ;;
+        both)  exit 0 ;;
+      esac
+      if [ -n "${GH_SHA_DRIFT:-}" ]; then
+        [ "$c" -le 1 ] && echo "aaaaaaa1111111111111111111111111111111111" || echo "bbbbbbb2222222222222222222222222222222222"
+      else
+        echo "aaaaaaa1111111111111111111111111111111111"
+      fi
+    elif printf '%s\n' "$@" | grep -q url; then echo "http://example.test/pr/1"
+    elif printf '%s\n' "$@" | grep -q number; then echo 1
+    fi ;;
+  "repo view") echo "owner/repo" ;;
+  "pr diff")   echo "diff --git a/x b/x"; echo "+change" ;;
+  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; exit 0 ;;
+  *) echo "" ;;
+esac
+exit 0
+GH
+chmod +x "$BIN/gh"
+
+# --- stub: agents (claude / codex / cursor-agent / agy / opencode) -----------
+make_agent() {
+  cat > "$BIN/$1" <<AG
+#!/usr/bin/env bash
+self="\$(basename "\$0")"
+case "\$self" in cursor-agent) key=cursor;; agy) key=antigravity;; *) key="\$self";; esac
+case ",\${SLEEP_KEYS:-}," in *",\$key,"*) sleep 5;; esac        # outlast a short timeout → rc 124
+case ",\${FAIL_EMPTY:-}," in *",\$key,"*) exit 0;; esac      # empty output, rc 0 → "no review"
+case ",\${WS_ONLY:-}," in *",\$key,"*) printf '\t\n  \n';  exit 0;; esac  # whitespace-only "review"
+case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output but rc!=0
+echo "LGTM from \$key."
+exit 0
+AG
+  chmod +x "$BIN/$1"
+}
+for a in claude codex cursor-agent agy opencode; do make_agent "$a"; done
+
+# --- test harness ------------------------------------------------------------
+PASS=0; FAIL=0
+run() { # run <expected_exit> <desc> -- <extra env assignments...>
+  local expect="$1" desc="$2"; shift 2
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"
+  rm -f "$WORK/sha_counter"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" "$@" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  local rc=$?
+  if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
+}
+
+echo "pr-review-relay fail-closed tests:"
+run 0 "both reviewers post → clean pass"
+run 3 "one reviewer returns empty → not clean"          FAIL_EMPTY=codex
+run 3 "one reviewer exits non-zero (truncated) → not clean" FAIL_RC=codex
+run 3 "SHA drift during round → stale, fail"            GH_SHA_DRIFT=1
+run 3 "SHA unreadable at start → cannot prove stability" GH_SHA_FAIL=start
+run 3 "SHA unreadable at end → cannot prove stability"   GH_SHA_FAIL=end
+run 3 "comment posting fails → not clean"               GH_POST_FAIL=1
+run 3 "whitespace-only review → not a valid review"     WS_ONLY=codex
+run 3 "reviewer times out → not clean"                  SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1
+
+# bespoke runs: <expected> <desc> -- <args...>  (custom --reviewers / --dry-run)
+runx() {
+  local expect="$1" desc="$2"; shift 2
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity "$@" >/dev/null 2>&1
+  local rc=$?
+  if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
+}
+
+runx 3 "explicitly requested unknown reviewer → fail"   --reviewers claude,bogus --parallel
+runx 3 "malicious reviewer name is contained, still fails" --reviewers 'claude,../../PWNED' --parallel
+runx 0 "duplicate reviewer is deduped → clean pass"     --reviewers claude,claude --parallel
+runx 0 "dry-run + valid explicit config → clean preflight" --reviewers claude,codex --dry-run
+runx 3 "dry-run + invalid explicit config → fail preflight" --reviewers claude,bogus --dry-run
+
+# author-only reviewer list → nobody runs → exit 3 (real run and dry-run)
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author claude --reviewers claude --parallel >/dev/null 2>&1
+rc=$?; if [ "$rc" = 3 ]; then echo "  ok   [3] author-only list → no reviewers ran"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 3] author-only"; FAIL=$((FAIL+1)); fi
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author claude --reviewers claude --dry-run >/dev/null 2>&1
+rc=$?; if [ "$rc" = 3 ]; then echo "  ok   [3] dry-run + zero runnable reviewers → fail"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 3] dry-run zero runnable"; FAIL=$((FAIL+1)); fi
+# the traversal attempt must NOT create a file outside the temp status dir
+if [ -e "$WORK/PWNED" ] || [ -e "$HOME/PWNED" ] || [ -e ./PWNED ]; then
+  echo "  FAIL path traversal escaped STATUS_DIR"; FAIL=$((FAIL+1))
+else
+  echo "  ok   [-] traversal contained (no stray PWNED file)"; PASS=$((PASS+1))
+fi
+
+runx 0 "sequential run (no --parallel) → clean pass"    --reviewers claude,codex
+
+# default set with only a subset of CLIs installed → skip the missing ones, exit 0.
+# PATH excludes the real agent dir; BIN2 has gh+claude+codex (+node for the wrapper).
+BIN2="$WORK/bin2"; mkdir -p "$BIN2"
+for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN2/$t"; done
+ln -sf "$(command -v node)" "$BIN2/node" 2>/dev/null
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --parallel >/dev/null 2>&1
+rc=$?; if [ "$rc" = 0 ]; then echo "  ok   [0] default set, subset installed → skip missing, pass"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 0] default subset"; FAIL=$((FAIL+1)); fi
+
+# wrap helper: a review that merely MENTIONS <details> must still be wrapped with our summary.
+printf '## Heading\nThis review discusses a <details> element in the code.\n' > "$WORK/rev.md"
+wout=$(node "$HERE/../wrap-collapsed-pr-comment.mjs" --summary "MARK-42" --footer "<sub>f</sub>" --file "$WORK/rev.md")
+if printf '%s' "$wout" | grep -q "<summary>MARK-42</summary>"; then echo "  ok   [-] wrap keeps summary when body mentions <details>"; PASS=$((PASS+1)); else echo "  FAIL wrap dropped summary"; FAIL=$((FAIL+1)); fi
+
+# invalid --max-rounds is a usage error (must not silently bypass the cap)
+runx 2 "invalid --max-rounds → usage error"             --reviewers claude,codex --max-rounds nope
+
+# a preflight-only failure (--reviewers bogus) must NOT consume a cap round
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers bogus --parallel >/dev/null 2>&1
+if [ ! -f "$WORK/cache/pr-review-relay/owner_repo#1.round" ]; then echo "  ok   [-] preflight-only failure does not burn a round"; PASS=$((PASS+1)); else echo "  FAIL bogus consumed a round"; FAIL=$((FAIL+1)); fi
+
+# contrast: a round that actually dispatched reviewers but failed DOES consume a slot
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" FAIL_EMPTY=codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+rf="$WORK/cache/pr-review-relay/owner_repo#1.round"
+if [ -f "$rf" ] && [ "$(cat "$rf")" = 1 ]; then echo "  ok   [-] failed round (reviewers ran) consumes a slot"; PASS=$((PASS+1)); else echo "  FAIL failed round did not consume a slot"; FAIL=$((FAIL+1)); fi
+
+# wrapper (node) failure → reviewer recorded as failed → exit 3 (not posted as ok)
+BIN4="$WORK/bin4"; mkdir -p "$BIN4"
+for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN4/$t"; done
+printf '#!/usr/bin/env bash\nexit 1\n' > "$BIN4/node"; chmod +x "$BIN4/node"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN4:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+rc=$?; if [ "$rc" = 3 ]; then echo "  ok   [3] comment wrapper failure → not clean"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 3] wrapper failure"; FAIL=$((FAIL+1)); fi
+
+# cap: pre-seed the round file at the cap, then a normal run must exit 4
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"
+printf '3' > "$WORK/cache/pr-review-relay/owner_repo#1.round"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 4 ]; then echo "  ok   [4] round cap reached → exit 4"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 4] round cap"; FAIL=$((FAIL+1)); fi
+
+echo "-------------------------------------------"
+echo "PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" = 0 ]
