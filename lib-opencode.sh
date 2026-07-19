@@ -33,6 +33,13 @@ opencode_abs_path() {
   esac
 }
 
+# Defined at source time so `set -u` callers can reference it even when the
+# reviewer was never selected and opencode_resolve_bin() therefore never ran.
+OPENCODE_BIN=opencode
+
+# Only call this when the opencode reviewer is actually selected: it exits 2 on an
+# unusable explicit override, and an optional reviewer must not break a run that
+# didn't ask for it.
 opencode_resolve_bin() {
   OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
   if [ -n "$OPENCODE_BIN" ]; then

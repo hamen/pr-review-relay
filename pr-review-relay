@@ -61,11 +61,21 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# After arg parsing: a bad PR_RELAY_OPENCODE_BIN exits 2, and that must not
-# happen for a run that never asked for the opencode reviewer... but it also
-# must not be deferred into a subshell where the exit would be swallowed.
-# Resolving here keeps it a clean top-level failure.
-opencode_resolve_bin
+# Resolve the opencode binary ONLY when that reviewer is actually selected:
+# opencode_resolve_bin exits 2 on an unusable PR_RELAY_OPENCODE_BIN, and an
+# optional reviewer must not break `--reviewers claude`. It cannot be deferred
+# into tool_for() either — that is called in a command substitution, where the
+# exit would be swallowed and the failure silently downgraded to a skip.
+_relay_wants_opencode() {
+  local _r; local -a _list=()
+  IFS=',' read -ra _list <<< "$REVIEWERS"
+  for _r in ${_list[@]+"${_list[@]}"}; do
+    _r="${_r// }"
+    [ "$_r" = opencode ] && [ "$_r" != "$AUTHOR" ] && return 0
+  done
+  return 1
+}
+_relay_wants_opencode && opencode_resolve_bin
 
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
