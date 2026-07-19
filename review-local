@@ -84,7 +84,13 @@ if [ -n "$OPENCODE_BIN" ]; then
     /*) ;;
     *)  OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
   esac
-  [ -x "$OPENCODE_BIN" ] || echo "  ! PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable" >&2
+  # Fail fast: a user-supplied override that cannot run is a configuration error,
+  # not something to surface minutes later as a vague "not installed" skip.
+  [ -x "$OPENCODE_BIN" ] || {
+    echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable." >&2
+    echo "  Give an absolute path, a relative path, or a name on PATH (a leading ~ is not expanded)." >&2
+    exit 2
+  }
 else
   if command -v opencode >/dev/null 2>&1;         then OPENCODE_BIN="$(command -v opencode)"; case "$OPENCODE_BIN" in /*) ;; *) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";; esac
   elif [ -x "${HOME:-}/.opencode/bin/opencode" ]; then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"

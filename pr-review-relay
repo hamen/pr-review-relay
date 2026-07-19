@@ -147,7 +147,11 @@ if [ "$ROUND_SHARED" = 1 ]; then
   # that was left group/other-writable by an earlier run (or by an attacker who
   # got there first and lost the ownership check) would still let someone plant a
   # round-file symlink, so check the mode we actually ended up with.
+  # BSD/macOS `stat -f %Lp` includes the file-type bits (a 0700 dir reads as
+  # 40700), so compare only the low three octal digits or the check never matches
+  # and we chmod on every run.
   _round_mode="$(stat -c %a "$ROUND_DIR" 2>/dev/null || stat -f %Lp "$ROUND_DIR" 2>/dev/null || echo '')"
+  _round_mode="${_round_mode: -3}"
   case "$_round_mode" in
     700|'') ;;   # empty = no usable stat; the ownership check above still applied
     *) chmod 700 "$ROUND_DIR" 2>/dev/null || { echo "✖ cannot secure round-state dir '$ROUND_DIR' (mode $_round_mode)" >&2; exit 1; };;
@@ -268,7 +272,13 @@ if [ -n "$OPENCODE_BIN" ]; then
   esac
   # An explicit override that isn't runnable is a user error worth naming here,
   # rather than surfacing later as a confusing "not installed" skip.
-  [ -x "$OPENCODE_BIN" ] || echo "  ! PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable" >&2
+  # Fail fast: a user-supplied override that cannot run is a configuration error,
+  # not something to surface minutes later as a vague "not installed" skip.
+  [ -x "$OPENCODE_BIN" ] || {
+    echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable." >&2
+    echo "  Give an absolute path, a relative path, or a name on PATH (a leading ~ is not expanded)." >&2
+    exit 2
+  }
 else
   if command -v opencode >/dev/null 2>&1;           then OPENCODE_BIN="$(command -v opencode)"; case "$OPENCODE_BIN" in /*) ;; *) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";; esac
   elif [ -x "${HOME:-}/.opencode/bin/opencode" ];   then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
@@ -299,6 +309,18 @@ fi
 #
 # `--pure` on the invocation skips external plugins, which otherwise load and can
 # execute code at startup regardless of these permissions.
+#
+# KNOWN, ACCEPTED RESIDUAL: OPENCODE_CONFIG_CONTENT is not the last layer — managed
+# (organization) config is merged after it and could in principle re-allow bash.
+# That is deliberately not defended against here, because it is not reachable by
+# the threat this hardening exists for. The attacker we care about is whoever
+# authored the branch being reviewed, and managed config lives in /etc/opencode or
+# /Library/Application Support/opencode — root-owned, not writable by a pull
+# request. If the machine's administrator has configured a permissive policy for
+# every OpenCode run, that is their deliberate machine-wide choice, not something
+# a diff can reach. (OPENCODE_PERMISSION is also not a fix: it applies later still
+# but only sets the TOP-LEVEL permission block, so an agent-scoped
+# agent.plan.permission.bash: allow still wins — verified, bash ran.)
 #
 # With no shell the reviewer cannot fetch the PR itself, so the diff is attached as
 # a file instead (see the opencode case below).
