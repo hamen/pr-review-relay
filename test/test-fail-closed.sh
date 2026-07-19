@@ -249,15 +249,30 @@ oc_cfg() { # oc_cfg <desc> <has|hasnt> <pattern>
            else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
   esac
 }
+# NOTE ON WHAT THESE CAN AND CANNOT PROVE: they assert the policy the relay SENDS,
+# not the policy OpenCode ENFORCES — a hermetic test cannot run the real agent. Both
+# holes fixed here were found by review and confirmed by hand against a live
+# opencode, not by this file. Treat these as regression guards on the config string.
 oc_cfg "denies edit"  has '"edit":"deny"'
 oc_cfg "denies write" has '"write":"deny"'
-oc_cfg "denies arbitrary bash" has '"\*":"deny"'
-# link mode needs the reviewer to fetch the PR itself, so these two stay allowed
-oc_cfg "allows gh pr view"  has 'gh pr view\*":"allow"'
-oc_cfg "allows gh pr diff"  has 'gh pr diff\*":"allow"'
+oc_cfg "denies bash outright" has '"bash":"deny"'
+# An allowlist was tried and defeated by shell redirection (`gh pr view N > file`
+# matches the allowed prefix and writes). There must be no allow rule at all.
+oc_cfg "no bash allowlist survives" hasnt '"allow"'
+# OpenCode applies agent-specific permissions AFTER global ones, so a user's
+# agent.plan.permission would reinstate shell unless we deny there too.
+oc_cfg "mirrors the deny under agent.plan" has '"agent":{"plan":{"permission"'
+
+# Shell is denied, so the reviewer can never fetch the PR: the diff must be ATTACHED
+# in both modes. `-f` takes an array, so `--` must precede the prompt or the prompt
+# is swallowed as another filename (opencode then dies with "File not found").
+oc_assert "attaches the diff with -f" has " -f "
+oc_assert "separates the prompt with --" has " -- "
+oc_assert "tells the agent shell is disabled" has "shell access is disabled"
 
 oc_run 0 "opencode runs read-only, diff mode" -- --diff
 oc_assert "diff-mode argv still read-only" has "--agent plan"
+oc_assert "diff mode also attaches the diff" has " -f "
 # Prove we are actually in diff mode. Checking for the diff body would NOT prove it:
 # link mode inlines the same diff as a fallback under LINK_DIFF_FALLBACK_MAX_BYTES.
 # The prompt preamble is the real discriminator between the two modes.
@@ -283,6 +298,17 @@ if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then
 else
   echo "  FAIL [got $rc] off-PATH stock install was skipped (argv file empty=$([ -s "$OC_ARGV" ] || echo yes))"; FAIL=$((FAIL+1))
 fi
+
+# HOME unset (cron / systemd / minimal containers) must NOT abort the relay. Under
+# `set -u` a bare $HOME in the startup resolution kills every reviewer, not just
+# opencode, because it runs before any dispatch.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+env -u HOME PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   [0] HOME unset → relay still runs (no unbound variable)"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] HOME unset aborted the relay"; FAIL=$((FAIL+1)); fi
 
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"

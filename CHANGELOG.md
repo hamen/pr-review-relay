@@ -19,6 +19,10 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   startup so it feeds both the availability check and the invocation.
 - **`review-local` had the same two faults** (nonexistent flag, bare `opencode` name) and is fixed
   alongside — otherwise the companion command would stay broken while the docs claimed otherwise.
+- **`HOME` unset no longer aborts the relay.** The startup binary resolution referenced a bare
+  `$HOME`; under `set -u` that dies with `HOME: unbound variable` in cron, systemd units and minimal
+  containers — and because resolution runs before any dispatch, it took down *every* reviewer, not
+  just opencode. Now `${HOME:-}`, with a regression test.
 
 ### Changed
 

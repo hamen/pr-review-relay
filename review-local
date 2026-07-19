@@ -55,17 +55,24 @@ P
 
 # Same OpenCode resolution as pr-review-relay: the official installer puts the
 # binary in ~/.opencode/bin, which is not on PATH, so `command -v` misses it.
+# "${HOME:-}" is deliberate: under `set -u` a bare $HOME aborts the script outright
+# in environments that don't set it (cron, systemd, minimal containers).
 OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
-if [ -z "$OPENCODE_BIN" ]; then
-  if command -v opencode >/dev/null 2>&1;     then OPENCODE_BIN=opencode
-  elif [ -x "$HOME/.opencode/bin/opencode" ]; then OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+if [ -n "$OPENCODE_BIN" ]; then
+  [ -x "$OPENCODE_BIN" ] || echo "  ! PR_RELAY_OPENCODE_BIN=$OPENCODE_BIN is not executable" >&2
+else
+  if command -v opencode >/dev/null 2>&1;         then OPENCODE_BIN=opencode
+  elif [ -x "${HOME:-}/.opencode/bin/opencode" ]; then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
   else OPENCODE_BIN=opencode; fi
 fi
 
-# Read-only enforcement for the opencode reviewer. Stricter than pr-review-relay's:
-# review-local always hands the diff over as an argument, so the reviewer never
-# needs to shell out to fetch anything and bash is denied outright.
-OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"}}'
+# Read-only enforcement for the opencode reviewer: shell denied outright (the diff
+# is handed over directly, so it never needs to fetch anything). The deny is also
+# mirrored under agent.plan because OpenCode applies agent-specific permissions
+# AFTER the global ones — a user's `agent.plan.permission.bash: allow` would
+# otherwise reinstate shell for exactly the agent we run. `--agent plan` is not a
+# sandbox on its own; this config is what enforces read-only.
+OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"},"agent":{"plan":{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"}}}}'
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
