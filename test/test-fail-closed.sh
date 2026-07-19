@@ -276,7 +276,7 @@ oc_cfg "no bash prefix allowlist" hasnt 'gh pr'
 # OpenCode applies agent-specific permissions AFTER global ones, so a user's
 # agent.plan.permission would reinstate shell unless we deny there too.
 oc_cfg "defines its own primary agent" has '"pr-review-relay-ro":{"mode":"primary"'
-oc_cfg "that agent is default-deny too" has '"pr-review-relay-ro".*"\*":"deny"' 
+oc_cfg "that agent is default-deny too" has '"pr-review-relay-ro".*"\*":"deny"'
 # External plugins load and can execute code at startup regardless of permissions.
 oc_assert "skips external plugins with --pure" has "--pure"
 # The diff is attached, so the inline link-mode fallback must NOT also be in the
@@ -560,6 +560,18 @@ if [ -f "$RL" ]; then
   if [ "$rc" = 3 ]; then echo "  ok   [3] review-local fails on an explicitly requested missing reviewer"; PASS=$((PASS+1))
   else echo "  FAIL [got $rc, want 3] review-local silently skipped a missing reviewer"; FAIL=$((FAIL+1)); fi
   rl_assert "review-local: defines its own agent" has '"pr-review-relay-ro"' "$OC_ARGV.cfg"
+  # Zero dispatched reviewers must not read as a clean review.
+  ( cd "$RLREPO" && env HOME="$WORK/nohome" PATH="/usr/bin:/bin" bash "$RL" --base mainline >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 3 ]; then echo "  ok   [3] review-local fails when no reviewer ran"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want 3] review-local reported success with zero reviewers"; FAIL=$((FAIL+1)); fi
+  # Duplicates are deduped, and empty items tolerated, like the relay.
+  rm -f "$OC_ARGV"
+  ( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" \
+      bash "$RL" --base mainline --reviewers 'opencode,,opencode' >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 0 ]; then echo "  ok   [0] review-local dedupes and tolerates empty items"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want 0] duplicate/empty reviewer list mishandled"; FAIL=$((FAIL+1)); fi
   # The same isolation the relay is asserted on: project config off, and launched
   # outside the repo. Checking only one call site is how the two drift.
   rl_assert "review-local: disables project config" has "1" "$OC_ARGV.projcfg"

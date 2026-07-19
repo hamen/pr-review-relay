@@ -72,7 +72,30 @@ opencode_resolve_symlinks() {
     esac
     _n=$((_n + 1))
   done
-  printf '%s/%s' "$(cd "$(dirname "$_p")" 2>/dev/null && pwd -P)" "$(basename "$_p")"
+  local _d
+  _d="$(cd "$(dirname "$_p")" 2>/dev/null && pwd -P)" || _d=""
+  # A broken chain would otherwise fabricate "/name"; hand back what we have so the
+  # caller compares something real.
+  if [ -n "$_d" ]; then printf '%s/%s' "$_d" "$(basename "$_p")"; else printf '%s' "$_p"; fi
+}
+
+# Shared by the hard refusal and the softer warning: prints the resolved target if
+# it is inside the worktree, nothing otherwise.
+opencode_target_in_repo() {
+  local _root _target
+  _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$_root" ] || return 1
+  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 1
+  _target="$(opencode_resolve_symlinks "$1")" || return 1
+  case "$_target" in "$_root"/*) printf '%s' "$_target";; *) return 1;; esac
+}
+
+opencode_warn_if_in_repo() {
+  local _t
+  _t="$(opencode_target_in_repo "$1")" || return 0
+  echo "  ! PR_RELAY_OPENCODE_BIN resolves to '$_t', inside the repository being reviewed." >&2
+  echo "    Running it anyway because you named a path explicitly — but if that was a typo," >&2
+  echo "    you are about to execute a file from the branch under review." >&2
 }
 
 opencode_reject_if_in_repo() {
@@ -83,9 +106,9 @@ opencode_reject_if_in_repo() {
   # Check what the name actually RESOLVES to, not the name itself: a trusted PATH
   # directory can hold `opencode -> <reviewed-repo>/malicious`, and canonicalizing
   # only the parent directory would wave that straight through.
-  _target="$(opencode_resolve_symlinks "$1")"
+  _target="$(opencode_target_in_repo "$1")" || return 0
   case "$_target" in
-    "$_root"/*)
+    *)
       echo "✖ refusing to run '$1': it resolves to '$_target', inside the repository being reviewed." >&2
       echo "  A PATH lookup found it in the checkout (a '.' entry, a repo-local bin dir, or a" >&2
       echo "  bare PR_RELAY_OPENCODE_BIN). Fix PATH, or give PR_RELAY_OPENCODE_BIN a path" >&2
@@ -101,7 +124,12 @@ opencode_resolve_bin() {
   OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
   if [ -n "$OPENCODE_BIN" ]; then
     case "$OPENCODE_BIN" in
-      */*) OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")";;
+      */*)
+        OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")"
+        # A path you typed is exempt from the hard refusal — that is the escape
+        # hatch — but a typo or a stale relative path can still land inside the
+        # checkout, so say so rather than letting it pass in silence.
+        opencode_warn_if_in_repo "$OPENCODE_BIN";;
       *)
         # A BARE name means "on PATH", so resolve it there and nowhere else — never
         # fall back to the literal name, which opencode_abs_path would turn into
