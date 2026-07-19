@@ -584,6 +584,38 @@ if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] a relative TMPDIR s
 else echo "  FAIL [got $rc] relative TMPDIR broke the attachment paths"; FAIL=$((FAIL+1)); fi
 oc_assert "attachment path is absolute" has " -f /"
 
+# CDPATH can steer `cd`, so a relative PATH entry could be canonicalized to a
+# CDPATH match outside the repo while the shell still resolves commands from the
+# repo-local one. The guard must not be foolable that way.
+mkdir -p "$WORK/decoy/bin" "$WORK/dotpath/bin"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env CDPATH="$WORK/decoy" PATH="bin:$BIN2:/usr/bin:/bin" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] CDPATH cannot steer the PATH containment check"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] CDPATH redirected the guard away from the repo"; FAIL=$((FAIL+1)); fi
+
+# An EXPLICIT override inside the repo is refused, not just warned about...
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+cp "$BIN/opencode" "$WORK/dotpath/oc-inrepo"; chmod +x "$WORK/dotpath/oc-inrepo"
+( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" PR_RELAY_OPENCODE_BIN="$WORK/dotpath/oc-inrepo" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] an explicit in-repo override is refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] explicit in-repo override only warned"; FAIL=$((FAIL+1)); fi
+
+# ...unless the user deliberately opts in.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+    PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 PR_RELAY_OPENCODE_BIN="$WORK/dotpath/oc-inrepo" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 opts back in"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] the documented opt-in did not work"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"

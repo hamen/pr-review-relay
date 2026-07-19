@@ -16,6 +16,14 @@
 #
 # Callers must be Bash 3.2-safe (macOS ships 3.2) and run under `set -u`.
 
+# CDPATH must be neutral for every `cd` below. With CDPATH set, `cd bin` can land
+# in a directory from CDPATH rather than ./bin — so the containment check would
+# canonicalize and approve some innocent path while the shell's own command lookup
+# still used the repo-local one. Verified: with CDPATH=/tmp/decoy, `cd bin` resolved
+# to /tmp/decoy/bin. Unsetting it here covers both callers, since both source this.
+CDPATH=""
+export CDPATH
+
 # --- Binary resolution -------------------------------------------------------
 # OpenCode's official installer puts the binary in ~/.opencode/bin, which is NOT on
 # PATH, so a plain `command -v opencode` misses it and the reviewer is skipped
@@ -95,12 +103,24 @@ opencode_target_in_repo() {
   case "$_target" in "$_root"/*) printf '%s' "$_target";; *) return 1;; esac
 }
 
-opencode_warn_if_in_repo() {
+# An explicit path pointing INTO the checkout is REFUSED, not merely warned about.
+# A warning is the wrong instrument: the relay is normally driven headlessly by
+# another agent, where stderr scrolls past unread, and the consequence is executing
+# a file written by the author of the diff being reviewed.
+# PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 keeps the escape hatch for anyone who genuinely
+# means it — deliberate, and visible in the command line rather than buried in a
+# message nobody read.
+opencode_reject_explicit_in_repo() {
   local _t
   _t="$(opencode_target_in_repo "$1")" || return 0
-  echo "  ! PR_RELAY_OPENCODE_BIN resolves to '$_t', inside the repository being reviewed." >&2
-  echo "    Running it anyway because you named a path explicitly — but if that was a typo," >&2
-  echo "    you are about to execute a file from the branch under review." >&2
+  if [ "${PR_RELAY_OPENCODE_ALLOW_IN_REPO:-}" = 1 ]; then
+    echo "  ! running '$_t' from inside the repository under review (PR_RELAY_OPENCODE_ALLOW_IN_REPO=1)." >&2
+    return 0
+  fi
+  echo "✖ PR_RELAY_OPENCODE_BIN resolves to '$_t', inside the repository being reviewed." >&2
+  echo "  That file is written by whoever wrote the diff. Point it outside the repo, or set" >&2
+  echo "  PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 if you really mean to run it." >&2
+  exit 2
 }
 
 opencode_reject_if_in_repo() {
@@ -260,7 +280,7 @@ opencode_resolve_bin() {
         # A path you typed is exempt from the hard refusal — that is the escape
         # hatch — but a typo or a stale relative path can still land inside the
         # checkout, so say so rather than letting it pass in silence.
-        opencode_warn_if_in_repo "$OPENCODE_BIN";;
+        opencode_reject_explicit_in_repo "$OPENCODE_BIN";;
       *)
         # A BARE name means "on PATH", so resolve it there and nowhere else — never
         # fall back to the literal name, which opencode_abs_path would turn into
@@ -281,7 +301,8 @@ opencode_resolve_bin() {
     # launch with a confusing error; require a regular file too.
     { [ -f "$OPENCODE_BIN" ] && [ -x "$OPENCODE_BIN" ]; } || {
       echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable." >&2
-      echo "  Give an absolute path, a relative path, or a name on PATH (a leading ~ is not expanded)." >&2
+      echo "  Give an absolute path, a relative path, or a name on PATH (a leading ~ is expanded" >&2
+      echo "  when HOME is set)." >&2
       exit 2
     }
   elif command -v opencode >/dev/null 2>&1; then
