@@ -350,7 +350,12 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 
 ## 📋 Notes & caveats
 
-- **Read-only:** reviewers never modify code. They run with `codex exec -s read-only`,
+- **⚠️ Codex is the exception:** `pr-review-relay` invokes it as `codex exec -s danger-full-access`,
+  so that reviewer is **not** sandboxed — it can write files and run commands while reading a diff
+  that, on a public repo, an untrusted contributor wrote. (`review-local` uses `-s read-only`, so the
+  two disagree.) This predates the OpenCode work and is documented here rather than quietly changed:
+  tightening it belongs in its own PR, where the effect on Codex reviews can be tested properly.
+- **Read-only:** the other reviewers never modify code. They run with
   `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
   keep the agent in Q&A/read-only mode), `agy --dangerously-skip-permissions -p` (skips interactive
   permission prompts; the prompt itself is read-only), and `opencode run --agent plan` with an inline

@@ -37,7 +37,6 @@ case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
 
 opencode_is_selected && opencode_resolve_bin
 
-
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 [ -z "$BRANCH" ] && { echo "Not inside a git repo."; exit 1; }
 BRANCH_LABEL="$BRANCH"
@@ -67,8 +66,6 @@ read files in the current repo for context, but DO NOT modify anything. Be
 concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
 good, say so in one line.
 P
-
-
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 

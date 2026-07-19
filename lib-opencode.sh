@@ -28,10 +28,16 @@
 # "${HOME:-}" rather than "$HOME": under `set -u` a bare $HOME aborts the whole
 # script wherever HOME is unset (cron, systemd units, minimal containers).
 opencode_abs_path() {
+  local _dir
   case "$1" in
-    /*) printf '%s' "$1";;
-    *)  printf '%s/%s' "$(cd "$(dirname "$1")" 2>/dev/null && pwd)" "$(basename "$1")";;
+    /*) printf '%s' "$1"; return;;
   esac
+  # If the directory doesn't exist the cd fails and $(...) is empty, which would
+  # fabricate "/opencode" and make the validation error name a file the user never
+  # typed. Hand the original back instead, so the message quotes what they wrote.
+  _dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd)" || _dir=""
+  if [ -n "$_dir" ]; then printf '%s/%s' "$_dir" "$(basename "$1")"
+  else printf '%s' "$1"; fi
 }
 
 # Defined at source time so `set -u` callers can reference it even when the

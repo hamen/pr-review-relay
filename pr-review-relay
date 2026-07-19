@@ -61,10 +61,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-opencode_is_selected && opencode_resolve_bin
-
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
+# After AUTHOR normalization, so opencode_is_selected compares like for like.
+opencode_is_selected && opencode_resolve_bin
 [ -z "$PR" ] && PR=$(gh pr view --json number -q .number 2>/dev/null)
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
