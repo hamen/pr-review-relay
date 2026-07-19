@@ -236,6 +236,12 @@ opencode_resolve_bin() {
   unset -f opencode 2>/dev/null || true
   OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
   if [ -n "$OPENCODE_BIN" ]; then
+    # A leading "~" is shell syntax, not part of a path: by the time it reaches an
+    # env var it is a literal character, so expand it rather than failing on a form
+    # users reasonably expect to work.
+    case "$OPENCODE_BIN" in
+      '~/'*) OPENCODE_BIN="${HOME:-}/${OPENCODE_BIN#\~/}";;
+    esac
     case "$OPENCODE_BIN" in
       */*)
         OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")"

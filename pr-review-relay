@@ -259,6 +259,8 @@ PROMPT="${CONTEXT_BLOCK}${BASE}"
 # PR themselves via `gh` (the whole point of link mode). Tune via env
 # LINK_DIFF_FALLBACK_MAX_BYTES (default 100000; set 0 to always omit).
 LINK_DIFF_FALLBACK_MAX_BYTES="${LINK_DIFF_FALLBACK_MAX_BYTES:-100000}"
+# Validated: a non-numeric value would blow up in the arithmetic below.
+case "$LINK_DIFF_FALLBACK_MAX_BYTES" in ''|*[!0-9]*) echo "invalid LINK_DIFF_FALLBACK_MAX_BYTES: '$LINK_DIFF_FALLBACK_MAX_BYTES' (want bytes)" >&2; exit 2;; esac
 if [ "$MODE" = link ]; then
   _diff_bytes=$(printf '%s' "$DIFF" | wc -c | tr -d ' ')
   if [ "$_diff_bytes" -le "$LINK_DIFF_FALLBACK_MAX_BYTES" ]; then

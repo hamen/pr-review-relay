@@ -132,7 +132,7 @@ review_with() {
       127) why="command not found";;
     esac
     echo "  ! $name: no review — $why" >&2
-    printf 'fail' > "$FAILDIR/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+    printf 'fail' > "$FAILDIR/k_$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
     # On timeout stderr only holds the agent's partial transcript — skip it.
     if [ "$rc" != 124 ] && [ -s "$errf" ]; then
       echo "    $name stderr (last 15 lines):" >&2
@@ -142,7 +142,7 @@ review_with() {
   fi
   if [ "$rc" -ne 0 ]; then
     echo "  ! $name: exited with code $rc — review may be truncated" >&2
-    printf 'fail' > "$FAILDIR/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+    printf 'fail' > "$FAILDIR/k_$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
   fi
   rm -f "$errf"
   printf '\n========== %s review ==========\n%s\n===============================\n' "$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}" "$out"

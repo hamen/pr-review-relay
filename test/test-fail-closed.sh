@@ -66,6 +66,11 @@ for a in claude codex cursor-agent agy opencode; do make_agent "$a"; done
 
 # --- test harness ------------------------------------------------------------
 PASS=0; FAIL=0
+# Assertions use `grep -q ... <<< "$var"`, never `printf ... | grep -q`. Under
+# `set -o pipefail`, grep -q exits as soon as it matches, printf takes SIGPIPE, and
+# the pipeline reports 141 — so a SUCCESSFUL match reads as a failed assertion. It
+# passes locally whenever the payload fits the pipe buffer before grep leaves,
+# which is why this only ever went red on CI.
 run() { # run <expected_exit> <desc> -- <extra env assignments...>
   local expect="$1" desc="$2"; shift 2
   rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"
@@ -136,7 +141,7 @@ rc=$?; if [ "$rc" = 0 ]; then echo "  ok   [0] default set, subset installed →
 # wrap helper: a review that merely MENTIONS <details> must still be wrapped with our summary.
 printf '## Heading\nThis review discusses a <details> element in the code.\n' > "$WORK/rev.md"
 wout=$(node "$HERE/../wrap-collapsed-pr-comment.mjs" --summary "MARK-42" --footer "<sub>f</sub>" --file "$WORK/rev.md")
-if printf '%s' "$wout" | grep -q "<summary>MARK-42</summary>"; then echo "  ok   [-] wrap keeps summary when body mentions <details>"; PASS=$((PASS+1)); else echo "  FAIL wrap dropped summary"; FAIL=$((FAIL+1)); fi
+if grep -q "<summary>MARK-42</summary>" <<< "$wout"; then echo "  ok   [-] wrap keeps summary when body mentions <details>"; PASS=$((PASS+1)); else echo "  FAIL wrap dropped summary"; FAIL=$((FAIL+1)); fi
 
 # invalid --max-rounds is a usage error (must not silently bypass the cap)
 runx 2 "invalid --max-rounds → usage error"             --reviewers claude,codex --max-rounds nope
@@ -237,9 +242,9 @@ oc_assert() { # oc_assert <desc> <grep-mode: has|hasnt> <pattern>
   local desc="$1" mode="$2" pat="$3"
   local got; got="$(cat "$OC_ARGV" 2>/dev/null || true)"
   case "$mode" in
-    has)   if printf '%s' "$got" | grep -q -- "$pat"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+    has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
            else echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1)); fi;;
-    hasnt) if printf '%s' "$got" | grep -q -- "$pat"; then echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1));
+    hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1));
            else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
   esac
 }
@@ -254,9 +259,9 @@ oc_cfg() { # oc_cfg <desc> <has|hasnt> <pattern>
   local desc="$1" mode="$2" pat="$3" got
   got="$(cat "$OC_ARGV.cfg" 2>/dev/null || true)"
   case "$mode" in
-    has)   if printf '%s' "$got" | grep -q -- "$pat"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+    has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
            else echo "  FAIL $desc (cfg: $got)"; FAIL=$((FAIL+1)); fi;;
-    hasnt) if printf '%s' "$got" | grep -q -- "$pat"; then echo "  FAIL $desc (cfg: $got)"; FAIL=$((FAIL+1));
+    hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc (cfg: $got)"; FAIL=$((FAIL+1));
            else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
   esac
 }
@@ -606,9 +611,9 @@ if [ -f "$RL" ]; then
     local desc="$1" mode="$2" pat="$3" file="$4" got
     got="$(cat "$file" 2>/dev/null || true)"
     case "$mode" in
-      has)   if printf '%s' "$got" | grep -q -- "$pat"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+      has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
              else echo "  FAIL $desc"; FAIL=$((FAIL+1)); fi;;
-      hasnt) if printf '%s' "$got" | grep -q -- "$pat"; then echo "  FAIL $desc"; FAIL=$((FAIL+1));
+      hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc"; FAIL=$((FAIL+1));
              else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
     esac
   }
