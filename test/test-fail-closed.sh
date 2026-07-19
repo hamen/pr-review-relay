@@ -425,6 +425,17 @@ rc=$?
 if [ "$rc" = 2 ]; then echo "  ok   [2] a repo-local opencode on PATH is refused"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 2] ran an opencode from the reviewed checkout"; FAIL=$((FAIL+1)); fi
 
+# Same threat, reached through a SYMLINK to the worktree: git reports a physical
+# toplevel while $PWD stays logical, so a prefix comparison of the two misses.
+ln -sfn "$WORK/dotpath" "$WORK/dotlink"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotlink" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] repo-local opencode refused through a symlinked worktree"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] symlinked worktree bypassed the containment guard"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"

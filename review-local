@@ -36,8 +36,6 @@ while [ $# -gt 0 ]; do
 done
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
 
-opencode_is_selected && opencode_resolve_bin
-
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 [ -z "$BRANCH" ] && { echo "Not inside a git repo."; exit 1; }
 BRANCH_LABEL="$BRANCH"
@@ -45,6 +43,10 @@ if [ "$BRANCH" = "HEAD" ]; then
   BRANCH_LABEL="detached@$(git rev-parse --short HEAD 2>/dev/null)"
 fi
 git rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "Base ref '$BASE' not found."; exit 1; }
+
+# After the repo checks: a reviewer-specific configuration error should not be the
+# first thing a user sees when the real problem is that they are not in a repo.
+opencode_is_selected && opencode_resolve_bin
 
 echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHOR:-none}"
 

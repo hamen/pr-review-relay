@@ -36,7 +36,10 @@ opencode_abs_path() {
   # If the directory doesn't exist the cd fails and $(...) is empty, which would
   # fabricate "/opencode" and make the validation error name a file the user never
   # typed. Hand the original back instead, so the message quotes what they wrote.
-  _dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd)" || _dir=""
+  # pwd -P: the containment check below compares this against the git toplevel, and
+  # git reports a PHYSICAL path. Entering the checkout through a symlink would
+  # otherwise give /symlink/opencode vs /real/repo — no prefix match, guard bypassed.
+  _dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || _dir=""
   if [ -n "$_dir" ]; then printf '%s/%s' "$_dir" "$(basename "$1")"
   else printf '%s' "$1"; fi
 }
@@ -93,6 +96,8 @@ opencode_resolve_bin() {
     # repository under review in that case, so there is nothing to contain.
     _oc_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
     [ -n "$_oc_root" ] || return 0
+    # ...and canonicalize it too, so both sides are physical.
+    _oc_root="$(cd "$_oc_root" 2>/dev/null && pwd -P)" || return 0
     case "$OPENCODE_BIN" in
       "$_oc_root"/*)
         echo "✖ refusing to run '$OPENCODE_BIN': it is inside the repository being reviewed." >&2
