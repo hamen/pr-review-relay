@@ -53,7 +53,21 @@ concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
 good, say so in one line.
 P
 
-tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
+# Same OpenCode resolution as pr-review-relay: the official installer puts the
+# binary in ~/.opencode/bin, which is not on PATH, so `command -v` misses it.
+OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
+if [ -z "$OPENCODE_BIN" ]; then
+  if command -v opencode >/dev/null 2>&1;     then OPENCODE_BIN=opencode
+  elif [ -x "$HOME/.opencode/bin/opencode" ]; then OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+  else OPENCODE_BIN=opencode; fi
+fi
+
+# Read-only enforcement for the opencode reviewer. Stricter than pr-review-relay's:
+# review-local always hands the diff over as an argument, so the reviewer never
+# needs to shell out to fetch anything and bash is denied outright.
+OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"}}'
+
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
 # Agents that read stdin (claude / codex / cursor) get the diff piped in, so a
 # large diff never hits the process argv limit (Windows caps it at ~32K chars).
@@ -67,7 +81,10 @@ review_with() {
     codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
     antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
-    opencode)    out=$(timeout "$AGENT_TIMEOUT" opencode run --dangerously-skip-permissions "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
+    opencode)
+      local -a _oc_model=()
+      [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && _oc_model=(-m "$PR_RELAY_OPENCODE_MODEL")
+      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run --agent plan ${_oc_model[@]+"${_oc_model[@]}"} "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr.

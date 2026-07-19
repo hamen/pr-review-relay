@@ -349,10 +349,15 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 - **Read-only:** reviewers never modify code. They run with `codex exec -s read-only`,
   `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
   keep the agent in Q&A/read-only mode), `agy --dangerously-skip-permissions -p` (skips interactive
-  permission prompts; the prompt itself is read-only), and `opencode run --agent plan` (OpenCode's
-  built-in read-only agent). **OpenCode is deliberately not run with `--auto`:** that auto-approves
-  every `ask` permission, and the default `build` agent is configured `{"permission":"*","action":"allow"}` —
-  a reviewer reads untrusted PR content, so it must not be able to edit files or run commands.
+  permission prompts; the prompt itself is read-only), and `opencode run --agent plan` with an inline
+  deny-list.
+- **OpenCode read-only is enforced by config, not by the agent name.** `--agent plan` alone is *not* a
+  sandbox — the Plan agent's permissions remain user-configurable, and on a machine whose config allows
+  `bash` it will run shell commands that came from the PR text. So each invocation also sets
+  `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks your own `opencode.json`) denying
+  `edit`/`write`/`patch`/`task`/`webfetch`/`websearch` and all `bash` except the two read-only
+  `gh pr view` / `gh pr diff` calls link mode needs. It is deliberately **not** run with `--auto`,
+  which would auto-approve every `ask` permission.
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in

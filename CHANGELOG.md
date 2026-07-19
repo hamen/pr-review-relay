@@ -17,14 +17,22 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 - **OpenCode is now resolved from the stock install path.** `PATH` first, then
   `~/.opencode/bin/opencode`, overridable with `PR_RELAY_OPENCODE_BIN`. Resolution happens once at
   startup so it feeds both the availability check and the invocation.
+- **`review-local` had the same two faults** (nonexistent flag, bare `opencode` name) and is fixed
+  alongside — otherwise the companion command would stay broken while the docs claimed otherwise.
 
 ### Changed
 
-- **OpenCode runs read-only, as `opencode run --agent plan`** — the analogue of
-  `codex exec -s read-only` and `cursor-agent --mode=ask`. Deliberately **not** `--auto`: that
-  auto-approves every `ask` permission, and OpenCode's default `build` agent is configured
-  `{"permission":"*","action":"allow"}`. A reviewer ingests untrusted PR content and must not be
-  able to edit files or run commands.
+- **OpenCode runs read-only, enforced by an inline permission deny-list.** `opencode run --agent plan`
+  plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks the user's own `opencode.json`)
+  denying `edit`/`write`/`patch`/`task`/`webfetch`/`websearch` and all `bash` except the read-only
+  `gh pr view` / `gh pr diff` calls link mode depends on.
+
+  `--agent plan` **on its own is not enough** and was not treated as sufficient: the Plan agent's
+  permissions stay user-configurable, and on a machine whose config allows `bash` it executes shell
+  commands supplied through the reviewed content — confirmed during review, where it ran `id` and
+  returned real output. Deliberately not `--auto`, which auto-approves every `ask` permission.
+  `review-local` gets the same treatment with a stricter blanket `bash: deny`, since it hands the
+  diff over directly and never needs to fetch anything.
 
 ### Added
 

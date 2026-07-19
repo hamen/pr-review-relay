@@ -185,6 +185,17 @@ if [ -z "$OPENCODE_BIN" ]; then
   else OPENCODE_BIN=opencode; fi
 fi
 
+# Inline permission override for the opencode reviewer, applied per invocation via
+# OPENCODE_CONFIG_CONTENT (runtime override; outranks the user's own opencode.json).
+#
+# Shell is denied EXCEPT the two read-only gh calls the link-mode prompt tells the
+# reviewer to run. A blanket "bash": "deny" would be safer still but breaks link
+# mode outright — that mode's whole point is the reviewer fetching the PR itself.
+# Rules are last-match-wins, so the "*" deny comes first and the allows narrow it.
+# Reading the changed files needs no shell: opencode's read/grep/glob tools cover
+# it and stay available.
+OPENCODE_RO_CONFIG='{"permission":{"bash":{"*":"deny","gh pr view*":"allow","gh pr diff*":"allow"},"edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"}}'
+
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
 review_with() {
@@ -210,9 +221,17 @@ review_with() {
         out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>"$errf")
       fi; rc=$?;;
     opencode)
-      # --agent plan: OpenCode's built-in read-only agent. This is the analogue of
-      # `codex exec -s read-only` and `cursor-agent --mode=ask` — a reviewer ingests
-      # untrusted PR content, so it must not be able to edit files or run commands.
+      # Read-only is ENFORCED by config, not by agent choice. `--agent plan` alone is
+      # NOT a sandbox: the Plan agent's permissions stay user-configurable, and on a
+      # machine whose config allows bash, `--agent plan` happily runs shell commands
+      # that came from the PR text (verified — it executed `id` and returned the real
+      # output). A reviewer ingests attacker-controlled content, so the deny list is
+      # what actually holds. OPENCODE_CONFIG_CONTENT is an inline runtime override
+      # that outranks the user's own config.
+      # NB: this is stricter than the codex reviewer above, which currently runs with
+      # `-s danger-full-access` (see review-local, which uses `-s read-only` instead).
+      # That inconsistency predates this change and is left alone here on purpose —
+      # it deserves its own PR rather than being bundled into an opencode fix.
       # Do NOT swap this for --auto: that auto-approves every `ask` permission, and
       # the default `build` agent runs with {"permission":"*","action":"allow"}.
       # -m only when PR_RELAY_OPENCODE_MODEL is set; unset means "use the user's own
@@ -221,9 +240,9 @@ review_with() {
       local -a _oc_model=()
       [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && _oc_model=(-m "$PR_RELAY_OPENCODE_MODEL")
       if [ "$MODE" = diff ]; then
-        out=$(timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run --agent plan ${_oc_model[@]+"${_oc_model[@]}"} "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
+        out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run --agent plan ${_oc_model[@]+"${_oc_model[@]}"} "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
       else
-        out=$(timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run --agent plan ${_oc_model[@]+"${_oc_model[@]}"} "$PROMPT" 2>"$errf")
+        out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run --agent plan ${_oc_model[@]+"${_oc_model[@]}"} "$PROMPT" 2>"$errf")
       fi; rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms

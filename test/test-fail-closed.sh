@@ -183,6 +183,13 @@ make_strict_opencode() { # $1 = dir to install the stub into
 #!/usr/bin/env bash
 # Record argv so the test can assert on it, then enforce the contract.
 printf '%s\n' "$*" > "${OC_ARGV_FILE:?}"
+# Read-only is enforced by the inline permission config, not by --agent alone:
+# on a permissive machine `--agent plan` will still run shell from PR text.
+printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-}" > "${OC_ARGV_FILE}.cfg"
+case "${OPENCODE_CONFIG_CONTENT:-}" in
+  *'"edit":"deny"'*) ;;
+  *) echo "missing read-only OPENCODE_CONFIG_CONTENT" >&2; exit 64;;
+esac
 [ "$1" = run ] || { echo "expected 'run' subcommand, got '$1'" >&2; exit 64; }
 case " $* " in
   *" --dangerously-skip-permissions "*)
@@ -200,12 +207,17 @@ OC
 }
 make_strict_opencode "$BIN"
 
-oc_run() { # oc_run <expected_exit> <desc> -- <extra env...> ; asserts exit code only
+oc_run() { # oc_run <expected_exit> <desc> [VAR=val ...] [-- <relay args...>]
   local expect="$1" desc="$2"; shift 2
+  local -a envs=() relay_args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in --) shift; relay_args=("$@"); break;; *) envs+=("$1"); shift;; esac
+  done
   rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
   env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
-    OC_ARGV_FILE="$OC_ARGV" "$@" \
-    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+    OC_ARGV_FILE="$OC_ARGV" ${envs[@]+"${envs[@]}"} \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode \
+      ${relay_args[@]+"${relay_args[@]}"} >/dev/null 2>&1
   local rc=$?
   if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
   else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
@@ -226,9 +238,31 @@ oc_assert "link mode passes --agent plan" has "--agent plan"
 oc_assert "no --dangerously-skip-permissions in argv" hasnt "--dangerously-skip-permissions"
 oc_assert "no --auto in argv" hasnt "--auto"
 oc_assert "PR_RELAY_OPENCODE_MODEL unset → no -m" hasnt " -m "
+# the permission config is what actually enforces read-only (see the stub's check)
+oc_cfg() { # oc_cfg <desc> <has|hasnt> <pattern>
+  local desc="$1" mode="$2" pat="$3" got
+  got="$(cat "$OC_ARGV.cfg" 2>/dev/null || true)"
+  case "$mode" in
+    has)   if printf '%s' "$got" | grep -q -- "$pat"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+           else echo "  FAIL $desc (cfg: $got)"; FAIL=$((FAIL+1)); fi;;
+    hasnt) if printf '%s' "$got" | grep -q -- "$pat"; then echo "  FAIL $desc (cfg: $got)"; FAIL=$((FAIL+1));
+           else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
+  esac
+}
+oc_cfg "denies edit"  has '"edit":"deny"'
+oc_cfg "denies write" has '"write":"deny"'
+oc_cfg "denies arbitrary bash" has '"\*":"deny"'
+# link mode needs the reviewer to fetch the PR itself, so these two stay allowed
+oc_cfg "allows gh pr view"  has 'gh pr view\*":"allow"'
+oc_cfg "allows gh pr diff"  has 'gh pr diff\*":"allow"'
 
-oc_run 0 "opencode runs read-only, diff mode" PR_RELAY_DIFF_UNUSED=1
+oc_run 0 "opencode runs read-only, diff mode" -- --diff
 oc_assert "diff-mode argv still read-only" has "--agent plan"
+# Prove we are actually in diff mode. Checking for the diff body would NOT prove it:
+# link mode inlines the same diff as a fallback under LINK_DIFF_FALLBACK_MAX_BYTES.
+# The prompt preamble is the real discriminator between the two modes.
+oc_assert "diff mode really used (not link)" has "provided on stdin"
+oc_assert "diff mode is not the link preamble" hasnt "an OPEN pull request"
 
 oc_run 0 "PR_RELAY_OPENCODE_MODEL set → model pinned" PR_RELAY_OPENCODE_MODEL=opencode/some-model
 oc_assert "sets exactly -m <value>" has "-m opencode/some-model"
