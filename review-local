@@ -67,7 +67,8 @@ echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -
 read -r -d '' PROMPT <<P || true
 You are reviewing an in-progress local branch ('$BRANCH_LABEL', diffed against
 '$BASE') that has not yet been opened as a pull request. The diff is provided
-to you (on stdin or appended below). Review it for correctness bugs, security
+to you (on stdin or appended below; the opencode reviewer receives it as an
+attached file instead). Review it for correctness bugs, security
 issues, broken edge cases, and clear design/maintainability problems. You may
 read files in the current repo for context, but DO NOT modify anything. Be
 concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks

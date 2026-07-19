@@ -60,14 +60,33 @@ OPENCODE_BIN=opencode
 # Both sides are compared physically (pwd -P): git reports a physical toplevel while
 # $PWD stays logical, so entering the checkout through a symlink would otherwise
 # slip past a prefix comparison.
+# Follow the whole symlink chain. `readlink -f` is not portable (older macOS has no
+# -f), so walk it. Bounded, because a symlink loop would otherwise hang.
+opencode_resolve_symlinks() {
+  local _p="$1" _t _n=0
+  while [ -L "$_p" ] && [ "$_n" -lt 40 ]; do
+    _t="$(readlink "$_p")" || break
+    case "$_t" in
+      /*) _p="$_t";;
+      *)  _p="$(dirname "$_p")/$_t";;
+    esac
+    _n=$((_n + 1))
+  done
+  printf '%s/%s' "$(cd "$(dirname "$_p")" 2>/dev/null && pwd -P)" "$(basename "$_p")"
+}
+
 opencode_reject_if_in_repo() {
-  local _root
+  local _root _target
   _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$_root" ] || return 0          # no worktree → nothing under review to contain
   _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 0
-  case "$1" in
+  # Check what the name actually RESOLVES to, not the name itself: a trusted PATH
+  # directory can hold `opencode -> <reviewed-repo>/malicious`, and canonicalizing
+  # only the parent directory would wave that straight through.
+  _target="$(opencode_resolve_symlinks "$1")"
+  case "$_target" in
     "$_root"/*)
-      echo "✖ refusing to run '$1': it is inside the repository being reviewed." >&2
+      echo "✖ refusing to run '$1': it resolves to '$_target', inside the repository being reviewed." >&2
       echo "  PATH resolved opencode to a file in the checkout (a '.' entry, or a repo-local" >&2
       echo "  bin directory). Fix PATH, or point PR_RELAY_OPENCODE_BIN at a path outside it." >&2
       exit 2;;
