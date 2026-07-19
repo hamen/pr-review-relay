@@ -4,8 +4,8 @@
 # Same idea as pr-review-relay --author <self>, but for branches that aren't
 # pushed / don't have a PR open yet. Diffs the current branch against a base
 # ref (default: main), sends that diff to the other agents (claude / codex /
-# cursor / antigravity / opencode) for a read-only review, and prints each
-# review to the screen. Nothing is pushed, nothing is posted anywhere — this is
+# cursor / antigravity / opencode) for review, and prints each review to the
+# screen. ("Read-only" is ENFORCED only for opencode — see the README caveats.) Nothing is pushed, nothing is posted anywhere — this is
 # purely so you get a clean, reviewed branch before you open the PR.
 #
 # Usage:
@@ -176,6 +176,7 @@ for r in "${LIST[@]}"; do
   RAN=$((RAN + 1))
   if [ "$PARALLEL" = 1 ]; then review_with "$r" & else review_with "$r"; fi
 done
+unset _rkey
 [ "$PARALLEL" = 1 ] && wait
 if [ "$MISSING" = 1 ]; then
   echo "✖ Local review incomplete: an explicitly requested reviewer was missing." >&2

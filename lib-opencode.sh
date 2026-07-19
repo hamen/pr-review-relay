@@ -175,8 +175,20 @@ relay_print_header() {
 # Walk up until something exists, so a not-yet-created PATH entry is still judged
 # against where it WOULD live. Builtins only, same reason as relay_worktree_root.
 relay_nearest_existing_dir() {
-  local _d="$1"
+  local _d="$1" _out="" _seg _rest
   case "$_d" in /*) ;; *) _d="$(pwd -P)/$_d";; esac
+  # Collapse "." and ".." textually first: without this, "/trusted/../repo/bin" is
+  # judged against /trusted instead of the repo it actually points into.
+  _rest="${_d#/}/"
+  while [ -n "$_rest" ] && [ "$_rest" != "/" ]; do
+    _seg="${_rest%%/*}"; _rest="${_rest#*/}"
+    case "$_seg" in
+      ''|'.') ;;
+      '..')   _out="${_out%/*}";;
+      *)      _out="$_out/$_seg";;
+    esac
+  done
+  _d="${_out:-/}"
   while [ -n "$_d" ] && [ "$_d" != "/" ]; do
     if [ -d "$_d" ]; then (cd "$_d" 2>/dev/null && pwd -P); return 0; fi
     _d="${_d%/*}"
