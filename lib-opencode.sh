@@ -64,7 +64,11 @@ OPENCODE_BIN=opencode
 # -f), so walk it. Bounded, because a symlink loop would otherwise hang.
 opencode_resolve_symlinks() {
   local _p="$1" _t _n=0
-  while [ -L "$_p" ] && [ "$_n" -lt 40 ]; do
+  while [ -L "$_p" ]; do
+    if [ "$_n" -ge 40 ]; then
+      echo "✖ '$1' has a symlink chain over 40 deep (or a loop) — refusing to resolve it." >&2
+      exit 2
+    fi
     _t="$(readlink "$_p")" || break
     case "$_t" in
       /*) _p="$_t";;
@@ -107,20 +111,21 @@ opencode_reject_if_in_repo() {
   # directory can hold `opencode -> <reviewed-repo>/malicious`, and canonicalizing
   # only the parent directory would wave that straight through.
   _target="$(opencode_target_in_repo "$1")" || return 0
-  case "$_target" in
-    *)
-      echo "✖ refusing to run '$1': it resolves to '$_target', inside the repository being reviewed." >&2
-      echo "  A PATH lookup found it in the checkout (a '.' entry, a repo-local bin dir, or a" >&2
-      echo "  bare PR_RELAY_OPENCODE_BIN). Fix PATH, or give PR_RELAY_OPENCODE_BIN a path" >&2
-      echo "  containing '/' that points outside the repository." >&2
-      exit 2;;
-  esac
+  echo "✖ refusing to run '$1': it resolves to '$_target', inside the repository being reviewed." >&2
+  echo "  A PATH lookup found it in the checkout (a '.' entry, a repo-local bin dir, or a" >&2
+  echo "  bare PR_RELAY_OPENCODE_BIN). Fix PATH, or give PR_RELAY_OPENCODE_BIN a path" >&2
+  echo "  containing '/' that points outside the repository." >&2
+  exit 2
 }
 
 # Only call this when the opencode reviewer is actually selected: it exits 2 on an
 # unusable explicit override, and an optional reviewer must not break a run that
 # didn't ask for it.
 opencode_resolve_bin() {
+  # A shell function or alias named `opencode` would shadow the binary in
+  # `command -v`. Nothing in these scripts defines one, but a sourced profile could,
+  # and the result would be an OPENCODE_BIN that is not a file at all.
+  unset -f opencode 2>/dev/null || true
   OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
   if [ -n "$OPENCODE_BIN" ]; then
     case "$OPENCODE_BIN" in
@@ -277,10 +282,10 @@ opencode_review() {
   local -a model=()
   [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && model=(-m "$PR_RELAY_OPENCODE_MODEL")
 
-  # UNIQUE per invocation. A fixed name races: review-local does not dedupe its
-  # reviewer list, so `--reviewers opencode,opencode --parallel` runs two of these
-  # concurrently and one would truncate and rewrite the file while the other's
-  # agent is still reading it — a silently incomplete review, which is worse than
+  # UNIQUE per invocation. A fixed name races: both callers dedupe their reviewer
+  # lists now, but that is one guard away from two of these running concurrently
+  # under --parallel, and then one would truncate and rewrite the file while the
+  # other's agent is still reading it — a silently incomplete review, which is worse than
   # a failed one because it still looks like a verdict. mktemp inside the
   # already-private attach dir keeps the EXIT-trap cleanup working unchanged.
   diff_file="$(mktemp "$attach_dir/oc-diff.XXXXXX")" || return 1

@@ -351,7 +351,7 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 
 ## 📋 Notes & caveats
 
-- **⚠️ Two reviewers are NOT sandboxed.** Both predate the OpenCode work and are documented here
+- **⚠️ Only the OpenCode reviewer is enforced read-only.** Both predate the OpenCode work and are documented here
   rather than quietly changed — tightening either affects that agent's reviews and belongs in its own
   PR, where the effect can be tested:
   - **Codex** — `pr-review-relay` invokes it as `codex exec -s danger-full-access`, so it can write
@@ -360,7 +360,11 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   - **Antigravity** — `agy --dangerously-skip-permissions -p` auto-approves permissions. The prompt
     asks it not to modify anything, but a prompt is not a boundary, and the content it is reading is
     exactly what would try to talk it out of one.
-- **Read-only:** the remaining reviewers never modify code. They run with
+  - **Claude** — `claude -p` honours permission rules from `settings.json`, and the relay runs inside
+    the checkout, so a PR-controlled `.claude/settings.json` can pre-authorise Bash or Write. No
+    enforced deny-list is supplied on the command line.
+- **Read-only by prompt, for the rest:** the remaining reviewers are asked not to modify anything and
+  normally don't, but only OpenCode has that enforced by configuration. They run with
   `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
   keep the agent in Q&A/read-only mode), and `opencode --pure run` with an agent the relay
   defines itself and an inline deny-list (`--pure` matters: it stops external plugins, which execute at startup
@@ -400,7 +404,7 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 - **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in
   context — deeper than a diff snapshot. The diff is embedded as a fallback, so a sandbox that can't run
   `gh` (notably `codex exec --read-only`) still reviews the diff instead of returning nothing. Pass
-  `--diff` for the older diff-only behaviour. Either way the agent runs in the repo.
+  `--diff` for the older diff-only behaviour. Either way the agent runs in the repo — except OpenCode, which is deliberately launched outside it (see the caveats above).
 - **Verify against sources** with `--context-file <path>`: the document is prepended to every
   reviewer's prompt, so they cross-check the PR against e.g. an official spec or API reference instead
   of relying on memory. The reviewer comment is footnoted with the context file's name.
