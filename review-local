@@ -85,7 +85,7 @@ review_with() {
     antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "" \
-              "the in-progress local branch \x27$BRANCH_LABEL\x27, diffed against \x27$BASE\x27" \
+              "the in-progress local branch '$BRANCH_LABEL', diffed against '$BASE'" \
               "$errf" "$AGENT_TIMEOUT"); rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms

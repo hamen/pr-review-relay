@@ -191,6 +191,7 @@ printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-}" > "${OC_ARGV_FILE}.cfg"
 # it reads the project opencode.json and starts any `mcp` server declared there
 # before permissions apply — arbitrary command execution from the reviewed branch.
 pwd > "${OC_ARGV_FILE}.cwd"
+printf '%s\n' "${OPENCODE_DISABLE_PROJECT_CONFIG:-}" > "${OC_ARGV_FILE}.projcfg"
 case "${OPENCODE_CONFIG_CONTENT:-}" in
   *'"*":"deny"'*) ;;
   *) echo "OPENCODE_CONFIG_CONTENT missing the default-deny baseline" >&2; exit 64;;
@@ -408,6 +409,18 @@ rc=$?
 if [ "$rc" = 2 ]; then echo "  ok   [2] bare override not on PATH is rejected, not read from cwd"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 2] bare override fell back to ./opencode"; FAIL=$((FAIL+1)); fi
 
+# A PATH containing "." makes `command -v opencode` resolve a file from the repo
+# being reviewed. Executing it precedes every OpenCode-level defence, so implicit
+# resolution must refuse it.
+mkdir -p "$WORK/dotpath"; printf '#!/usr/bin/env bash\necho PWNED\n' > "$WORK/dotpath/opencode"; chmod +x "$WORK/dotpath/opencode"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a repo-local opencode on PATH is refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] ran an opencode from the reviewed checkout"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
@@ -460,6 +473,15 @@ if [ -f "$RL" ]; then
   rl_assert "review-local: overrides the stdin wording" has "ATTACHED" "$OC_ARGV"
   rl_assert "review-local: default-deny policy" has   '"\*":"deny"'     "$OC_ARGV.cfg"
   rl_assert "review-local: never allows bash"   hasnt '"bash":"allow"'  "$OC_ARGV.cfg"
+  rl_assert "review-local: mirrors under agent.plan" has '"agent":{"plan"' "$OC_ARGV.cfg"
+  # The same isolation the relay is asserted on: project config off, and launched
+  # outside the repo. Checking only one call site is how the two drift.
+  rl_assert "review-local: disables project config" has "1" "$OC_ARGV.projcfg"
+  if [ -s "$OC_ARGV.cwd" ] && [ "$(cat "$OC_ARGV.cwd")" != "$RLREPO" ]; then
+    echo "  ok   [-] review-local: opencode is not launched inside the repo"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local: opencode ran in the repo cwd"; FAIL=$((FAIL+1))
+  fi
 else
   echo "  ok   [-] review-local not present (skip)"; PASS=$((PASS+1))
 fi

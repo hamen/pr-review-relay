@@ -49,6 +49,7 @@ OPENCODE_BIN=opencode
 # unusable explicit override, and an optional reviewer must not break a run that
 # didn't ask for it.
 opencode_resolve_bin() {
+  local _oc_root
   OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
   if [ -n "$OPENCODE_BIN" ]; then
     case "$OPENCODE_BIN" in
@@ -78,6 +79,22 @@ opencode_resolve_bin() {
     }
   elif command -v opencode >/dev/null 2>&1; then
     OPENCODE_BIN="$(opencode_abs_path "$(command -v opencode)")"
+    # A PATH containing "." or a repo-local bin dir makes `command -v opencode`
+    # resolve a file from the checkout we are about to review — which is written by
+    # the same person as the diff. Executing it happens before --pure, before the
+    # deny policy, before anything: full arbitrary code execution. Implicit
+    # resolution therefore refuses to take a binary from inside the repository.
+    # An EXPLICIT PR_RELAY_OPENCODE_BIN is not checked this way on purpose: pointing
+    # at a specific path is the user's deliberate decision, not something a PR can
+    # cause.
+    _oc_root="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"
+    case "$OPENCODE_BIN" in
+      "$_oc_root"/*)
+        echo "✖ refusing to run '$OPENCODE_BIN': it is inside the repository being reviewed." >&2
+        echo "  Your PATH resolves opencode to a file in the checkout (a '.' entry, or a repo-local" >&2
+        echo "  bin directory). Fix PATH, or set PR_RELAY_OPENCODE_BIN to a trusted absolute path." >&2
+        exit 2;;
+    esac
   elif [ -n "${HOME:-}" ] && [ -x "$HOME/.opencode/bin/opencode" ]; then
     # Guard on HOME being set, not just default it to empty: with HOME unset the
     # test would probe "/.opencode/bin/opencode", a path in the filesystem root

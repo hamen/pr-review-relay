@@ -168,7 +168,9 @@ if [ "$ROUND_SHARED" = 1 ]; then
     *) chmod 700 "$ROUND_DIR" 2>/dev/null || { echo "✖ cannot secure round-state dir '$ROUND_DIR' (mode $_round_mode)" >&2; exit 1; };;
   esac
 else
-  mkdir -p "$ROUND_DIR" || { echo "cannot create round-state dir '$ROUND_DIR'" >&2; exit 1; }
+  # -m 700 here too, not just on the shared fallback: it costs nothing and does not
+  # depend on the caller's umask being sane.
+  mkdir -m 700 -p "$ROUND_DIR" || { echo "cannot create round-state dir '$ROUND_DIR'" >&2; exit 1; }
 fi
 ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
@@ -225,11 +227,6 @@ If it looks good, say so in one line.
 P
 fi
 PROMPT="${CONTEXT_BLOCK}${BASE}"
-# The opencode reviewer always receives the diff as a file attachment, so it must
-# NOT also get the inline diff fallback appended below: that would ship the same
-# diff twice and tell the model two different places to look. Keep the pre-fallback
-# prompt for it.
-PROMPT_NO_FALLBACK="$PROMPT"
 # Link mode embeds the diff as a FALLBACK so no reviewer comes back empty if its
 # sandbox can't run `gh`. Capable agents still fetch the
 # full PR per the prompt; this is only a safety net.
