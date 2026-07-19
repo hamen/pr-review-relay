@@ -17,7 +17,8 @@
 #
 # Usage:
 #   pr-review-relay [--author claude|codex|cursor|antigravity] [--pr <number|url>] \
-#                   [--reviewers claude,codex,cursor,antigravity,opencode] [--parallel] \
+#                   [--reviewers claude,codex,cursor,antigravity] [--parallel] \
+#                   (opencode is also supported, opt-in: name it explicitly)
 #                   [--context-file <path>] [--diff] [--dry-run]
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 #
@@ -244,13 +245,10 @@ if [ "$MODE" = link ]; then
   fi
 fi
 
-# OpenCode's official installer drops the binary in ~/.opencode/bin, which is NOT
-# on PATH by default — so `command -v opencode` misses and the reviewer is skipped
-# before it ever runs. Resolve it ONCE here, so the same value feeds both the
-# availability check below and the invocation in review_with(). Resolving inside
-# review_with would be dead code: the reviewer loop skips on `command -v` first.
-# Falls back to the bare name so a genuinely missing CLI still reports as such.
-
+# $OPENCODE_BIN is already resolved (opencode_resolve_bin, near the top) so the same
+# value feeds both the `command -v` availability check in the reviewer loop and the
+# invocation in review_with(). It has to happen before that loop: resolving lazily
+# inside tool_for() would be dead code, because the loop skips on `command -v` first.
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
 review_with() {

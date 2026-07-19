@@ -158,6 +158,11 @@ opencode_review() {
 opencode_is_selected() {
   local _r; local -a _list=()
   IFS=',' read -ra _list <<< "$REVIEWERS"
+  # ${arr[@]+"${arr[@]}"} looks unquoted but is not: the outer +-form only guards
+  # against an empty array under `set -u` (Bash 3.2 errors on "${arr[@]}" when the
+  # array is empty), while the inner quotes preserve elements verbatim. Verified
+  # with a value containing spaces — it stays one item. Do not "simplify" this to
+  # "${_list[@]}": that reintroduces the unbound-variable abort on an empty list.
   for _r in ${_list[@]+"${_list[@]}"}; do
     _r="${_r// }"
     [ "$_r" = opencode ] && [ "$_r" != "$AUTHOR" ] && return 0
