@@ -509,6 +509,18 @@ rc=$?
 if [ "$rc" = 2 ]; then echo "  ok   [2] a PATH entry inside the repo refuses the whole run"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 2] ran with a repo-controlled PATH"; FAIL=$((FAIL+1)); fi
 
+# ...even when the repo also ships a hostile `git`, which is the bootstrap problem:
+# the guard cannot use a PATH-resolved command to decide whether PATH is safe.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$WORK/dotpath/git"; chmod +x "$WORK/dotpath/git"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/dotpath:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] refused even with a repo-controlled 'git' on PATH"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] a hostile git disabled the PATH guard"; FAIL=$((FAIL+1)); fi
+rm -f "$WORK/dotpath/git"
+
 # ...and a "." entry, which is the same thing spelled differently.
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
 ( cd "$WORK/dotpath" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \

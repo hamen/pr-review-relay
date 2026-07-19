@@ -66,7 +66,8 @@ opencode_resolve_symlinks() {
   local _p="$1" _t _n=0
   while [ -L "$_p" ]; do
     if [ "$_n" -ge 40 ]; then
-      echo "✖ '$1' has a symlink chain over 40 deep (or a loop) — refusing to resolve it." >&2
+      echo "✖ '$1' has a symlink chain over 40 links deep, or a loop — refusing to resolve it." >&2
+      echo "  If this is a legitimate deep install, point PR_RELAY_OPENCODE_BIN at the real file." >&2
       exit 2
     fi
     _t="$(readlink "$_p")" || break
@@ -130,11 +131,26 @@ opencode_reject_if_in_repo() {
 # exposed, so the check is on PATH itself: refuse to run at all. One check, whole
 # class. Entries are compared physically, since a symlinked PATH entry pointing
 # into the checkout is the same problem wearing a different name.
+# Find the worktree root using ONLY shell builtins — cd, pwd, [ — and no external
+# command. `git rev-parse` cannot be used here: git is itself resolved through the
+# PATH this function exists to validate, so a repo-local `git` could report an empty
+# root and switch the guard off. Bootstrapping a PATH check with a PATH lookup is
+# circular; walking up for .git is not.
+relay_worktree_root() {
+  local _d
+  _d="$(pwd -P)" || return 1
+  while [ "$_d" != "/" ] && [ -n "$_d" ]; do
+    [ -e "$_d/.git" ] && { printf '%s' "$_d"; return 0; }
+    _d="$(cd "$_d/.." 2>/dev/null && pwd -P)" || return 1
+  done
+  [ -e "/.git" ] && { printf '/'; return 0; }
+  return 1
+}
+
 relay_assert_path_outside_repo() {
   local _root _entry _resolved _oldifs
-  _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  _root="$(relay_worktree_root)" || return 0
   [ -n "$_root" ] || return 0
-  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 0
   _oldifs="$IFS"; IFS=':'
   for _entry in $PATH; do
     IFS="$_oldifs"
