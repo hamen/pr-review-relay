@@ -122,9 +122,10 @@ opencode_reject_if_in_repo() {
 # unusable explicit override, and an optional reviewer must not break a run that
 # didn't ask for it.
 opencode_resolve_bin() {
-  # A shell function or alias named `opencode` would shadow the binary in
-  # `command -v`. Nothing in these scripts defines one, but a sourced profile could,
-  # and the result would be an OPENCODE_BIN that is not a file at all.
+  # A shell FUNCTION named `opencode` would shadow the binary in `command -v` and
+  # leave OPENCODE_BIN pointing at something that is not a file. Nothing here
+  # defines one, but a sourced profile could. (Aliases need no handling: they are
+  # not expanded in a non-interactive shell.)
   unset -f opencode 2>/dev/null || true
   OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
   if [ -n "$OPENCODE_BIN" ]; then

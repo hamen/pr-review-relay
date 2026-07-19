@@ -168,8 +168,11 @@ if [ "$RAN" = 0 ]; then
   echo "✖ No reviewer ran — nothing was reviewed. Check --reviewers and which CLIs are installed." >&2
   exit 3
 fi
+# Counted from files because --parallel runs review_with in subshells, where a
+# variable increment would not survive.
 _failed=0
 for _f in "$FAILDIR"/*; do [ -e "$_f" ] && _failed=$((_failed + 1)); done
+unset _f
 if [ "$_failed" -gt 0 ]; then
   echo "✖ Local review NOT clean: $_failed reviewer(s) produced no usable review." >&2
   exit 3

@@ -19,8 +19,9 @@
 ---
 
 You build a feature with one agent (Claude Code, Codex, Cursor, or Antigravity), it opens a PR — and the
-**others** automatically review that PR, headless and read-only, and post their findings as
-PR comments. Local, free (it uses the agent CLIs you already pay for), and idempotent.
+**others** automatically review that PR, headless, and post their findings as PR comments. (Reviewers
+are *asked* to be read-only; only the OpenCode one has that enforced — see
+[Notes & caveats](#-notes--caveats).) Local, free (it uses the agent CLIs you already pay for), and idempotent.
 
 ```
  build feature  ──►  open PR  ──►  pr-review-relay --author <self>
@@ -312,7 +313,7 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 
 1. Resolves the PR (current branch or `--pr`) and reads the diff with `gh pr diff` (used as a sanity
    guard and for the line/byte summary).
-2. For each reviewer (except `--author`), runs the agent **headless and read-only** with a focused
+2. For each reviewer (except `--author`), runs the agent **headless** with a focused
    review prompt. By default (**`--link`**) the prompt hands the agent the PR reference and tells it to
    fetch the PR itself (`gh pr view`/`gh pr diff`) and read the changed files in context — so it reviews
    the *whole* PR, not just a diff snapshot. The diff is also embedded as a **fallback** so a reviewer
@@ -349,11 +350,23 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 > and read the fresh round. A round that actually dispatched reviewers **consumes one cap slot even when it
 > ends in `3`** (a persistently flaky reviewer must still hit the cap) — a round where *nobody* ran does not.
 
+### `review-local` exit codes
+
+`review-local` follows the same fail-closed idea as the relay, on a smaller surface:
+
+| Code | Meaning |
+|------|---------|
+| `0` | every dispatched reviewer produced a review |
+| `3` | a reviewer produced nothing usable (empty / whitespace-only / timed out / non-zero), **or** an explicitly requested reviewer was missing, **or** no reviewer ran at all |
+| `1`/`2` | precondition or usage error (not a repo, unknown base ref, bad argument, unusable `PR_RELAY_OPENCODE_BIN`) |
+
 ## 📋 Notes & caveats
 
-- **⚠️ Only the OpenCode reviewer is enforced read-only.** Both predate the OpenCode work and are documented here
-  rather than quietly changed — tightening either affects that agent's reviews and belongs in its own
-  PR, where the effect can be tested:
+- **⚠️ Only the OpenCode reviewer is enforced read-only.** The other three are asked not to modify
+  anything and normally don't — but a prompt is not a boundary, and the thing they are reading is
+  exactly what would try to argue them out of one. All three predate the OpenCode work and are
+  documented rather than quietly changed: tightening any of them affects that agent's reviews and
+  belongs in its own PR, where the effect can be tested.
   - **Codex** — `pr-review-relay` invokes it as `codex exec -s danger-full-access`, so it can write
     files and run commands while reading a diff an untrusted contributor wrote. (`review-local` uses
     `-s read-only`, so the two disagree with each other.)
@@ -363,12 +376,11 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   - **Claude** — `claude -p` honours permission rules from `settings.json`, and the relay runs inside
     the checkout, so a PR-controlled `.claude/settings.json` can pre-authorise Bash or Write. No
     enforced deny-list is supplied on the command line.
-- **Read-only by prompt, for the rest:** the remaining reviewers are asked not to modify anything and
-  normally don't, but only OpenCode has that enforced by configuration. They run with
-  `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
-  keep the agent in Q&A/read-only mode), and `opencode --pure run` with an agent the relay
-  defines itself and an inline deny-list (`--pure` matters: it stops external plugins, which execute at startup
-  regardless of permissions).
+  - **Cursor** — `cursor-agent -p --trust --mode=ask` keeps it in Q&A mode, which is the closest to a
+    real constraint of the three, but it is still the agent's own mode rather than an enforced policy.
+- **OpenCode is the exception, and it is enforced:** `opencode --pure run` with a primary agent the
+  relay defines itself and an inline default-deny policy. `--pure` matters — it stops external plugins,
+  which execute at startup regardless of permissions.
 - **OpenCode read-only is enforced by config, not by the agent name.** Selecting a built-in agent is *not* a
   sandbox — their permissions are user-configurable, and `agent.plan.mode: "subagent"` in a config makes
   OpenCode fall back to `build` with *that* agent's rules (verified: shell came back). The relay
