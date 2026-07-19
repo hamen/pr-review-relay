@@ -87,8 +87,9 @@ opencode_reject_if_in_repo() {
   case "$_target" in
     "$_root"/*)
       echo "✖ refusing to run '$1': it resolves to '$_target', inside the repository being reviewed." >&2
-      echo "  PATH resolved opencode to a file in the checkout (a '.' entry, or a repo-local" >&2
-      echo "  bin directory). Fix PATH, or point PR_RELAY_OPENCODE_BIN at a path outside it." >&2
+      echo "  A PATH lookup found it in the checkout (a '.' entry, a repo-local bin dir, or a" >&2
+      echo "  bare PR_RELAY_OPENCODE_BIN). Fix PATH, or give PR_RELAY_OPENCODE_BIN a path" >&2
+      echo "  containing '/' that points outside the repository." >&2
       exit 2;;
   esac
 }
@@ -127,7 +128,7 @@ opencode_resolve_bin() {
   elif command -v opencode >/dev/null 2>&1; then
     OPENCODE_BIN="$(opencode_abs_path "$(command -v opencode)")"
     opencode_reject_if_in_repo "$OPENCODE_BIN"
-  elif [ -n "${HOME:-}" ] && [ -x "$HOME/.opencode/bin/opencode" ]; then
+  elif [ -n "${HOME:-}" ] && [ -f "$HOME/.opencode/bin/opencode" ] && [ -x "$HOME/.opencode/bin/opencode" ]; then
     # Guard on HOME being set, not just default it to empty: with HOME unset the
     # test would probe "/.opencode/bin/opencode", a path in the filesystem root
     # that nothing should ever be looking at.

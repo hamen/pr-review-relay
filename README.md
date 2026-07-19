@@ -371,10 +371,14 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   global ones. It also runs with `--pure` so external plugins, which execute at startup, don't load.
   Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
 - **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
-  a file instead, in both modes and at any size. Four narrower designs were tried first and each was
-  demonstrably bypassable: allowing just `gh pr view` / `gh pr diff` (defeated by shell redirection —
-  `gh pr view N > file` matches the allowed prefix and writes), omitting the `agent.plan` mirror, and
-  denying tools by name (anything unnamed — custom tools, MCP servers — stays allowed by default).
+  a file instead, in both modes and at any size. Narrower designs were tried first and each was demonstrably
+  bypassable: the original `--dangerously-skip-permissions` (an undocumented alias for `--auto`, so it
+  approved everything); `--agent plan` with no policy at all (the Plan agent's permissions are
+  user-configurable — it ran `id`); allowing just `gh pr view` / `gh pr diff` (defeated by shell
+  redirection — `gh pr view N > file` matches the allowed prefix and writes); omitting the
+  `agent.plan` mirror (agent-scoped permissions apply after the global ones); and denying tools by
+  name (anything unnamed — custom tools, MCP servers — stays allowed by default). The full list, with
+  what each failed on, is in `lib-opencode.sh`.
 - **OpenCode runs outside the repository, and therefore reviews the diff alone.** It does not browse
   the checkout the way the other reviewers do. This is not a limitation we could avoid: OpenCode reads
   the project `opencode.json` from its working directory, and an `mcp` server declared there is
