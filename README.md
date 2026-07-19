@@ -351,15 +351,18 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 
 ## 📋 Notes & caveats
 
-- **⚠️ Codex is the exception:** `pr-review-relay` invokes it as `codex exec -s danger-full-access`,
-  so that reviewer is **not** sandboxed — it can write files and run commands while reading a diff
-  that, on a public repo, an untrusted contributor wrote. (`review-local` uses `-s read-only`, so the
-  two disagree.) This predates the OpenCode work and is documented here rather than quietly changed:
-  tightening it belongs in its own PR, where the effect on Codex reviews can be tested properly.
-- **Read-only:** the other reviewers never modify code. They run with
+- **⚠️ Two reviewers are NOT sandboxed.** Both predate the OpenCode work and are documented here
+  rather than quietly changed — tightening either affects that agent's reviews and belongs in its own
+  PR, where the effect can be tested:
+  - **Codex** — `pr-review-relay` invokes it as `codex exec -s danger-full-access`, so it can write
+    files and run commands while reading a diff an untrusted contributor wrote. (`review-local` uses
+    `-s read-only`, so the two disagree with each other.)
+  - **Antigravity** — `agy --dangerously-skip-permissions -p` auto-approves permissions. The prompt
+    asks it not to modify anything, but a prompt is not a boundary, and the content it is reading is
+    exactly what would try to talk it out of one.
+- **Read-only:** the remaining reviewers never modify code. They run with
   `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
-  keep the agent in Q&A/read-only mode), `agy --dangerously-skip-permissions -p` (skips interactive
-  permission prompts; the prompt itself is read-only), and `opencode --pure run --agent plan` with an
+  keep the agent in Q&A/read-only mode), and `opencode --pure run --agent plan` with an
   inline deny-list (`--pure` matters: it stops external plugins, which execute at startup
   regardless of permissions).
 - **OpenCode read-only is enforced by config, not by the agent name.** `--agent plan` alone is *not* a

@@ -132,7 +132,7 @@ opencode_resolve_bin() {
     # Guard on HOME being set, not just default it to empty: with HOME unset the
     # test would probe "/.opencode/bin/opencode", a path in the filesystem root
     # that nothing should ever be looking at.
-    OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+    OPENCODE_BIN="$(opencode_abs_path "$HOME/.opencode/bin/opencode")"
   else
     OPENCODE_BIN=opencode   # keep the bare name so the caller's "not installed" path reports it
   fi
@@ -228,7 +228,8 @@ opencode_review() {
 
   oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is ATTACHED to this message as a file. That attachment, plus any\ncontext given above, is everything you have: there is no shell and no checkout, so\ncommands will be refused, nothing is on stdin, and nothing is appended below.\n\nLook for correctness bugs, security issues, broken edge cases, and clear design or\nmaintainability problems. Be concise. Group findings by severity: Blocker /\nShould-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
 
-  ( cd "$attach_dir" && \
+  (
+    cd "$attach_dir" 2>/dev/null || { echo "cannot enter the attachment dir $attach_dir" >&2; exit 1; }
     OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" \
     timeout "$agent_timeout" "$OPENCODE_BIN" --pure run \
       -f "$diff_file" --agent plan ${model[@]+"${model[@]}"} -- "$oc_prompt" 2>"$errf" )
