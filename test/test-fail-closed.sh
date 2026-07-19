@@ -572,6 +572,18 @@ rc=$?
 if [ "$rc" = 2 ]; then echo "  ok   [2] a '.' PATH entry inside the repo is refused too"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 2] '.' on PATH slipped through"; FAIL=$((FAIL+1)); fi
 
+# A RELATIVE TMPDIR makes mktemp return relative paths, which then resolve against
+# the attachment dir once opencode_review cds into it.
+mkdir -p "$WORK/reltmp"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK" && env PATH="$BIN:$PATH" TMPDIR="reltmp" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] a relative TMPDIR still produces a usable review"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] relative TMPDIR broke the attachment paths"; FAIL=$((FAIL+1)); fi
+oc_assert "attachment path is absolute" has " -f /"
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"

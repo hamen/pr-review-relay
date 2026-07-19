@@ -148,6 +148,10 @@ relay_worktree_root() {
   local _d
   _d="$(pwd -P)" || return 1
   while [ "$_d" != "/" ] && [ -n "$_d" ]; do
+    # -e, NOT -d: in a linked worktree (and a submodule) .git is a FILE. Since this
+    # project mandates working in worktrees, a -d check would fail to find the root
+    # in the normal setup — silently switching the PATH guard off exactly where it
+    # is needed. Verified against this repo's own worktree.
     [ -e "$_d/.git" ] && { printf '%s' "$_d"; return 0; }
     _d="$(cd "$_d/.." 2>/dev/null && pwd -P)" || return 1
   done
@@ -239,8 +243,16 @@ opencode_resolve_bin() {
     # A leading "~" is shell syntax, not part of a path: by the time it reaches an
     # env var it is a literal character, so expand it rather than failing on a form
     # users reasonably expect to work.
+    # "~" is shell syntax, so it reaches an env var as a literal character. Expand
+    # it because users expect it to work — but only when HOME is actually set,
+    # otherwise "~/bin/opencode" would silently become "/bin/opencode".
     case "$OPENCODE_BIN" in
-      '~/'*) OPENCODE_BIN="${HOME:-}/${OPENCODE_BIN#\~/}";;
+      '~/'*)
+        [ -n "${HOME:-}" ] || {
+          echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} starts with ~ but HOME is unset." >&2
+          exit 2
+        }
+        OPENCODE_BIN="$HOME/${OPENCODE_BIN#\~/}";;
     esac
     case "$OPENCODE_BIN" in
       */*)
@@ -397,7 +409,7 @@ relay_assert_tmpdir_outside_repo() {
 
 opencode_review() {
   local attach_dir="$1" diff="$2" context_block="$3" subject="$4" errf="$5" agent_timeout="$6"
-  local diff_file oc_prompt
+  local diff_file oc_prompt _abs_path _rest _pe
   local -a model=()
   [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && model=(-m "$PR_RELAY_OPENCODE_MODEL")
 
@@ -408,6 +420,11 @@ opencode_review() {
   # a failed one because it still looks like a verdict. mktemp inside the
   # already-private attach dir keeps the EXIT-trap cleanup working unchanged.
   diff_file="$(mktemp "$attach_dir/oc-diff.XXXXXX")" || return 1
+  # Canonicalize before the cd below: with a RELATIVE TMPDIR, mktemp hands back a
+  # relative path, and `-f "$diff_file"` / `2>"$errf"` would then resolve against
+  # the attachment dir instead of where the files actually are.
+  diff_file="$(opencode_abs_path "$diff_file")"
+  errf="$(opencode_abs_path "$errf")"
   # A failed or short write (full disk, I/O error) would hand the agent a truncated
   # diff; it would still produce a confident-looking review of half a change, and
   # the relay would count that as a clean reviewer. Fail instead.
@@ -415,8 +432,22 @@ opencode_review() {
 
   oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is ATTACHED to this message as a file. That attachment, plus any\ncontext given above, is everything you have: there is no shell and no checkout, so\ncommands will be refused, nothing is on stdin, and nothing is appended below.\n\nLook for correctness bugs, security issues, broken edge cases, and clear design or\nmaintainability problems. Be concise. Group findings by severity: Blocker /\nShould-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
 
+  # PATH is validated from the repository, but a RELATIVE entry means something
+  # different once we cd — it could resolve to a wholly different `timeout`. Pin it
+  # to absolute entries, dropping any that don't resolve, so what was checked is
+  # what runs.
+  _abs_path=""
+  _rest="$PATH:"
+  while [ -n "$_rest" ]; do
+    _pe="${_rest%%:*}"; _rest="${_rest#*:}"
+    [ -n "$_pe" ] || _pe="."
+    _pe="$(cd "$_pe" 2>/dev/null && pwd -P)" || continue
+    _abs_path="${_abs_path:+$_abs_path:}$_pe"
+  done
+
   (
     cd "$attach_dir" 2>/dev/null || { echo "cannot enter the attachment dir $attach_dir" >&2; exit 1; }
+    PATH="$_abs_path"
     OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" \
     timeout "$agent_timeout" "$OPENCODE_BIN" --pure run \
       -f "$diff_file" --agent pr-review-relay-ro ${model[@]+"${model[@]}"} -- "$oc_prompt" 2>"$errf" )
