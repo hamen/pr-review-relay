@@ -172,6 +172,19 @@ relay_print_header() {
   done < "$_file"
 }
 
+# Walk up until something exists, so a not-yet-created PATH entry is still judged
+# against where it WOULD live. Builtins only, same reason as relay_worktree_root.
+relay_nearest_existing_dir() {
+  local _d="$1"
+  case "$_d" in /*) ;; *) _d="$(pwd -P)/$_d";; esac
+  while [ -n "$_d" ] && [ "$_d" != "/" ]; do
+    if [ -d "$_d" ]; then (cd "$_d" 2>/dev/null && pwd -P); return 0; fi
+    _d="${_d%/*}"
+    [ -n "$_d" ] || _d="/"
+  done
+  printf '/'
+}
+
 relay_assert_path_outside_repo() {
   local _root _entry _resolved _rest
   _root="$(relay_worktree_root)" || return 0
@@ -187,7 +200,12 @@ relay_assert_path_outside_repo() {
     _entry="${_rest%%:*}"
     _rest="${_rest#*:}"
     [ -n "$_entry" ] || _entry="."          # empty field == current directory
-    _resolved="$(cd "$_entry" 2>/dev/null && pwd -P)" || continue
+    # An entry that does not exist YET is not safe to skip: the unsandboxed
+    # reviewers run with write access, so one of them can create it mid-round and
+    # every later command resolves from there. Judge it by its nearest existing
+    # ancestor — if that is inside the checkout, so is anything created under it.
+    _resolved="$(cd "$_entry" 2>/dev/null && pwd -P)" || _resolved="$(relay_nearest_existing_dir "$_entry")"
+    [ -n "$_resolved" ] || continue
     case "$_resolved" in
       "$_root"|"$_root"/*)
         echo "✖ PATH entry '$_entry' is inside the repository being reviewed." >&2

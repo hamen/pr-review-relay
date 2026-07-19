@@ -373,9 +373,9 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
 
 ## 📋 Notes & caveats
 
-- **⚠️ Only the OpenCode reviewer is enforced read-only.** The other three are asked not to modify
+- **⚠️ Only the OpenCode reviewer is enforced read-only.** The others are asked not to modify
   anything and normally don't — but a prompt is not a boundary, and the thing they are reading is
-  exactly what would try to argue them out of one. All three predate the OpenCode work and are
+  exactly what would try to argue them out of one. They all predate the OpenCode work and are
   documented rather than quietly changed: tightening any of them affects that agent's reviews and
   belongs in its own PR, where the effect can be tested.
   - **Codex** — `pr-review-relay` invokes it as `codex exec -s danger-full-access`, so it can write

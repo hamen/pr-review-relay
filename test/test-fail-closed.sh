@@ -300,7 +300,7 @@ fi
 # in both modes. `-f` takes an array, so `--` must precede the prompt or the prompt
 # is swallowed as another filename (opencode then dies with "File not found").
 oc_assert "attaches the diff with -f" has " -f "
-# Unique per invocation, not a fixed name: review-local does not dedupe its
+# Unique per invocation, not a fixed name: both callers dedupe their
 # reviewer list, so two concurrent opencode runs would otherwise truncate and
 # rewrite the same file while the other agent is reading it.
 oc_assert "attachment path is unique per invocation" has "oc-diff\."
@@ -526,6 +526,25 @@ for _p in "$BIN2:/usr/bin:/bin:" ":$BIN2:/usr/bin:/bin" "$BIN2::/usr/bin:/bin"; 
   else echo "  FAIL [got $rc, want 2] empty PATH field slipped through ($_p)"; FAIL=$((FAIL+1)); fi
 done
 unset _p
+
+# A PATH entry that does not exist YET must still be judged: the unsandboxed
+# reviewers can create it mid-round, after which commands resolve from the repo.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/dotpath/not/created/yet:$BIN2:/usr/bin:/bin" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a not-yet-existing PATH entry in the repo is refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] unresolved repo-local PATH entry was skipped"; FAIL=$((FAIL+1)); fi
+
+# ...while a nonexistent entry OUTSIDE the repo must not block anything.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="/opt/definitely/not/here:$BIN2:/usr/bin:/bin" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   [0] a nonexistent PATH entry outside the repo is fine"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] harmless missing PATH entry was rejected"; FAIL=$((FAIL+1)); fi
 
 # ...even when the repo also ships a hostile `git`, which is the bootstrap problem:
 # the guard cannot use a PATH-resolved command to decide whether PATH is safe.

@@ -2,8 +2,10 @@
 # pr-review-relay — hand a PR off to the OTHER agents for cross-review.
 #
 # Whoever created the PR calls this with --author <self>. The other agents
-# (claude / codex / cursor / antigravity / opencode) review the PR headless +
-# read-only and post their review as a PR comment. The author auto-excludes itself.
+# (claude / codex / cursor / antigravity / opencode) review the PR headless and
+# post their review as a PR comment. The author auto-excludes itself.
+# NB "read-only" is ENFORCED only for opencode; the others are asked, not confined.
+# See the caveats in the README.
 #
 # By default the reviewers are handed the PR *reference* and fetch it themselves
 # (gh pr view/diff) — they get the full PR: title, body, discussion, and every
