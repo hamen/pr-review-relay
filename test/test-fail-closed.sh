@@ -436,6 +436,27 @@ rc=$?
 if [ "$rc" = 2 ]; then echo "  ok   [2] repo-local opencode refused through a symlinked worktree"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 2] symlinked worktree bypassed the containment guard"; FAIL=$((FAIL+1)); fi
 
+# A BARE override is a PATH lookup, not a trusted path, so it must get the same
+# containment check — otherwise setting PR_RELAY_OPENCODE_BIN=opencode with "." on
+# PATH walks straight past the guard.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" PR_RELAY_OPENCODE_BIN=opencode \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] bare override is PATH-resolved and still contained"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] bare override bypassed the containment guard"; FAIL=$((FAIL+1)); fi
+
+# ...while an explicit PATH-ful override outside the repo remains usable.
+BINOUT="$WORK/binout"; make_strict_opencode "$BINOUT"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="$BINOUT/opencode" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] explicit path override outside the repo still runs"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] explicit path override was wrongly refused"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"

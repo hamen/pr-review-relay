@@ -48,28 +48,53 @@ opencode_abs_path() {
 # reviewer was never selected and opencode_resolve_bin() therefore never ran.
 OPENCODE_BIN=opencode
 
+# A PATH lookup can resolve a file from the checkout we are about to review — a "."
+# entry, or a repo-local bin dir. That file is written by the same person as the
+# diff, and executing it precedes every OpenCode-level defence: --pure, the deny
+# policy, all of it. So ANY resolution that went through PATH is checked, including
+# a bare PR_RELAY_OPENCODE_BIN, which is a PATH lookup and not a trusted path.
+#
+# Only an override containing a "/" is exempt: naming a specific file is the user's
+# deliberate decision, and cannot be caused by a pull request.
+#
+# Both sides are compared physically (pwd -P): git reports a physical toplevel while
+# $PWD stays logical, so entering the checkout through a symlink would otherwise
+# slip past a prefix comparison.
+opencode_reject_if_in_repo() {
+  local _root
+  _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$_root" ] || return 0          # no worktree → nothing under review to contain
+  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 0
+  case "$1" in
+    "$_root"/*)
+      echo "✖ refusing to run '$1': it is inside the repository being reviewed." >&2
+      echo "  PATH resolved opencode to a file in the checkout (a '.' entry, or a repo-local" >&2
+      echo "  bin directory). Fix PATH, or point PR_RELAY_OPENCODE_BIN at a path outside it." >&2
+      exit 2;;
+  esac
+}
+
 # Only call this when the opencode reviewer is actually selected: it exits 2 on an
 # unusable explicit override, and an optional reviewer must not break a run that
 # didn't ask for it.
 opencode_resolve_bin() {
-  local _oc_root
   OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
   if [ -n "$OPENCODE_BIN" ]; then
     case "$OPENCODE_BIN" in
       */*) OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")";;
       *)
-        # A BARE name means "on PATH", so resolve it there and nowhere else. Falling
-        # back to the literal name would make opencode_abs_path turn it into
-        # $PWD/opencode — and the working directory can be a repository whose PR
-        # added a file called `opencode`. Running that is exactly the outcome this
-        # whole change exists to prevent.
+        # A BARE name means "on PATH", so resolve it there and nowhere else — never
+        # fall back to the literal name, which opencode_abs_path would turn into
+        # $PWD/opencode. And because this IS a PATH lookup, it gets the same
+        # containment check as implicit resolution.
         OPENCODE_BIN="$(command -v "$OPENCODE_BIN" 2>/dev/null || true)"
         [ -n "$OPENCODE_BIN" ] || {
           echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} is not on PATH." >&2
           echo "  Give a path (absolute or relative) if you did not mean a PATH lookup." >&2
           exit 2
         }
-        OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")";;
+        OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")"
+        opencode_reject_if_in_repo "$OPENCODE_BIN";;
     esac
     # Fail fast: a user-supplied override that cannot run is a configuration error,
     # not something to surface minutes later as a vague "not installed" skip.
@@ -82,29 +107,7 @@ opencode_resolve_bin() {
     }
   elif command -v opencode >/dev/null 2>&1; then
     OPENCODE_BIN="$(opencode_abs_path "$(command -v opencode)")"
-    # A PATH containing "." or a repo-local bin dir makes `command -v opencode`
-    # resolve a file from the checkout we are about to review — which is written by
-    # the same person as the diff. Executing it happens before --pure, before the
-    # deny policy, before anything: full arbitrary code execution. Implicit
-    # resolution therefore refuses to take a binary from inside the repository.
-    # An EXPLICIT PR_RELAY_OPENCODE_BIN is not checked this way on purpose: pointing
-    # at a specific path is the user's deliberate decision, not something a PR can
-    # cause.
-    # ONLY when we are actually inside a worktree. Falling back to $PWD would
-    # reject a perfectly legitimate opencode that happens to live under the current
-    # directory — e.g. `pr-review-relay --pr <url>` run from ~/tools. There is no
-    # repository under review in that case, so there is nothing to contain.
-    _oc_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-    [ -n "$_oc_root" ] || return 0
-    # ...and canonicalize it too, so both sides are physical.
-    _oc_root="$(cd "$_oc_root" 2>/dev/null && pwd -P)" || return 0
-    case "$OPENCODE_BIN" in
-      "$_oc_root"/*)
-        echo "✖ refusing to run '$OPENCODE_BIN': it is inside the repository being reviewed." >&2
-        echo "  Your PATH resolves opencode to a file in the checkout (a '.' entry, or a repo-local" >&2
-        echo "  bin directory). Fix PATH, or set PR_RELAY_OPENCODE_BIN to a trusted absolute path." >&2
-        exit 2;;
-    esac
+    opencode_reject_if_in_repo "$OPENCODE_BIN"
   elif [ -n "${HOME:-}" ] && [ -x "$HOME/.opencode/bin/opencode" ]; then
     # Guard on HOME being set, not just default it to empty: with HOME unset the
     # test would probe "/.opencode/bin/opencode", a path in the filesystem root
