@@ -34,7 +34,7 @@ OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; REVIEWERS_EXPLICIT=0
 AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 # Validate here rather than letting `timeout` fail with a bare exit 125.
-case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want seconds)" >&2; exit 2;; esac
+case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
     --base)      need_value "$@"; BASE="$2"; shift 2;;
     --reviewers) need_value "$@"; REVIEWERS="$2"; REVIEWERS_EXPLICIT=1; shift 2;;
     --parallel)  PARALLEL=1; shift;;
-    -h|--help)   sed -n '2,15p' "$0"; exit 0;;
+    -h|--help)   relay_print_header "$0" 15; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -75,13 +75,13 @@ FAILDIR="$(mktemp -d)" || { echo "cannot create temp dir" >&2; exit 1; }
 trap 'rm -rf "$FAILDIR"' EXIT
 # It only ever holds marker files, so nothing leaks — but hold it to the same rule
 # as ATTACH_DIR rather than leaving a second temp dir with a different standard.
-opencode_assert_attach_dir_outside_repo "$FAILDIR"
+relay_assert_tmpdir_outside_repo "$FAILDIR"
 
 ATTACH_DIR=""
 if opencode_is_selected; then
   ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
   trap 'rm -rf "$ATTACH_DIR" "$FAILDIR"' EXIT
-  opencode_assert_attach_dir_outside_repo "$ATTACH_DIR"
+  relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
 fi
 
 DIFF=$(git diff "$BASE...$BRANCH")

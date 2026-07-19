@@ -55,7 +55,7 @@ OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 
 AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 # Validate here rather than letting `timeout` fail with a bare exit 125.
-case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want seconds)" >&2; exit 2;; esac
+case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -69,7 +69,7 @@ while [ $# -gt 0 ]; do
     --dry-run)      DRY=1; shift;;
     --max-rounds)   MAX_ROUNDS="$2"; shift 2;;
     --reset)        RESET=1; shift;;
-    -h|--help)      awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "$0"; exit 0;;
+    -h|--help)      relay_print_header "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -121,7 +121,7 @@ ATTACH_DIR=""
 if opencode_is_selected; then
   ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
   trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
-  opencode_assert_attach_dir_outside_repo "$ATTACH_DIR"
+  relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
 fi
 # Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
 # "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"

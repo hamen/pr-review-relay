@@ -155,6 +155,23 @@ relay_worktree_root() {
   return 1
 }
 
+# Print the leading comment block as help, using only builtins. `awk`/`sed` are
+# PATH-resolved and --help is parsed before the PATH guard can run, so rendering
+# help used to execute a repo-controlled binary on a hostile PATH — for a flag whose
+# entire job is to print text.
+relay_print_header() {
+  local _file="$1" _max="${2:-0}" _line _n=0
+  while IFS= read -r _line; do
+    _n=$((_n + 1))
+    [ "$_n" = 1 ] && continue                    # shebang
+    [ "$_max" != 0 ] && [ "$_n" -gt "$_max" ] && break
+    case "$_line" in
+      '#'*) _line="${_line#\#}"; printf '%s\n' "${_line# }";;
+      *) [ "$_max" = 0 ] && break;;
+    esac
+  done < "$_file"
+}
+
 relay_assert_path_outside_repo() {
   local _root _entry _resolved _oldifs
   _root="$(relay_worktree_root)" || return 0
@@ -265,6 +282,11 @@ opencode_resolve_bin() {
 #     permission applies — verified: a planted entry ran its command with
 #     '"*": "deny"' and --pure both in force. Hence OPENCODE_DISABLE_PROJECT_CONFIG.
 #
+# "share": "disabled" is not incidental. With a user config set to `"share":"auto"`
+# — OpenCode's own docs warn about it for proprietary code — the session, including
+# the attached diff, is published to a public link. For a private PR that is silent
+# exfiltration triggered by someone else's setting, so the policy pins it off.
+#
 # KNOWN, ACCEPTED RESIDUAL: this is not OpenCode's final config layer — managed
 # (organization) config merges after it and could re-allow bash. Deliberately not
 # defended against, because it is not reachable by the threat this exists for. The
@@ -275,7 +297,7 @@ opencode_resolve_bin() {
 # (a real OpenCode env var — it is present in the 1.18.3 binary) is not a fix
 # either: it applies later still, but sets only the TOP-LEVEL permission block, so
 # an agent-scoped allow still wins — verified, bash ran.
-OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"pr-review-relay-ro":{"mode":"primary","description":"read-only cross-review agent","permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
+OPENCODE_RO_CONFIG='{"share":"disabled","permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"pr-review-relay-ro":{"mode":"primary","description":"read-only cross-review agent","permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
 
 # --- The invocation ----------------------------------------------------------
 # opencode_review <attach_dir> <diff> <context_block> <subject> <errfile> <timeout>
@@ -307,13 +329,13 @@ OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glo
 # `--pure` skips external plugins, which load and can execute code at startup
 # regardless of permissions. `-f` takes an array, so `--` must precede the prompt or
 # it is swallowed as another filename and opencode dies with "File not found".
-# opencode_assert_attach_dir_outside_repo <dir>
+# relay_assert_tmpdir_outside_repo <dir>
 #
 # mktemp honours TMPDIR, so a TMPDIR inside the checkout puts the attachment dir —
 # and therefore opencode's working directory — back inside the repository under
 # review. read/grep/glob stay allowed, so that hands a prompt-injected diff the
 # rest of the tree. Fail closed rather than quietly losing the isolation.
-opencode_assert_attach_dir_outside_repo() {
+relay_assert_tmpdir_outside_repo() {
   # NB this compares against the worktree we are RUNNING IN, which the relay
   # requires to be the repo under review (`--pr N` resolves that repo's PR). Run it
   # from somewhere else with an explicit --pr and the comparison is against the

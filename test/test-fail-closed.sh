@@ -267,6 +267,10 @@ oc_cfg() { # oc_cfg <desc> <has|hasnt> <pattern>
 # Default-deny: naming tools to deny leaves anything unnamed (custom tools, MCP
 # servers) allowed, so the policy must start from "*": "deny".
 oc_cfg "default-deny baseline" has '"\*":"deny"'
+# A user config of "share":"auto" would publish the session — including the attached
+# diff — to a public link. Pinned off so someone else's setting cannot leak a
+# private PR.
+oc_cfg "session sharing pinned off" has '"share":"disabled"'
 oc_cfg "allows read"  has '"read":"allow"'
 oc_cfg "allows grep"  has '"grep":"allow"'
 # Shell must never be allowed. An allowlist was tried and defeated by redirection
