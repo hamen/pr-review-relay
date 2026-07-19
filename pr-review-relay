@@ -17,7 +17,7 @@
 #
 # Usage:
 #   pr-review-relay [--author claude|codex|cursor|antigravity] [--pr <number|url>] \
-#                   [--reviewers claude,codex,cursor,antigravity] [--parallel] \
+#                   [--reviewers claude,codex,cursor,antigravity,opencode] [--parallel] \
 #                   [--context-file <path>] [--diff] [--dry-run]
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 #
@@ -143,6 +143,15 @@ if [ "$ROUND_SHARED" = 1 ]; then
     echo "  Set XDG_CACHE_HOME or HOME to a private path and re-run." >&2
     exit 1
   fi
+  # `mkdir -m` sets the mode only when it CREATES the directory. One we own but
+  # that was left group/other-writable by an earlier run (or by an attacker who
+  # got there first and lost the ownership check) would still let someone plant a
+  # round-file symlink, so check the mode we actually ended up with.
+  _round_mode="$(stat -c %a "$ROUND_DIR" 2>/dev/null || stat -f %Lp "$ROUND_DIR" 2>/dev/null || echo '')"
+  case "$_round_mode" in
+    700|'') ;;   # empty = no usable stat; the ownership check above still applied
+    *) chmod 700 "$ROUND_DIR" 2>/dev/null || { echo "✖ cannot secure round-state dir '$ROUND_DIR' (mode $_round_mode)" >&2; exit 1; };;
+  esac
 else
   mkdir -p "$ROUND_DIR" || { echo "cannot create round-state dir '$ROUND_DIR'" >&2; exit 1; }
 fi
@@ -245,11 +254,23 @@ if [ -n "$OPENCODE_BIN" ]; then
     */*) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
     *)   OPENCODE_BIN="$(command -v "$OPENCODE_BIN" 2>/dev/null || printf '%s' "$OPENCODE_BIN")";;
   esac
+  # `command -v` can hand back a RELATIVE path when PATH itself has relative
+  # entries, which breaks again after the cd. Canonicalize whatever we got.
+  case "$OPENCODE_BIN" in
+    /*) ;;
+    *)  OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
+  esac
+  # `command -v` can hand back a RELATIVE path when PATH itself has relative
+  # entries, which breaks again after the cd. Canonicalize whatever we got.
+  case "$OPENCODE_BIN" in
+    /*) ;;
+    *)  OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
+  esac
   # An explicit override that isn't runnable is a user error worth naming here,
   # rather than surfacing later as a confusing "not installed" skip.
   [ -x "$OPENCODE_BIN" ] || echo "  ! PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable" >&2
 else
-  if command -v opencode >/dev/null 2>&1;           then OPENCODE_BIN="$(command -v opencode)"
+  if command -v opencode >/dev/null 2>&1;           then OPENCODE_BIN="$(command -v opencode)"; case "$OPENCODE_BIN" in /*) ;; *) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";; esac
   elif [ -x "${HOME:-}/.opencode/bin/opencode" ];   then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
   else OPENCODE_BIN=opencode; fi
 fi
@@ -350,7 +371,7 @@ review_with() {
       # The cost is that this reviewer no longer browses the repo — it reviews the
       # attached diff alone. That is the deliberate trade: the alternative is running
       # attacker-authored config.
-      out=$(cd "$ATTACH_DIR" && OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf")
+      out=$(cd "$ATTACH_DIR" && OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf")
       rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms

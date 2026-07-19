@@ -174,7 +174,7 @@ Environment:
 | `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
-| `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary — **absolute**, or a bare name already on `PATH`; a relative path is not resolved and the reviewer is skipped. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
+| `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` is **not** expanded (that is shell syntax, not part of a path): use `$HOME/...`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
 
 > **Before pinning `PR_RELAY_OPENCODE_MODEL`:** free-tier models can log submitted
 > code for product improvement, and your PR diff is the input. Check the provider's

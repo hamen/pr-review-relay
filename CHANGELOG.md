@@ -45,6 +45,13 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
   Deliberately not `--auto`, which auto-approves every `ask` permission. `review-local` gets the same
   policy, the same file attachment, and its own argv-contract tests.
+- **Project config loading is disabled for the OpenCode reviewer** via
+  `OPENCODE_DISABLE_PROJECT_CONFIG=1`. The config loader walks *up* from its working directory to the
+  worktree root looking for `opencode.json`, so choosing a different directory alone is not a
+  guarantee — a `TMPDIR` inside the repository, for instance, would put the reviewer back under it.
+  This env var is the supported switch that stops the search outright; verified to block a planted
+  `mcp` entry even with the config sitting in the working directory. Kept *in addition to* running
+  outside the repo, because every single-layer defence in this area has turned out to be bypassable.
 - **The OpenCode reviewer runs outside the repository.** OpenCode reads the project `opencode.json`
   from its working directory and merges it under the inline override; an `mcp` server declared there
   is launched at startup, *before* tool permissions apply. A pull request that adds an `opencode.json`

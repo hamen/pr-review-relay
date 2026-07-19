@@ -334,7 +334,13 @@ fi
 # where setup-node installs outside /usr/bin and /bin. Symlink it in, as BIN5 does.
 ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
 rm -f "$WORK/sha_counter" "$OC_ARGV"
-env -u HOME -u XDG_CACHE_HOME PATH="$BIN:/usr/bin:/bin" \
+# TMPDIR under $WORK so the run's round state (which falls back to
+# $TMPDIR/pr-review-relay-$(id -u) when HOME and XDG_CACHE_HOME are both unset)
+# stays inside the test sandbox. Without this the suite writes to the real
+# /tmp/pr-review-relay-$UID and repeated runs eventually hit the round cap.
+# It must EXIST: mktemp -d honours TMPDIR and fails if it is missing.
+mkdir -p "$WORK/tmphome"
+env -u HOME -u XDG_CACHE_HOME PATH="$BIN:/usr/bin:/bin" TMPDIR="$WORK/tmphome" \
   GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_MAX_ROUNDS=99 \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
 rc=$?

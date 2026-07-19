@@ -72,9 +72,21 @@ if [ -n "$OPENCODE_BIN" ]; then
     */*) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
     *)   OPENCODE_BIN="$(command -v "$OPENCODE_BIN" 2>/dev/null || printf '%s' "$OPENCODE_BIN")";;
   esac
+  # `command -v` can hand back a RELATIVE path when PATH itself has relative
+  # entries, which breaks again after the cd. Canonicalize whatever we got.
+  case "$OPENCODE_BIN" in
+    /*) ;;
+    *)  OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
+  esac
+  # `command -v` can hand back a RELATIVE path when PATH itself has relative
+  # entries, which breaks again after the cd. Canonicalize whatever we got.
+  case "$OPENCODE_BIN" in
+    /*) ;;
+    *)  OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
+  esac
   [ -x "$OPENCODE_BIN" ] || echo "  ! PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable" >&2
 else
-  if command -v opencode >/dev/null 2>&1;         then OPENCODE_BIN="$(command -v opencode)"
+  if command -v opencode >/dev/null 2>&1;         then OPENCODE_BIN="$(command -v opencode)"; case "$OPENCODE_BIN" in /*) ;; *) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";; esac
   elif [ -x "${HOME:-}/.opencode/bin/opencode" ]; then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
   else OPENCODE_BIN=opencode; fi
 fi
@@ -121,7 +133,7 @@ review_with() {
       # from its working directory, and an `mcp` server declared there is launched at
       # startup before any permission applies — arbitrary command execution from a
       # branch you are reviewing. See the long note in pr-review-relay.
-      out=$(cd "$ATTACH_DIR" && OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf"); rc=$?;;
+      out=$(cd "$ATTACH_DIR" && OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf"); rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr.
