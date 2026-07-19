@@ -172,7 +172,20 @@ if [ "$MODE" = link ]; then
   fi
 fi
 
-tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
+# OpenCode's official installer drops the binary in ~/.opencode/bin, which is NOT
+# on PATH by default — so `command -v opencode` misses and the reviewer is skipped
+# before it ever runs. Resolve it ONCE here, so the same value feeds both the
+# availability check below and the invocation in review_with(). Resolving inside
+# review_with would be dead code: the reviewer loop skips on `command -v` first.
+# Falls back to the bare name so a genuinely missing CLI still reports as such.
+OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
+if [ -z "$OPENCODE_BIN" ]; then
+  if command -v opencode >/dev/null 2>&1;     then OPENCODE_BIN=opencode
+  elif [ -x "$HOME/.opencode/bin/opencode" ]; then OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+  else OPENCODE_BIN=opencode; fi
+fi
+
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
 review_with() {
   local name="$1" out="" feed="" rc=0 errf skey Name id
@@ -197,10 +210,20 @@ review_with() {
         out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>"$errf")
       fi; rc=$?;;
     opencode)
+      # --agent plan: OpenCode's built-in read-only agent. This is the analogue of
+      # `codex exec -s read-only` and `cursor-agent --mode=ask` — a reviewer ingests
+      # untrusted PR content, so it must not be able to edit files or run commands.
+      # Do NOT swap this for --auto: that auto-approves every `ask` permission, and
+      # the default `build` agent runs with {"permission":"*","action":"allow"}.
+      # -m only when PR_RELAY_OPENCODE_MODEL is set; unset means "use the user's own
+      # opencode config" (pinning a model here would hard-fail anyone without that
+      # provider authenticated, and free tiers may log submitted code).
+      local -a _oc_model=()
+      [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && _oc_model=(-m "$PR_RELAY_OPENCODE_MODEL")
       if [ "$MODE" = diff ]; then
-        out=$(timeout "$AGENT_TIMEOUT" opencode run --dangerously-skip-permissions "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
+        out=$(timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run --agent plan ${_oc_model[@]+"${_oc_model[@]}"} "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
       else
-        out=$(timeout "$AGENT_TIMEOUT" opencode run --dangerously-skip-permissions "$PROMPT" 2>"$errf")
+        out=$(timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run --agent plan ${_oc_model[@]+"${_oc_model[@]}"} "$PROMPT" 2>"$errf")
       fi; rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms

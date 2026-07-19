@@ -61,7 +61,8 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`
   - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
-  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode run`
+  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode run --agent plan`
+    (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
 
 You only need the agents you actually want as reviewers.
 
@@ -172,6 +173,13 @@ Environment:
 |----------|---------|
 | `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. |
+| `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
+| `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
+
+> **Before pinning `PR_RELAY_OPENCODE_MODEL`:** free-tier models can log submitted
+> code for product improvement, and your PR diff is the input. Check the provider's
+> terms before pointing this at a private repo. Leaving it unset keeps whatever you
+> already trust in your own opencode config.
 
 ## 🧪 Review before there's a PR (`review-local`)
 
@@ -341,7 +349,10 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 - **Read-only:** reviewers never modify code. They run with `codex exec -s read-only`,
   `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
   keep the agent in Q&A/read-only mode), `agy --dangerously-skip-permissions -p` (skips interactive
-  permission prompts; the prompt itself is read-only), and `opencode run --dangerously-skip-permissions` (skips permission prompts).
+  permission prompts; the prompt itself is read-only), and `opencode run --agent plan` (OpenCode's
+  built-in read-only agent). **OpenCode is deliberately not run with `--auto`:** that auto-approves
+  every `ask` permission, and the default `build` agent is configured `{"permission":"*","action":"allow"}` —
+  a reviewer reads untrusted PR content, so it must not be able to edit files or run commands.
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in

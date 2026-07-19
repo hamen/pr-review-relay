@@ -171,6 +171,95 @@ env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_cou
 rc=$?
 if [ "$rc" = 4 ]; then echo "  ok   [4] round cap reached → exit 4"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 4] round cap"; FAIL=$((FAIL+1)); fi
 
+# --- opencode invocation contract --------------------------------------------
+# These assert the ARGV the relay builds, not just that a review was posted — the
+# generic stub above accepts anything, so it would pass against a broken flag too.
+# Each of these fails against the pre-fix script (which sent the non-existent
+# --dangerously-skip-permissions and hardcoded the bare `opencode` name).
+OC_ARGV="$WORK/oc_argv"
+make_strict_opencode() { # $1 = dir to install the stub into
+  mkdir -p "$1"
+  cat > "$1/opencode" <<'OC'
+#!/usr/bin/env bash
+# Record argv so the test can assert on it, then enforce the contract.
+printf '%s\n' "$*" > "${OC_ARGV_FILE:?}"
+[ "$1" = run ] || { echo "expected 'run' subcommand, got '$1'" >&2; exit 64; }
+case " $* " in
+  *" --dangerously-skip-permissions "*)
+    echo "rejected: --dangerously-skip-permissions is not an opencode flag" >&2; exit 64;;
+  *" --auto "*)
+    echo "rejected: --auto grants write+shell to a reviewer that reads untrusted PRs" >&2; exit 64;;
+esac
+case " $* " in *" --agent plan "*) ;; *) echo "missing --agent plan (read-only)" >&2; exit 64;; esac
+# the prompt must actually reach the agent as the last argument
+case "${!#}" in "") echo "empty prompt" >&2; exit 64;; esac
+echo "LGTM from opencode."
+exit 0
+OC
+  chmod +x "$1/opencode"
+}
+make_strict_opencode "$BIN"
+
+oc_run() { # oc_run <expected_exit> <desc> -- <extra env...> ; asserts exit code only
+  local expect="$1" desc="$2"; shift 2
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    OC_ARGV_FILE="$OC_ARGV" "$@" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+  local rc=$?
+  if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
+}
+oc_assert() { # oc_assert <desc> <grep-mode: has|hasnt> <pattern>
+  local desc="$1" mode="$2" pat="$3"
+  local got; got="$(cat "$OC_ARGV" 2>/dev/null || true)"
+  case "$mode" in
+    has)   if printf '%s' "$got" | grep -q -- "$pat"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+           else echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1)); fi;;
+    hasnt) if printf '%s' "$got" | grep -q -- "$pat"; then echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1));
+           else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
+  esac
+}
+
+oc_run 0 "opencode runs read-only (--agent plan), link mode"
+oc_assert "link mode passes --agent plan" has "--agent plan"
+oc_assert "no --dangerously-skip-permissions in argv" hasnt "--dangerously-skip-permissions"
+oc_assert "no --auto in argv" hasnt "--auto"
+oc_assert "PR_RELAY_OPENCODE_MODEL unset → no -m" hasnt " -m "
+
+oc_run 0 "opencode runs read-only, diff mode" PR_RELAY_DIFF_UNUSED=1
+oc_assert "diff-mode argv still read-only" has "--agent plan"
+
+oc_run 0 "PR_RELAY_OPENCODE_MODEL set → model pinned" PR_RELAY_OPENCODE_MODEL=opencode/some-model
+oc_assert "sets exactly -m <value>" has "-m opencode/some-model"
+
+# PATH miss + stock install at \$HOME/.opencode/bin → reviewer must still RUN,
+# not be skipped by the `command -v` check that precedes dispatch.
+FAKEHOME="$WORK/fakehome"; make_strict_opencode "$FAKEHOME/.opencode/bin"
+BIN5="$WORK/bin5"; mkdir -p "$BIN5"
+for t in gh claude; do ln -sf "$BIN/$t" "$BIN5/$t"; done
+ln -sf "$(command -v node)" "$BIN5/node" 2>/dev/null
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
+  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then
+  echo "  ok   [0] opencode off PATH but at \$HOME/.opencode/bin → resolved and run"; PASS=$((PASS+1))
+else
+  echo "  FAIL [got $rc] off-PATH stock install was skipped (argv file empty=$([ -s "$OC_ARGV" ] || echo yes))"; FAIL=$((FAIL+1))
+fi
+
+# PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
+BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
+  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="$BIN6/opencode" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] PR_RELAY_OPENCODE_BIN override honoured"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] PR_RELAY_OPENCODE_BIN override ignored"; FAIL=$((FAIL+1)); fi
+
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

@@ -4,6 +4,38 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The `opencode` reviewer never ran.** It was invoked as
+  `opencode run --dangerously-skip-permissions`, a flag no shipped OpenCode version has (`opencode run
+  --help` on 1.18.3 offers `--auto`). Combined with the binary living at `~/.opencode/bin/opencode` —
+  off `PATH`, so `command -v` missed and the reviewer was skipped before the flag mattered — the
+  feature was silently dead: a dispatched run would return an empty review, which the fail-closed
+  relay reports as `exit 3`.
+- **OpenCode is now resolved from the stock install path.** `PATH` first, then
+  `~/.opencode/bin/opencode`, overridable with `PR_RELAY_OPENCODE_BIN`. Resolution happens once at
+  startup so it feeds both the availability check and the invocation.
+
+### Changed
+
+- **OpenCode runs read-only, as `opencode run --agent plan`** — the analogue of
+  `codex exec -s read-only` and `cursor-agent --mode=ask`. Deliberately **not** `--auto`: that
+  auto-approves every `ask` permission, and OpenCode's default `build` agent is configured
+  `{"permission":"*","action":"allow"}`. A reviewer ingests untrusted PR content and must not be
+  able to edit files or run commands.
+
+### Added
+
+- `PR_RELAY_OPENCODE_MODEL` — optional model pin for the opencode reviewer. **Unset by default**, so
+  opencode uses your own configured model; pinning one here would hard-fail anyone without that
+  provider authenticated, and free tiers may log the submitted diff.
+- `PR_RELAY_OPENCODE_BIN` — optional override for a non-standard OpenCode install.
+- Tests asserting the opencode **argv contract** (rejects the legacy flag and `--auto`, requires
+  `--agent plan`, `-m` present only when the env var is set) and both binary-resolution branches.
+  These fail against the pre-fix script.
+
 ## [1.1.0] — 2026-07-16
 
 ### Changed
