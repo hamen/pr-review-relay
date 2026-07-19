@@ -65,9 +65,16 @@ P
 # in environments that don't set it (cron, systemd, minimal containers).
 OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
 if [ -n "$OPENCODE_BIN" ]; then
-  command -v "$OPENCODE_BIN" >/dev/null 2>&1 || echo "  ! PR_RELAY_OPENCODE_BIN=$OPENCODE_BIN is not executable (use an absolute path, or a name on PATH)" >&2
+  # Absolute, because the reviewer is launched after a `cd "$ATTACH_DIR"`; a
+  # relative override would resolve here and then fail there.
+  case "$OPENCODE_BIN" in
+    /*)  ;;
+    */*) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
+    *)   OPENCODE_BIN="$(command -v "$OPENCODE_BIN" 2>/dev/null || printf '%s' "$OPENCODE_BIN")";;
+  esac
+  [ -x "$OPENCODE_BIN" ] || echo "  ! PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable" >&2
 else
-  if command -v opencode >/dev/null 2>&1;         then OPENCODE_BIN=opencode
+  if command -v opencode >/dev/null 2>&1;         then OPENCODE_BIN="$(command -v opencode)"
   elif [ -x "${HOME:-}/.opencode/bin/opencode" ]; then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
   else OPENCODE_BIN=opencode; fi
 fi

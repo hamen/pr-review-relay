@@ -80,6 +80,15 @@ STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking
 # Both are mktemp -d (mode 700) and both are removed by the EXIT trap, which does
 # run on SIGTERM — a per-function RETURN trap does not, and would leave the full
 # PR diff behind in /tmp.
+#
+# EXIT alone is deliberate; do NOT add `INT TERM HUP` handlers here. Bash defers a
+# trapped signal until the running foreground command finishes, so trapping TERM
+# would make the relay sit through the rest of `timeout $AGENT_TIMEOUT <agent>` —
+# minutes — before cleaning, whereas an untrapped TERM kills bash immediately and
+# the EXIT trap fires right then. Verified in three shapes (plain child, child in a
+# command substitution, backgrounded subshells as under --parallel): all cleaned on
+# SIGTERM, and adding a TERM handler measurably delayed it. SIGKILL leaks, but no
+# trap of any kind can prevent that.
 ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
 trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT
 # Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
@@ -121,21 +130,31 @@ case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (wa
 if [ -n "${XDG_CACHE_HOME:-}" ]; then   ROUND_DIR="$XDG_CACHE_HOME/pr-review-relay"; ROUND_SHARED=0
 elif [ -n "${HOME:-}" ]; then           ROUND_DIR="$HOME/.cache/pr-review-relay";     ROUND_SHARED=0
 else                                    ROUND_DIR="${TMPDIR:-/tmp}/pr-review-relay-$(id -u)"; ROUND_SHARED=1; fi
-if [ "$ROUND_SHARED" = 1 ] && { [ -e "$ROUND_DIR" ] || [ -L "$ROUND_DIR" ]; }; then
+if [ "$ROUND_SHARED" = 1 ]; then
   # The last-resort path is predictable and lives on a shared /tmp, so another user
   # can pre-create it or plant a symlink and then read or steer our round counter —
-  # which is the loop guard. Fail closed rather than write into it: a symlink, a
-  # non-directory, or a directory we don't own all mean someone got there first.
+  # which is the loop guard. Checking and THEN creating leaves a race, so create
+  # first with the mode already applied (mkdir -m is atomic — no writable window a
+  # racer can slip through, and no chmod that could land on a swapped-in target),
+  # then validate what we ended up with and fail closed if it isn't ours.
+  mkdir -m 700 -p "$ROUND_DIR" 2>/dev/null
   if [ -L "$ROUND_DIR" ] || [ ! -d "$ROUND_DIR" ] || [ ! -O "$ROUND_DIR" ]; then
     echo "✖ refusing to use round-state dir '$ROUND_DIR': not a directory owned by this user." >&2
     echo "  Set XDG_CACHE_HOME or HOME to a private path and re-run." >&2
     exit 1
   fi
+else
+  mkdir -p "$ROUND_DIR" || { echo "cannot create round-state dir '$ROUND_DIR'" >&2; exit 1; }
 fi
-mkdir -p "$ROUND_DIR" || { echo "cannot create round-state dir '$ROUND_DIR'" >&2; exit 1; }
-[ "$ROUND_SHARED" = 1 ] && { chmod 700 "$ROUND_DIR" || { echo "cannot secure '$ROUND_DIR'" >&2; exit 1; }; }
 ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
+# Even inside a directory we own, refuse to follow a symlinked state file: the
+# counter is read, deleted and rewritten below, so a planted link would redirect
+# those writes at whatever it points to.
+if [ -L "$ROUND_FILE" ]; then
+  echo "✖ round-state file '$ROUND_FILE' is a symlink — refusing to follow it." >&2
+  exit 1
+fi
 [ "$RESET" = 1 ] && rm -f "$ROUND_FILE"
 # mtime: GNU `stat -c %Y`, BSD/macOS `stat -f %m`.
 _round_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
@@ -217,11 +236,20 @@ fi
 # at startup, so the blast radius is every reviewer, not just opencode.
 OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
 if [ -n "$OPENCODE_BIN" ]; then
+  # Resolve to an ABSOLUTE path. The opencode reviewer is launched after a
+  # `cd "$ATTACH_DIR"` (see the note at its dispatch), so a relative override like
+  # ./bin/opencode would satisfy a plain `command -v` here and then fail to execute
+  # from the new working directory.
+  case "$OPENCODE_BIN" in
+    /*)  ;;
+    */*) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
+    *)   OPENCODE_BIN="$(command -v "$OPENCODE_BIN" 2>/dev/null || printf '%s' "$OPENCODE_BIN")";;
+  esac
   # An explicit override that isn't runnable is a user error worth naming here,
   # rather than surfacing later as a confusing "not installed" skip.
-  command -v "$OPENCODE_BIN" >/dev/null 2>&1 || echo "  ! PR_RELAY_OPENCODE_BIN=$OPENCODE_BIN is not executable (use an absolute path, or a name on PATH)" >&2
+  [ -x "$OPENCODE_BIN" ] || echo "  ! PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable" >&2
 else
-  if command -v opencode >/dev/null 2>&1;           then OPENCODE_BIN=opencode
+  if command -v opencode >/dev/null 2>&1;           then OPENCODE_BIN="$(command -v opencode)"
   elif [ -x "${HOME:-}/.opencode/bin/opencode" ];   then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
   else OPENCODE_BIN=opencode; fi
 fi

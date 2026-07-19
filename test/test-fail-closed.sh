@@ -341,6 +341,18 @@ rc=$?
 if [ "$rc" = 0 ]; then echo "  ok   [0] HOME + XDG_CACHE_HOME both unset → relay still runs"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 0] minimal env aborted the relay"; FAIL=$((FAIL+1)); fi
 
+# A RELATIVE PR_RELAY_OPENCODE_BIN must still work: the reviewer is launched after
+# a `cd "$ATTACH_DIR"`, so it has to be resolved to an absolute path up front or it
+# executes from the wrong directory.
+BIN7="$WORK/bin7"; make_strict_opencode "$BIN7"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK" && env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="./bin7/opencode" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] relative PR_RELAY_OPENCODE_BIN resolved to absolute"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] relative PR_RELAY_OPENCODE_BIN broke after cd"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
