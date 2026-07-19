@@ -12,6 +12,7 @@
 #   opencode_resolve_bin    populate OPENCODE_BIN; exits 2 on a bad explicit override
 #   opencode_review         run one review; prints it on stdout
 #   opencode_is_selected    is opencode in $REVIEWERS and not $AUTHOR?
+#   relay_trim              trim surrounding whitespace (shared normalization)
 #
 # Callers must be Bash 3.2-safe (macOS ships 3.2) and run under `set -u`.
 
@@ -51,10 +52,21 @@ opencode_resolve_bin() {
   OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
   if [ -n "$OPENCODE_BIN" ]; then
     case "$OPENCODE_BIN" in
-      */*) ;;                                              # path-ish: canonicalize below
-      *)   OPENCODE_BIN="$(command -v "$OPENCODE_BIN" 2>/dev/null || printf '%s' "$OPENCODE_BIN")";;
+      */*) OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")";;
+      *)
+        # A BARE name means "on PATH", so resolve it there and nowhere else. Falling
+        # back to the literal name would make opencode_abs_path turn it into
+        # $PWD/opencode — and the working directory can be a repository whose PR
+        # added a file called `opencode`. Running that is exactly the outcome this
+        # whole change exists to prevent.
+        OPENCODE_BIN="$(command -v "$OPENCODE_BIN" 2>/dev/null || true)"
+        [ -n "$OPENCODE_BIN" ] || {
+          echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} is not on PATH." >&2
+          echo "  Give a path (absolute or relative) if you did not mean a PATH lookup." >&2
+          exit 2
+        }
+        OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")";;
     esac
-    OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")"
     # Fail fast: a user-supplied override that cannot run is a configuration error,
     # not something to surface minutes later as a vague "not installed" skip.
     # -x alone is true for a DIRECTORY, which would pass here and then fail at
@@ -142,7 +154,10 @@ opencode_review() {
   # a failed one because it still looks like a verdict. mktemp inside the
   # already-private attach dir keeps the EXIT-trap cleanup working unchanged.
   diff_file="$(mktemp "$attach_dir/oc-diff.XXXXXX")" || return 1
-  printf '%s' "$diff" > "$diff_file"
+  # A failed or short write (full disk, I/O error) would hand the agent a truncated
+  # diff; it would still produce a confident-looking review of half a change, and
+  # the relay would count that as a clean reviewer. Fail instead.
+  printf '%s' "$diff" > "$diff_file" || { echo "cannot write the diff attachment" >&2; return 1; }
 
   # Both callers' base prompts tell the reviewer the change is on stdin, appended,
   # or fetchable with gh. None of that is true here, so say so explicitly instead of
@@ -162,6 +177,12 @@ opencode_review() {
 # OpenCode-specific, so the two callers cannot drift on it either.
 #
 # Reads $REVIEWERS and $AUTHOR from the caller.
+# Trim surrounding whitespace only. Stripping ALL spaces would turn "open code"
+# into "opencode" and silently select a reviewer nobody named — and if the two
+# call sites disagree about this, a name can skip binary resolution here and then
+# still be dispatched as opencode later.
+relay_trim() { local _s="$1"; _s="${_s#"${_s%%[![:space:]]*}"}"; printf '%s' "${_s%"${_s##*[![:space:]]}"}"; }
+
 opencode_is_selected() {
   local _r; local -a _list=()
   IFS=',' read -ra _list <<< "$REVIEWERS"
@@ -171,9 +192,7 @@ opencode_is_selected() {
   # with a value containing spaces — it stays one item. Do not "simplify" this to
   # "${_list[@]}": that reintroduces the unbound-variable abort on an empty list.
   for _r in ${_list[@]+"${_list[@]}"}; do
-    # Trim surrounding whitespace only. Stripping ALL spaces would turn
-    # "open code" into "opencode" and silently select a reviewer nobody named.
-    _r="${_r#"${_r%%[![:space:]]*}"}"; _r="${_r%"${_r##*[![:space:]]}"}"
+    _r="$(relay_trim "$_r")"
     [ "$_r" = opencode ] && [ "$_r" != "$AUTHOR" ] && return 0
   done
   return 1

@@ -81,6 +81,9 @@ echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-no
 # $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
 # hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
 STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
+# Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
+# trap already installed STATUS_DIR would be left behind.
+trap 'rm -rf "$STATUS_DIR"' EXIT
 # Prompt attachments (the opencode reviewer gets the diff as a file) live in their
 # OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs "$STATUS_DIR"/*
 # and treats every file there as a reviewer outcome, so an attachment dropped in
@@ -98,7 +101,7 @@ STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking
 # SIGTERM, and adding a TERM handler measurably delayed it. SIGKILL leaks, but no
 # trap of any kind can prevent that.
 ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
-trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT
+trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
 # Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
 # "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
 # prefix also guarantees the key is never a dotfile (which the tally glob "*"
@@ -356,7 +359,7 @@ IFS=',' read -ra LIST <<< "$REVIEWERS"
 SEEN_LIST=""
 would_run=0; skipped=0   # reviewers that would run / were tolerated-skipped (default set)
 for r in "${LIST[@]}"; do
-  r="${r// }"
+  r="$(relay_trim "$r")"   # same normalization as opencode_is_selected
   [ -z "$r" ] && continue           # tolerate empty items (e.g. "claude,,codex")
   [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }

@@ -110,7 +110,7 @@ review_with() {
 
 IFS=',' read -ra LIST <<< "$REVIEWERS"
 for r in "${LIST[@]}"; do
-  r="${r// }"
+  r="$(relay_trim "$r")"   # same normalization as opencode_is_selected
   [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
   local_tool=$(tool_for "$r")
