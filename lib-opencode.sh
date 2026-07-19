@@ -173,24 +173,29 @@ relay_print_header() {
 }
 
 relay_assert_path_outside_repo() {
-  local _root _entry _resolved _oldifs
+  local _root _entry _resolved _rest
   _root="$(relay_worktree_root)" || return 0
   [ -n "$_root" ] || return 0
-  _oldifs="$IFS"; IFS=':'
-  for _entry in $PATH; do
-    IFS="$_oldifs"
-    [ -n "$_entry" ] || _entry="."          # an empty PATH field means "."
-    _resolved="$(cd "$_entry" 2>/dev/null && pwd -P)" || { IFS=':'; continue; }
+  # Split manually rather than with `for _entry in $PATH` under IFS=':'. Word
+  # splitting DROPS a trailing empty field, and an empty field means "the current
+  # directory" — so "PATH=/usr/bin:" would have sailed past this check while the
+  # shell happily resolved commands from the checkout. Same for a leading or
+  # doubled colon. The sentinel makes every field, including empty ones, iterate.
+  [ -n "${PATH:-}" ] || { echo "✖ PATH is empty — refusing to run." >&2; exit 2; }
+  _rest="$PATH:"
+  while [ -n "$_rest" ]; do
+    _entry="${_rest%%:*}"
+    _rest="${_rest#*:}"
+    [ -n "$_entry" ] || _entry="."          # empty field == current directory
+    _resolved="$(cd "$_entry" 2>/dev/null && pwd -P)" || continue
     case "$_resolved" in
       "$_root"|"$_root"/*)
-        echo "✖ PATH contains '$_entry' — inside the repository being reviewed." >&2
+        echo "✖ PATH entry '$_entry' is inside the repository being reviewed." >&2
         echo "  Every command the relay runs (gh, git, timeout, node, …) would be resolved from" >&2
         echo "  the branch under review. Remove that entry from PATH and re-run." >&2
         exit 2;;
     esac
-    IFS=':'
   done
-  IFS="$_oldifs"
 }
 
 opencode_resolve_bin() {
