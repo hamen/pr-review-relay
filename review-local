@@ -10,7 +10,7 @@
 #
 # Usage:
 #   review-local [--author claude|codex|cursor|antigravity|opencode] [--base <ref>] \
-#                [--reviewers claude,codex,cursor,antigravity] [--parallel]
+#                [--reviewers claude,codex,cursor,antigravity,opencode] [--parallel]
 #   (run from inside the repo, on the branch you want reviewed)
 set -uo pipefail
 
