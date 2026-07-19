@@ -78,8 +78,11 @@ opencode_resolve_bin() {
     }
   elif command -v opencode >/dev/null 2>&1; then
     OPENCODE_BIN="$(opencode_abs_path "$(command -v opencode)")"
-  elif [ -x "${HOME:-}/.opencode/bin/opencode" ]; then
-    OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
+  elif [ -n "${HOME:-}" ] && [ -x "$HOME/.opencode/bin/opencode" ]; then
+    # Guard on HOME being set, not just default it to empty: with HOME unset the
+    # test would probe "/.opencode/bin/opencode", a path in the filesystem root
+    # that nothing should ever be looking at.
+    OPENCODE_BIN="$HOME/.opencode/bin/opencode"
   else
     OPENCODE_BIN=opencode   # keep the bare name so the caller's "not installed" path reports it
   fi

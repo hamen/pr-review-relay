@@ -10,7 +10,8 @@
 #
 # Usage:
 #   review-local [--author claude|codex|cursor|antigravity|opencode] [--base <ref>] \
-#                [--reviewers claude,codex,cursor,antigravity,opencode] [--parallel]
+#                [--reviewers claude,codex,cursor,antigravity] [--parallel]
+#                (opencode is also supported, opt-in: name it explicitly)
 #   (run from inside the repo, on the branch you want reviewed)
 set -uo pipefail
 
@@ -87,7 +88,9 @@ review_with() {
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr.
-  if [ -z "${out// }" ]; then
+  # tr, not "${out// }": the latter only strips spaces, so a tab- or
+  # newline-only reply would pass as a real review. Same test as pr-review-relay.
+  if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
     local why="exited with code $rc"
     case "$rc" in
       0)   why="ran fine but returned an empty review";;

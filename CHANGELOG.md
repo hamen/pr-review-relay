@@ -9,7 +9,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 ### Fixed
 
 - **The `opencode` reviewer never ran.** It was invoked as
-  `opencode run --dangerously-skip-permissions`, a flag no shipped OpenCode version has (`opencode run
+  `opencode run --dangerously-skip-permissions`, a flag no shipped OpenCode version supports (`opencode run
   --help` on 1.18.3 offers `--auto`). Combined with the binary living at `~/.opencode/bin/opencode` —
   off `PATH`, so `command -v` missed and the reviewer was skipped before the flag mattered — the
   feature was silently dead: a dispatched run would return an empty review, which the fail-closed
@@ -33,7 +33,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   at startup regardless of permissions — from loading. Since shell is denied, the reviewer can't fetch
   the PR itself, so the diff is attached as a file (`-f`) in both modes and at any size.
 
-  Four weaker designs were tried and discarded, each confirmed broken against a live opencode:
+  Five weaker designs were tried and discarded, each confirmed broken against a live opencode:
   - `--agent plan` with no config — the Plan agent's permissions stay user-configurable; asked to run
     `id`, it ran it and returned real uid/gid.
   - A `gh pr view*` / `gh pr diff*` bash allowlist so link mode could still fetch — defeated by shell
@@ -42,6 +42,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   - Global deny without the `agent.plan` mirror — OpenCode applies agent-scoped permissions after the
     global ones, so a user's `agent.plan.permission.bash: allow` reinstated shell.
   - Denying tools by name — anything not named (custom tools, MCP servers) stays allowed by default.
+  - Running elsewhere while still reading project config — see the MCP-at-startup entry below.
 
   Deliberately not `--auto`, which auto-approves every `ask` permission. `review-local` gets the same
   policy, the same file attachment, and its own argv-contract tests.
