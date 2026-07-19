@@ -15,7 +15,17 @@
 #   (run from inside the repo, on the branch you want reviewed)
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SCRIPT_DIR is computed with BUILTINS ONLY (case/cd/pwd). The obvious
+# `$(cd "$(dirname "$0")" && pwd)` resolves `dirname` through PATH — before the PATH
+# guard below has had a chance to run — so a repo-local `dirname` would decide which
+# library this script sources. Sourcing itself takes a path and never consults PATH.
+_self="${BASH_SOURCE[0]}"
+case "$_self" in
+  */*) SCRIPT_DIR="${_self%/*}";;
+  *)   SCRIPT_DIR=".";;
+esac
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
+unset _self
 # Shared with pr-review-relay so the read-only policy exists in exactly one place.
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
@@ -23,6 +33,8 @@ OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 
 AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; REVIEWERS_EXPLICIT=0
 AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+# Validate here rather than letting `timeout` fail with a bare exit 125.
+case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want seconds)" >&2; exit 2;; esac
 need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,6 +73,9 @@ echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHO
 # every reviewer had timed out or returned nothing.
 FAILDIR="$(mktemp -d)" || { echo "cannot create temp dir" >&2; exit 1; }
 trap 'rm -rf "$FAILDIR"' EXIT
+# It only ever holds marker files, so nothing leaks — but hold it to the same rule
+# as ATTACH_DIR rather than leaving a second temp dir with a different standard.
+opencode_assert_attach_dir_outside_repo "$FAILDIR"
 
 ATTACH_DIR=""
 if opencode_is_selected; then

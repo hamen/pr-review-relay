@@ -65,7 +65,7 @@ OPENCODE_BIN=opencode
 opencode_resolve_symlinks() {
   local _p="$1" _t _n=0
   while [ -L "$_p" ]; do
-    if [ "$_n" -ge 40 ]; then
+    if [ "$_n" -gt 40 ]; then
       echo "✖ '$1' has a symlink chain over 40 links deep, or a loop — refusing to resolve it." >&2
       echo "  If this is a legitimate deep install, point PR_RELAY_OPENCODE_BIN at the real file." >&2
       exit 2
@@ -129,7 +129,15 @@ opencode_reject_if_in_repo() {
 #
 # Hardening one command (say, `timeout`) would be theatre while the rest stay
 # exposed, so the check is on PATH itself: refuse to run at all. One check, whole
-# class. Entries are compared physically, since a symlinked PATH entry pointing
+# class.
+#
+# LIMIT, stated rather than papered over: this cannot protect the INTERPRETER. By
+# the time any line of the script runs, `#!/usr/bin/env bash` has already chosen a
+# bash — through the same PATH. A hostile PATH is therefore only fully defensible
+# before invocation, which is outside this script's reach: if PATH already points
+# into an untrusted checkout, every command the user types is compromised, not just
+# this one. What the guard does cover is everything from the first line onward, and
+# SCRIPT_DIR is computed with builtins so even the library path cannot be steered. Entries are compared physically, since a symlinked PATH entry pointing
 # into the checkout is the same problem wearing a different name.
 # Find the worktree root using ONLY shell builtins — cd, pwd, [ — and no external
 # command. `git rev-parse` cannot be used here: git is itself resolved through the

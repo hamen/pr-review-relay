@@ -350,6 +350,17 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 > and read the fresh round. A round that actually dispatched reviewers **consumes one cap slot even when it
 > ends in `3`** (a persistently flaky reviewer must still hit the cap) — a round where *nobody* ran does not.
 
+### A note on `PATH`
+
+Both scripts **refuse to start** (exit `2`) if any `PATH` entry resolves inside the repository being
+reviewed — a `.` entry, a repo-local `bin/`, or a symlink to either. Everything the relay runs (`gh`,
+`git`, `timeout`, `node`, …) comes from `PATH`, so a repo-controlled entry means the branch under
+review chooses those binaries. If you see that error, take the entry out of `PATH`.
+
+One limit worth knowing: the check cannot cover the *interpreter*. `#!/usr/bin/env bash` has already
+picked a `bash` through `PATH` before the first line runs. Nothing a script does can fix that — if
+`PATH` points into an untrusted checkout, every command you type is affected, not just this one.
+
 ### `review-local` exit codes
 
 `review-local` follows the same fail-closed idea as the relay, on a smaller surface:
