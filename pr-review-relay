@@ -277,7 +277,8 @@ review_with() {
         out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>"$errf")
       fi; rc=$?;;
     opencode)
-      out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$PROMPT_NO_FALLBACK" "$errf" "$AGENT_TIMEOUT")
+      out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
+              "PR #$PR in $REPO ${PR_URL:+($PR_URL)}" "$errf" "$AGENT_TIMEOUT")
       rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms

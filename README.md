@@ -28,7 +28,7 @@ PR comments. Local, free (it uses the agent CLIs you already pay for), and idemp
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
    claude -p                       codex exec                      cursor-agent -p
-   agy -p                    opencode run --agent plan                      │
+   agy -p                 opencode --pure run --agent plan                   │
          └───────────────────────────────┴───────────────────────────────┘
                                          │
                               each posts its review as a PR comment
@@ -61,7 +61,7 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`
   - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
-  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode run --agent plan`
+  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run --agent plan`
     (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
 
 You only need the agents you actually want as reviewers.
@@ -359,8 +359,9 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 - **Read-only:** the other reviewers never modify code. They run with
   `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
   keep the agent in Q&A/read-only mode), `agy --dangerously-skip-permissions -p` (skips interactive
-  permission prompts; the prompt itself is read-only), and `opencode run --agent plan` with an inline
-  deny-list.
+  permission prompts; the prompt itself is read-only), and `opencode --pure run --agent plan` with an
+  inline deny-list (`--pure` matters: it stops external plugins, which execute at startup
+  regardless of permissions).
 - **OpenCode read-only is enforced by config, not by the agent name.** `--agent plan` alone is *not* a
   sandbox — the Plan agent's permissions remain user-configurable, and on a machine whose config allows
   `bash` it will run shell commands that came from the PR text. Each invocation sets

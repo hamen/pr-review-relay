@@ -92,10 +92,13 @@ opencode_resolve_bin() {
 # Applied per invocation through OPENCODE_CONFIG_CONTENT, a runtime override that
 # outranks the user's own opencode.json.
 #
-# DEFAULT-DENY with an explicit read-only allowlist. Five weaker designs were tried
+# DEFAULT-DENY with an explicit read-only allowlist. Six weaker designs were tried
 # during cross-review and every one was verified broken by hand before being
 # discarded — each looked airtight until it was actually run:
 #
+#  0. The original invocation, `--dangerously-skip-permissions`. Absent from
+#     `opencode run --help`, which is misleading: the binary accepts it as an
+#     undocumented alias for --auto, so it approved everything rather than erroring.
 #  1. `--agent plan` and nothing else. The Plan agent's permissions stay
 #     user-configurable, so on a permissive machine it runs shell straight from PR
 #     text — asked to run `id`, it did, and returned real uid/gid.
@@ -126,7 +129,18 @@ opencode_resolve_bin() {
 OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"plan":{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
 
 # --- The invocation ----------------------------------------------------------
-# opencode_review <attach_dir> <diff> <prompt> <errfile> <timeout>
+# opencode_review <attach_dir> <diff> <context_block> <subject> <errfile> <timeout>
+#
+# <subject> identifies what is under review in one line, e.g.
+#   "PR #6 in owner/repo (https://...)"  or  "local branch 'x', diffed against 'main'"
+# <context_block> is the caller's optional --context-file preamble, or "".
+#
+# The prompt is built HERE rather than taken from the caller. The callers' own
+# prompts tell reviewers the change is on stdin, appended below, or fetchable with
+# `gh`, and that they may read the repo — none of which is true for this reviewer.
+# Appending a correction produced a prompt that stated both things and relied on
+# the model preferring the later one. Composing an accurate prompt instead removes
+# the contradiction rather than papering over it.
 #
 # Prints the review on stdout; returns the agent's exit code.
 #
@@ -145,7 +159,7 @@ OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glo
 # regardless of permissions. `-f` takes an array, so `--` must precede the prompt or
 # it is swallowed as another filename and opencode dies with "File not found".
 opencode_review() {
-  local attach_dir="$1" diff="$2" prompt="$3" errf="$4" agent_timeout="$5"
+  local attach_dir="$1" diff="$2" context_block="$3" subject="$4" errf="$5" agent_timeout="$6"
   local diff_file oc_prompt
   local -a model=()
   [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && model=(-m "$PR_RELAY_OPENCODE_MODEL")
@@ -162,10 +176,7 @@ opencode_review() {
   # the relay would count that as a clean reviewer. Fail instead.
   printf '%s' "$diff" > "$diff_file" || { echo "cannot write the diff attachment" >&2; return 1; }
 
-  # Both callers' base prompts tell the reviewer the change is on stdin, appended,
-  # or fetchable with gh. None of that is true here, so say so explicitly instead of
-  # leaving the agent to look in a place that no longer exists.
-  oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. `gh` and every other command will be refused; do not attempt them.\n- Nothing is on stdin, nothing is appended below, and you do not have the repository checked out.\n- The complete diff is ATTACHED to this message as a file. It is your only source; review it on its own merits.' "$prompt")"
+  oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is ATTACHED to this message as a file — that is your only source.\nYou have no shell and no checkout: commands will be refused, nothing is on stdin,\nand there is nothing appended below. Review the attached diff on its own merits.\n\nLook for correctness bugs, security issues, broken edge cases, and clear design or\nmaintainability problems. Be concise. Group findings by severity: Blocker /\nShould-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
 
   ( cd "$attach_dir" && \
     OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" \

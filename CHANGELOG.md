@@ -8,12 +8,16 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Fixed
 
-- **The `opencode` reviewer never ran.** It was invoked as
-  `opencode run --dangerously-skip-permissions`, a flag no shipped OpenCode version supports (`opencode run
-  --help` on 1.18.3 offers `--auto`). Combined with the binary living at `~/.opencode/bin/opencode` —
-  off `PATH`, so `command -v` missed and the reviewer was skipped before the flag mattered — the
-  feature was silently dead: a dispatched run would return an empty review, which the fail-closed
-  relay reports as `exit 3`.
+- **The `opencode` reviewer never ran** — because the binary was never found. OpenCode installs to
+  `~/.opencode/bin/opencode`, which is not on `PATH`, so `command -v opencode` missed and the reviewer
+  was skipped before it could be dispatched at all. It is now resolved from the stock path.
+- **And when it did run, it ran with auto-approval.** The invocation used
+  `--dangerously-skip-permissions`. That flag is absent from `opencode run --help`, but it is *not*
+  rejected: the 1.18.3 binary accepts it as an undocumented alias for `--auto`
+  (`args.auto || args.yolo || args["dangerously-skip-permissions"]`). So the reviewer was configured to
+  auto-approve every permission it was asked for — on a machine where `command -v opencode` did
+  succeed, it would have reviewed untrusted diffs with edit and shell rights. That is the behaviour the
+  read-only work below exists to remove.
 - **OpenCode is now resolved from the stock install path.** `PATH` first, then
   `~/.opencode/bin/opencode`, overridable with `PR_RELAY_OPENCODE_BIN`. Resolution happens once at
   startup so it feeds both the availability check and the invocation.

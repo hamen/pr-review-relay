@@ -84,7 +84,9 @@ review_with() {
     cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
     antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
     opencode)
-      out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$PROMPT" "$errf" "$AGENT_TIMEOUT"); rc=$?;;
+      out=$(opencode_review "$ATTACH_DIR" "$DIFF" "" \
+              "the in-progress local branch \x27$BRANCH_LABEL\x27, diffed against \x27$BASE\x27" \
+              "$errf" "$AGENT_TIMEOUT"); rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr.

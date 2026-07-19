@@ -174,8 +174,9 @@ if [ "$rc" = 4 ]; then echo "  ok   [4] round cap reached → exit 4"; PASS=$((P
 # --- opencode invocation contract --------------------------------------------
 # These assert the ARGV the relay builds, not just that a review was posted — the
 # generic stub above accepts anything, so it would pass against a broken flag too.
-# Each of these fails against the pre-fix script (which sent the non-existent
-# --dangerously-skip-permissions and hardcoded the bare `opencode` name).
+# Each of these fails against the pre-fix script (which sent
+# --dangerously-skip-permissions — an undocumented alias for --auto, i.e. approve
+# everything — and hardcoded the bare `opencode` name).
 OC_ARGV="$WORK/oc_argv"
 make_strict_opencode() { # $1 = dir to install the stub into
   mkdir -p "$1"
@@ -199,7 +200,7 @@ esac
 case " $* " in *" run "*) ;; *) echo "no 'run' subcommand in argv: $*" >&2; exit 64;; esac
 case " $* " in
   *" --dangerously-skip-permissions "*)
-    echo "rejected: --dangerously-skip-permissions is not an opencode flag" >&2; exit 64;;
+    echo "rejected: --dangerously-skip-permissions is an undocumented alias for --auto" >&2; exit 64;;
   *" --auto "*)
     echo "rejected: --auto grants write+shell to a reviewer that reads untrusted PRs" >&2; exit 64;;
 esac
@@ -294,8 +295,11 @@ oc_assert "attaches the diff with -f" has " -f "
 # rewrite the same file while the other agent is reading it.
 oc_assert "attachment path is unique per invocation" has "oc-diff\."
 oc_assert "separates the prompt with --" has " -- "
-oc_assert "tells the agent shell is disabled" has "Shell access is disabled"
-oc_assert "overrides the stdin/gh instructions" has "this overrides any instruction above"
+oc_assert "tells the agent it has no shell" has "You have no shell"
+# The prompt is BUILT for this reviewer rather than corrected afterwards, so it
+# must not contain the other reviewers' claims at all.
+oc_assert "never claims the diff is on stdin" hasnt "provided on stdin"
+oc_assert "never tells it to run gh" hasnt "gh pr view"
 
 oc_run 0 "opencode runs read-only, diff mode" -- --diff
 oc_assert "diff-mode argv still read-only" has "--agent plan"
@@ -303,8 +307,9 @@ oc_assert "diff mode also attaches the diff" has " -f "
 # Prove we are actually in diff mode. Checking for the diff body would NOT prove it:
 # link mode inlines the same diff as a fallback under LINK_DIFF_FALLBACK_MAX_BYTES.
 # The prompt preamble is the real discriminator between the two modes.
-oc_assert "diff mode really used (not link)" has "provided on stdin"
-oc_assert "diff mode is not the link preamble" hasnt "an OPEN pull request"
+# Mode no longer changes this reviewer's prompt: it always gets the attachment
+# and an accurate description, so both modes must look the same here.
+oc_assert "diff mode uses the same composed prompt" has "ATTACHED to this message"
 
 oc_run 0 "PR_RELAY_OPENCODE_MODEL set → model pinned" PR_RELAY_OPENCODE_MODEL=opencode/some-model
 oc_assert "sets exactly -m <value>" has "-m opencode/some-model"
