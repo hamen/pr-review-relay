@@ -11,6 +11,7 @@
 #   OPENCODE_RO_CONFIG      the read-only permission policy, as JSON
 #   opencode_resolve_bin    populate OPENCODE_BIN; exits 2 on a bad explicit override
 #   opencode_review         run one review; prints it on stdout
+#   opencode_is_selected    is opencode in $REVIEWERS and not $AUTHOR?
 #
 # Callers must be Bash 3.2-safe (macOS ships 3.2) and run under `set -u`.
 
@@ -50,7 +51,9 @@ opencode_resolve_bin() {
     OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")"
     # Fail fast: a user-supplied override that cannot run is a configuration error,
     # not something to surface minutes later as a vague "not installed" skip.
-    [ -x "$OPENCODE_BIN" ] || {
+    # -x alone is true for a DIRECTORY, which would pass here and then fail at
+    # launch with a confusing error; require a regular file too.
+    { [ -f "$OPENCODE_BIN" ] && [ -x "$OPENCODE_BIN" ]; } || {
       echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable." >&2
       echo "  Give an absolute path, a relative path, or a name on PATH (a leading ~ is not expanded)." >&2
       exit 2
@@ -137,4 +140,21 @@ opencode_review() {
     OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" \
     timeout "$agent_timeout" "$OPENCODE_BIN" --pure run \
       -f "$diff_file" --agent plan ${model[@]+"${model[@]}"} -- "$oc_prompt" 2>"$errf" )
+}
+
+# --- Reviewer selection ------------------------------------------------------
+# Callers must resolve the binary ONLY when this reviewer is actually wanted:
+# opencode_resolve_bin exits 2 on an unusable override, and an optional reviewer
+# must not break a run that didn't ask for it. Kept here, with everything else
+# OpenCode-specific, so the two callers cannot drift on it either.
+#
+# Reads $REVIEWERS and $AUTHOR from the caller.
+opencode_is_selected() {
+  local _r; local -a _list=()
+  IFS=',' read -ra _list <<< "$REVIEWERS"
+  for _r in ${_list[@]+"${_list[@]}"}; do
+    _r="${_r// }"
+    [ "$_r" = opencode ] && [ "$_r" != "$AUTHOR" ] && return 0
+  done
+  return 1
 }

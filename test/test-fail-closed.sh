@@ -377,6 +377,16 @@ rc=$?
 if [ "$rc" = 0 ]; then echo "  ok   [0] bad override is irrelevant when opencode is not a reviewer"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 0] optional reviewer broke an unrelated run"; FAIL=$((FAIL+1)); fi
 
+# A DIRECTORY passes a bare `[ -x ]`, so it must be rejected explicitly rather
+# than passing validation and failing confusingly at launch.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  PR_RELAY_OPENCODE_BIN="$WORK" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a directory override is rejected, not treated as executable"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] directory override passed validation"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"

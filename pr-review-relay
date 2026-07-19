@@ -61,21 +61,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Resolve the opencode binary ONLY when that reviewer is actually selected:
-# opencode_resolve_bin exits 2 on an unusable PR_RELAY_OPENCODE_BIN, and an
-# optional reviewer must not break `--reviewers claude`. It cannot be deferred
-# into tool_for() either — that is called in a command substitution, where the
-# exit would be swallowed and the failure silently downgraded to a skip.
-_relay_wants_opencode() {
-  local _r; local -a _list=()
-  IFS=',' read -ra _list <<< "$REVIEWERS"
-  for _r in ${_list[@]+"${_list[@]}"}; do
-    _r="${_r// }"
-    [ "$_r" = opencode ] && [ "$_r" != "$AUTHOR" ] && return 0
-  done
-  return 1
-}
-_relay_wants_opencode && opencode_resolve_bin
+opencode_is_selected && opencode_resolve_bin
 
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
@@ -264,7 +250,6 @@ fi
 # availability check below and the invocation in review_with(). Resolving inside
 # review_with would be dead code: the reviewer loop skips on `command -v` first.
 # Falls back to the bare name so a genuinely missing CLI still reports as such.
-
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
