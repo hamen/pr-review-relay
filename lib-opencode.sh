@@ -105,8 +105,9 @@ opencode_resolve_bin() {
 # /etc/opencode or /Library/Application Support/opencode, root-owned and not
 # writable by a pull request. A permissive org-wide policy is an administrator's
 # deliberate machine-wide choice, not something a diff can reach. OPENCODE_PERMISSION
-# is not a fix either: it applies later still but sets only the TOP-LEVEL permission
-# block, so an agent-scoped allow still wins — verified, bash ran.
+# (a real OpenCode env var — it is present in the 1.18.3 binary) is not a fix
+# either: it applies later still, but sets only the TOP-LEVEL permission block, so
+# an agent-scoped allow still wins — verified, bash ran.
 OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"plan":{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
 
 # --- The invocation ----------------------------------------------------------
@@ -134,7 +135,13 @@ opencode_review() {
   local -a model=()
   [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && model=(-m "$PR_RELAY_OPENCODE_MODEL")
 
-  diff_file="$attach_dir/oc-diff"
+  # UNIQUE per invocation. A fixed name races: review-local does not dedupe its
+  # reviewer list, so `--reviewers opencode,opencode --parallel` runs two of these
+  # concurrently and one would truncate and rewrite the file while the other's
+  # agent is still reading it — a silently incomplete review, which is worse than
+  # a failed one because it still looks like a verdict. mktemp inside the
+  # already-private attach dir keeps the EXIT-trap cleanup working unchanged.
+  diff_file="$(mktemp "$attach_dir/oc-diff.XXXXXX")" || return 1
   printf '%s' "$diff" > "$diff_file"
 
   # Both callers' base prompts tell the reviewer the change is on stdin, appended,
@@ -164,7 +171,9 @@ opencode_is_selected() {
   # with a value containing spaces — it stays one item. Do not "simplify" this to
   # "${_list[@]}": that reintroduces the unbound-variable abort on an empty list.
   for _r in ${_list[@]+"${_list[@]}"}; do
-    _r="${_r// }"
+    # Trim surrounding whitespace only. Stripping ALL spaces would turn
+    # "open code" into "opencode" and silently select a reviewer nobody named.
+    _r="${_r#"${_r%%[![:space:]]*}"}"; _r="${_r%"${_r##*[![:space:]]}"}"
     [ "$_r" = opencode ] && [ "$_r" != "$AUTHOR" ] && return 0
   done
   return 1

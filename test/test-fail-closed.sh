@@ -289,6 +289,10 @@ fi
 # in both modes. `-f` takes an array, so `--` must precede the prompt or the prompt
 # is swallowed as another filename (opencode then dies with "File not found").
 oc_assert "attaches the diff with -f" has " -f "
+# Unique per invocation, not a fixed name: review-local does not dedupe its
+# reviewer list, so two concurrent opencode runs would otherwise truncate and
+# rewrite the same file while the other agent is reading it.
+oc_assert "attachment path is unique per invocation" has "oc-diff\."
 oc_assert "separates the prompt with --" has " -- "
 oc_assert "tells the agent shell is disabled" has "Shell access is disabled"
 oc_assert "overrides the stdin/gh instructions" has "this overrides any instruction above"

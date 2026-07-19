@@ -82,6 +82,7 @@ curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
 curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
 curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
 chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
+# lib-opencode.sh is sourced, not executed — it needs no +x
 # make sure ~/.local/bin is on your PATH
 ```
 
