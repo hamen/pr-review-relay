@@ -26,23 +26,32 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Changed
 
-- **OpenCode runs read-only, enforced by an inline permission deny-list.** `opencode run --agent plan`
-  plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks the user's own `opencode.json`)
-  denying `bash`, `edit`, `write`, `patch`, `task`, `webfetch`, `websearch` and `external_directory`,
-  mirrored under `agent.plan`. Since shell is denied, the reviewer can't fetch the PR itself, so the
-  diff is attached as a file (`-f`) in both modes and at any size.
+- **OpenCode runs read-only, enforced by a default-deny permission policy.**
+  `opencode --pure run --agent plan` plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks
+  the user's own `opencode.json`) set to `"*": "deny"` with an explicit read-only allowlist (`read`,
+  `grep`, `glob`, `list`), mirrored under `agent.plan`. `--pure` keeps external plugins — which execute
+  at startup regardless of permissions — from loading. Since shell is denied, the reviewer can't fetch
+  the PR itself, so the diff is attached as a file (`-f`) in both modes and at any size.
 
-  Three weaker designs were tried and discarded, each confirmed broken against a live opencode:
+  Four weaker designs were tried and discarded, each confirmed broken against a live opencode:
   - `--agent plan` with no config — the Plan agent's permissions stay user-configurable; asked to run
     `id`, it ran it and returned real uid/gid.
   - A `gh pr view*` / `gh pr diff*` bash allowlist so link mode could still fetch — defeated by shell
     redirection: `gh pr view N > victim` matches the allowed prefix and overwrote the file despite
-    `edit` and `write` both denied.
+    `edit` and `write` both denied. Prefix matching cannot make a shell command read-only.
   - Global deny without the `agent.plan` mirror — OpenCode applies agent-scoped permissions after the
     global ones, so a user's `agent.plan.permission.bash: allow` reinstated shell.
+  - Denying tools by name — anything not named (custom tools, MCP servers) stays allowed by default.
 
   Deliberately not `--auto`, which auto-approves every `ask` permission. `review-local` gets the same
-  config and the same file attachment.
+  policy, the same file attachment, and its own argv-contract tests.
+- **Prompt attachments are cleaned up on interruption.** The attached diff lives in a mode-700 temp dir
+  removed by the script's `EXIT` trap, which does fire on `SIGTERM`; a per-function `RETURN` trap does
+  not, and would have left the full PR diff in `/tmp`. It is deliberately kept out of the status
+  directory, whose contents are tallied as reviewer outcomes.
+- **The round-state fallback is per-user.** With neither `XDG_CACHE_HOME` nor `HOME` set, state now goes
+  to a mode-700 `${TMPDIR:-/tmp}/pr-review-relay-$(id -u)` instead of a shared, predictable path another
+  user could pre-create or symlink.
 
 ### Added
 

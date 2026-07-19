@@ -73,7 +73,15 @@ echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-no
 # $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
 # hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
 STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
-trap 'rm -rf "$STATUS_DIR"' EXIT
+# Prompt attachments (the opencode reviewer gets the diff as a file) live in their
+# OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs "$STATUS_DIR"/*
+# and treats every file there as a reviewer outcome, so an attachment dropped in
+# there would be counted as a failed reviewer and poison the verdict.
+# Both are mktemp -d (mode 700) and both are removed by the EXIT trap, which does
+# run on SIGTERM — a per-function RETURN trap does not, and would leave the full
+# PR diff behind in /tmp.
+ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
+trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT
 # Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
 # "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
 # prefix also guarantees the key is never a dotfile (which the tally glob "*"
@@ -107,7 +115,13 @@ fi
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
 # Both XDG_CACHE_HOME and HOME can be unset (cron, systemd, minimal containers) and
 # this script runs under `set -u`, so a bare $HOME here aborts the relay outright.
-ROUND_DIR="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/pr-review-relay"; mkdir -p "$ROUND_DIR"
+# The last-resort path is per-UID and mode 700, NOT a shared /tmp/.cache: a fixed
+# world-writable path lets another user pre-create it (or plant a symlink) and then
+# read or steer another user's round state.
+if [ -n "${XDG_CACHE_HOME:-}" ]; then   ROUND_DIR="$XDG_CACHE_HOME/pr-review-relay"
+elif [ -n "${HOME:-}" ]; then           ROUND_DIR="$HOME/.cache/pr-review-relay"
+else                                    ROUND_DIR="${TMPDIR:-/tmp}/pr-review-relay-$(id -u)"; fi
+mkdir -p "$ROUND_DIR" && chmod 700 "$ROUND_DIR" 2>/dev/null
 ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
 [ "$RESET" = 1 ] && rm -f "$ROUND_FILE"
@@ -198,25 +212,31 @@ fi
 # Inline permission override for the opencode reviewer, applied per invocation via
 # OPENCODE_CONFIG_CONTENT (runtime override; outranks the user's own opencode.json).
 #
-# Shell is denied OUTRIGHT. Two earlier attempts were shown unsafe in review and
-# both were verified by hand before being discarded:
+# DEFAULT-DENY with an explicit read-only allowlist. Four weaker designs were tried
+# during review and every one of them was verified broken by hand before being
+# discarded — the pattern is that each looked airtight until it was actually run:
 #
 #  1. `--agent plan` with no config. The Plan agent's permissions stay
 #     user-configurable, so on a permissive machine it runs shell from PR text —
 #     asked to run `id`, it did, and returned real uid/gid.
-#  2. Global deny with a `gh pr view*`/`gh pr diff*` allowlist, so link mode could
+#  2. Global deny plus a `gh pr view*`/`gh pr diff*` allowlist, so link mode could
 #     still fetch. Defeated by shell redirection: `gh pr view N > victim.txt`
-#     matches the allowed prefix and overwrote a file despite edit+write deny.
+#     matches the allowed prefix and overwrote the file despite edit+write deny.
 #     Prefix matching cannot make a shell command read-only.
+#  3. Global deny without an agent.plan mirror. OpenCode applies agent-scoped
+#     permissions AFTER the global ones, so `agent.plan.permission.bash: allow` in
+#     a user's config reinstated shell — verified, `id` ran again.
+#  4. Denying tools by NAME (bash/edit/write/...). Anything not named stays allowed
+#     by default, so a user's custom tools or MCP servers remain reachable from
+#     prompt-injected PR text. Hence "*": "deny" first, then allow only the read
+#     side: read/grep/glob/list (+todo, which opencode uses for its own bookkeeping).
 #
-# The deny is ALSO mirrored under agent.plan: OpenCode applies agent-specific
-# permissions after the global ones, so a user's `agent.plan.permission.bash:
-# allow` would otherwise reinstate shell — verified, `id` ran again.
+# `--pure` on the invocation skips external plugins, which otherwise load and can
+# execute code at startup regardless of these permissions.
 #
-# With no shell, the reviewer cannot fetch the PR itself, so the diff is attached
-# as a file instead (see the opencode case below). read/grep/glob need no shell
-# and stay available for reading the repo.
-OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"},"agent":{"plan":{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"}}}}'
+# With no shell the reviewer cannot fetch the PR itself, so the diff is attached as
+# a file instead (see the opencode case below).
+OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow","todoread":"allow","todowrite":"allow"},"agent":{"plan":{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow","todoread":"allow","todowrite":"allow"}}}}'
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
@@ -263,16 +283,18 @@ review_with() {
       local -a _oc_model=()
       [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && _oc_model=(-m "$PR_RELAY_OPENCODE_MODEL")
       local _oc_diff _oc_prompt
-      _oc_diff="$(mktemp)"
-      # Clean the attachment even if we're interrupted mid-review; the EXIT trap
-      # above only covers STATUS_DIR.
-      trap 'rm -f "$_oc_diff"' RETURN
+      # In $ATTACH_DIR (not $STATUS_DIR — see the note there) so the script-level
+      # EXIT trap removes it. A per-function `trap ... RETURN` was tried and is not
+      # enough: verified that on SIGTERM mid-review the RETURN trap never fires and
+      # the file survives — and it holds the full PR diff, which for a private repo
+      # must not be left lying in /tmp.
+      _oc_diff="$ATTACH_DIR/oc-diff-$skey"
       printf '%s' "$DIFF" > "$_oc_diff"
       # Both prompts tell the reviewer where the diff is (stdin in --diff mode, gh in
       # link mode) and neither is true here, so override both explicitly — otherwise
       # the agent is told two contradictory things about where to find the change.
       _oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. `gh` and every other command will be refused; do not attempt them.\n- Nothing is on stdin.\n- The complete diff is ATTACHED to this message as a file. Review that.\nYou may still read files in the repo for context.' "$PROMPT")"
-      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf")
+      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf")
       rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms

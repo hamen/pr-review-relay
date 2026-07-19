@@ -187,10 +187,12 @@ printf '%s\n' "$*" > "${OC_ARGV_FILE:?}"
 # on a permissive machine `--agent plan` will still run shell from PR text.
 printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-}" > "${OC_ARGV_FILE}.cfg"
 case "${OPENCODE_CONFIG_CONTENT:-}" in
-  *'"edit":"deny"'*) ;;
-  *) echo "missing read-only OPENCODE_CONFIG_CONTENT" >&2; exit 64;;
+  *'"*":"deny"'*) ;;
+  *) echo "OPENCODE_CONFIG_CONTENT missing the default-deny baseline" >&2; exit 64;;
 esac
-[ "$1" = run ] || { echo "expected 'run' subcommand, got '$1'" >&2; exit 64; }
+# Global flags (e.g. --pure) may precede the subcommand, so scan rather than
+# assuming argv[1] is it.
+case " $* " in *" run "*) ;; *) echo "no 'run' subcommand in argv: $*" >&2; exit 64;; esac
 case " $* " in
   *" --dangerously-skip-permissions "*)
     echo "rejected: --dangerously-skip-permissions is not an opencode flag" >&2; exit 64;;
@@ -253,15 +255,20 @@ oc_cfg() { # oc_cfg <desc> <has|hasnt> <pattern>
 # not the policy OpenCode ENFORCES — a hermetic test cannot run the real agent. Both
 # holes fixed here were found by review and confirmed by hand against a live
 # opencode, not by this file. Treat these as regression guards on the config string.
-oc_cfg "denies edit"  has '"edit":"deny"'
-oc_cfg "denies write" has '"write":"deny"'
-oc_cfg "denies bash outright" has '"bash":"deny"'
-# An allowlist was tried and defeated by shell redirection (`gh pr view N > file`
-# matches the allowed prefix and writes). There must be no allow rule at all.
-oc_cfg "no bash allowlist survives" hasnt '"allow"'
+# Default-deny: naming tools to deny leaves anything unnamed (custom tools, MCP
+# servers) allowed, so the policy must start from "*": "deny".
+oc_cfg "default-deny baseline" has '"\*":"deny"'
+oc_cfg "allows read"  has '"read":"allow"'
+oc_cfg "allows grep"  has '"grep":"allow"'
+# Shell must never be allowed. An allowlist was tried and defeated by redirection
+# (`gh pr view N > file` matches the allowed prefix and writes).
+oc_cfg "never allows bash" hasnt '"bash":"allow"'
+oc_cfg "no bash prefix allowlist" hasnt 'gh pr'
 # OpenCode applies agent-specific permissions AFTER global ones, so a user's
 # agent.plan.permission would reinstate shell unless we deny there too.
-oc_cfg "mirrors the deny under agent.plan" has '"agent":{"plan":{"permission"'
+oc_cfg "mirrors the policy under agent.plan" has '"agent":{"plan":{"permission"'
+# External plugins load and can execute code at startup regardless of permissions.
+oc_assert "skips external plugins with --pure" has "--pure"
 
 # Shell is denied, so the reviewer can never fetch the PR: the diff must be ATTACHED
 # in both modes. `-f` takes an array, so `--` must precede the prompt or the prompt
@@ -324,6 +331,52 @@ env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
 rc=$?
 if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] PR_RELAY_OPENCODE_BIN override honoured"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc] PR_RELAY_OPENCODE_BIN override ignored"; FAIL=$((FAIL+1)); fi
+
+# --- review-local: same opencode contract ------------------------------------
+# review-local is a separate script that duplicates the opencode invocation, so it
+# can drift from pr-review-relay. It was changed in the same PR with no coverage,
+# which is exactly how the two fall out of sync.
+RL="$HERE/../review-local"
+if [ -f "$RL" ]; then
+  RLREPO="$WORK/rlrepo"; mkdir -p "$RLREPO"
+  (
+    cd "$RLREPO" || exit 1
+    git init -q . 2>/dev/null
+    git config user.email t@t; git config user.name t
+    echo base > f.txt; git add f.txt; git commit -qm base
+    git branch -M mainline
+    git checkout -qb feature
+    echo changed > f.txt; git add f.txt; git commit -qm change
+  ) >/dev/null 2>&1
+  rm -f "$OC_ARGV" "$OC_ARGV.cfg"
+  ( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" \
+      bash "$RL" --base mainline --reviewers opencode >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then
+    echo "  ok   [0] review-local dispatches opencode"; PASS=$((PASS+1))
+  else
+    echo "  FAIL [got $rc] review-local did not dispatch opencode"; FAIL=$((FAIL+1))
+  fi
+  rl_assert() { # rl_assert <desc> <has|hasnt> <pattern> <file>
+    local desc="$1" mode="$2" pat="$3" file="$4" got
+    got="$(cat "$file" 2>/dev/null || true)"
+    case "$mode" in
+      has)   if printf '%s' "$got" | grep -q -- "$pat"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+             else echo "  FAIL $desc"; FAIL=$((FAIL+1)); fi;;
+      hasnt) if printf '%s' "$got" | grep -q -- "$pat"; then echo "  FAIL $desc"; FAIL=$((FAIL+1));
+             else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
+    esac
+  }
+  rl_assert "review-local: read-only agent"     has   "--agent plan"     "$OC_ARGV"
+  rl_assert "review-local: --pure"              has   "--pure"           "$OC_ARGV"
+  rl_assert "review-local: attaches the diff"   has   " -f "             "$OC_ARGV"
+  rl_assert "review-local: no legacy flag"      hasnt "--dangerously-skip-permissions" "$OC_ARGV"
+  rl_assert "review-local: overrides the stdin wording" has "ATTACHED" "$OC_ARGV"
+  rl_assert "review-local: default-deny policy" has   '"\*":"deny"'     "$OC_ARGV.cfg"
+  rl_assert "review-local: never allows bash"   hasnt '"bash":"allow"'  "$OC_ARGV.cfg"
+else
+  echo "  ok   [-] review-local not present (skip)"; PASS=$((PASS+1))
+fi
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

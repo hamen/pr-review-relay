@@ -174,7 +174,7 @@ Environment:
 | `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
-| `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
+| `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary — **absolute**, or a bare name already on `PATH`; a relative path is not resolved and the reviewer is skipped. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
 
 > **Before pinning `PR_RELAY_OPENCODE_MODEL`:** free-tier models can log submitted
 > code for product improvement, and your PR diff is the input. Check the provider's
@@ -353,16 +353,17 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   deny-list.
 - **OpenCode read-only is enforced by config, not by the agent name.** `--agent plan` alone is *not* a
   sandbox — the Plan agent's permissions remain user-configurable, and on a machine whose config allows
-  `bash` it will run shell commands that came from the PR text. So each invocation also sets
-  `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks your own `opencode.json`) denying
-  `bash`, `edit`, `write`, `patch`, `task`, `webfetch`, `websearch` and `external_directory` — mirrored
-  under `agent.plan`, because OpenCode applies agent-scoped permissions *after* the global ones.
+  `bash` it will run shell commands that came from the PR text. Each invocation sets
+  `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks your own `opencode.json`) to a
+  **default-deny** policy — `"*": "deny"` plus an explicit read-only allowlist (`read`, `grep`, `glob`,
+  `list`) — mirrored under `agent.plan`, because OpenCode applies agent-scoped permissions *after* the
+  global ones. It also runs with `--pure` so external plugins, which execute at startup, don't load.
   Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
-- **Shell is denied outright, so OpenCode never fetches the PR itself** — the diff is attached to the
-  prompt as a file instead, in both modes and at any size. An earlier attempt allowed just
-  `gh pr view` / `gh pr diff` so link mode could still fetch; that was defeated by shell redirection
-  (`gh pr view N > file` matches the allowed prefix and writes), which is why prefix allowlists are
-  not used here.
+- **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
+  a file instead, in both modes and at any size. Three narrower designs were tried first and each was
+  demonstrably bypassable: allowing just `gh pr view` / `gh pr diff` (defeated by shell redirection —
+  `gh pr view N > file` matches the allowed prefix and writes), omitting the `agent.plan` mirror, and
+  denying tools by name (anything unnamed — custom tools, MCP servers — stays allowed by default).
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in

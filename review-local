@@ -39,6 +39,12 @@ git rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "Base ref '$BASE' not f
 
 echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHOR:-none}"
 
+# Prompt attachments (opencode receives the diff as a file) live here; mktemp -d is
+# mode 700, and the EXIT trap fires on SIGTERM too, so an interrupted review does not
+# leave the branch diff sitting in /tmp.
+ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
+trap 'rm -rf "$ATTACH_DIR"' EXIT
+
 DIFF=$(git diff "$BASE...$BRANCH")
 [ -z "$DIFF" ] && { echo "No diff between $BASE and $BRANCH_LABEL."; exit 1; }
 echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes"
@@ -66,13 +72,13 @@ else
   else OPENCODE_BIN=opencode; fi
 fi
 
-# Read-only enforcement for the opencode reviewer: shell denied outright (the diff
-# is handed over directly, so it never needs to fetch anything). The deny is also
-# mirrored under agent.plan because OpenCode applies agent-specific permissions
-# AFTER the global ones — a user's `agent.plan.permission.bash: allow` would
-# otherwise reinstate shell for exactly the agent we run. `--agent plan` is not a
-# sandbox on its own; this config is what enforces read-only.
-OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"},"agent":{"plan":{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"}}}}'
+# Read-only enforcement for the opencode reviewer. Same policy as pr-review-relay —
+# see the long note there for the designs that were tried and broken. In short:
+# DEFAULT-DENY ("*": "deny") with an explicit read-only allowlist, because naming
+# individual tools to deny leaves anything not named — custom tools, MCP servers —
+# allowed by default. Mirrored under agent.plan, since OpenCode applies agent-scoped
+# permissions after the global ones. `--agent plan` is not a sandbox on its own.
+OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow","todoread":"allow","todowrite":"allow"},"agent":{"plan":{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow","todoread":"allow","todowrite":"allow"}}}}'
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
@@ -92,15 +98,19 @@ review_with() {
     opencode)
       local -a _oc_model=()
       [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && _oc_model=(-m "$PR_RELAY_OPENCODE_MODEL")
-      local _oc_diff
-      _oc_diff="$(mktemp)"
-      # Remove the attachment even if we're interrupted mid-review, not just on the
-      # happy path — errf is cleaned the same way below.
-      trap 'rm -f "$_oc_diff" "$errf"' RETURN
+      local _oc_diff _oc_prompt
+      # In $ATTACH_DIR (mode 700, removed by the script-level EXIT trap, which does
+      # fire on SIGTERM). A per-function RETURN trap does NOT fire when the script is
+      # killed mid-review, and this file holds the whole branch diff.
+      _oc_diff="$ATTACH_DIR/oc-diff"
       printf '%s' "$DIFF" > "$_oc_diff"
+      # The shared prompt says the diff is "on stdin or appended below"; for opencode
+      # neither is true, so override it rather than leave the agent looking in the
+      # wrong place. Same note as pr-review-relay.
+      _oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. Commands will be refused; do not attempt them.\n- Nothing is on stdin, and nothing is appended below.\n- The complete diff is ATTACHED to this message as a file. Review that.\nYou may still read files in the repo for context.' "$PROMPT")"
       # `-f` takes an array, so `--` must precede the prompt or it is swallowed as
       # another filename and opencode dies with "File not found".
-      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$PROMPT" 2>"$errf"); rc=$?;;
+      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf"); rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr.
