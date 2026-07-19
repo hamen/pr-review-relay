@@ -186,6 +186,10 @@ printf '%s\n' "$*" > "${OC_ARGV_FILE:?}"
 # Read-only is enforced by the inline permission config, not by --agent alone:
 # on a permissive machine `--agent plan` will still run shell from PR text.
 printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-}" > "${OC_ARGV_FILE}.cfg"
+# Record the working directory: opencode must NOT be launched inside the repo, or
+# it reads the project opencode.json and starts any `mcp` server declared there
+# before permissions apply — arbitrary command execution from the reviewed branch.
+pwd > "${OC_ARGV_FILE}.cwd"
 case "${OPENCODE_CONFIG_CONTENT:-}" in
   *'"*":"deny"'*) ;;
   *) echo "OPENCODE_CONFIG_CONTENT missing the default-deny baseline" >&2; exit 64;;
@@ -272,6 +276,14 @@ oc_assert "skips external plugins with --pure" has "--pure"
 # The diff is attached, so the inline link-mode fallback must NOT also be in the
 # prompt — same content twice, pointing the model at two different places.
 oc_assert "no duplicate inline diff fallback" hasnt "Fallback: the PR diff"
+# The single most severe hole found in review: a project opencode.json in the
+# reviewed repo can declare an `mcp` server that runs at startup, before any
+# permission applies. The only defence is not being in that directory.
+if [ -s "$OC_ARGV.cwd" ] && [ "$(cat "$OC_ARGV.cwd")" != "$PWD" ]; then
+  echo "  ok   [-] opencode is not launched inside the repo (no project config read)"; PASS=$((PASS+1))
+else
+  echo "  FAIL opencode ran in the repo cwd — project opencode.json/mcp would be honoured"; FAIL=$((FAIL+1))
+fi
 
 # Shell is denied, so the reviewer can never fetch the PR: the diff must be ATTACHED
 # in both modes. `-f` takes an array, so `--` must precede the prompt or the prompt

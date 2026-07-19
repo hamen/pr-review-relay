@@ -246,7 +246,7 @@ fi
 #  4. Denying tools by NAME (bash/edit/write/...). Anything not named stays allowed
 #     by default, so a user's custom tools or MCP servers remain reachable from
 #     prompt-injected PR text. Hence "*": "deny" first, then allow only the read
-#     side: read/grep/glob/list (+todo, which opencode uses for its own bookkeeping).
+#     side: read/grep/glob/list.
 #
 # `--pure` on the invocation skips external plugins, which otherwise load and can
 # execute code at startup regardless of these permissions.
@@ -310,8 +310,19 @@ review_with() {
       # Both prompts tell the reviewer where the diff is (stdin in --diff mode, gh in
       # link mode) and neither is true here, so override both explicitly — otherwise
       # the agent is told two contradictory things about where to find the change.
-      _oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. `gh` and every other command will be refused; do not attempt them.\n- Nothing is on stdin.\n- The complete diff is ATTACHED to this message as a file. Review that.\nYou may still read files in the repo for context.' "$PROMPT_NO_FALLBACK")"
-      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf")
+      _oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. `gh` and every other command will be refused; do not attempt them.\n- Nothing is on stdin, and you do not have the repository checked out.\n- The complete diff is ATTACHED to this message as a file. It is your only source; review it on its own merits.' "$PROMPT_NO_FALLBACK")"
+      # Run from $ATTACH_DIR, NOT the repo. OpenCode reads the project opencode.json
+      # from its working directory and merges it under our override, and an `mcp`
+      # server declared there is LAUNCHED at startup, before any tool permission
+      # applies. A PR that adds an opencode.json therefore gets arbitrary command
+      # execution the moment the reviewer starts — verified: a planted MCP entry ran
+      # its command with "*": "deny" and --pure both in force. Neither the permission
+      # policy nor --pure (which covers plugins only) stops it; not reading the file
+      # in the first place does.
+      # The cost is that this reviewer no longer browses the repo — it reviews the
+      # attached diff alone. That is the deliberate trade: the alternative is running
+      # attacker-authored config.
+      out=$(cd "$ATTACH_DIR" && OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf")
       rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms

@@ -205,9 +205,10 @@ Flags:
 | `--parallel` | Run the reviewers concurrently. |
 
 Reviewers that read stdin (`claude` / `codex` / `cursor`) get the diff piped in, so a large branch
-scales the same way `pr-review-relay --diff` does; `agy` / `opencode` take it as an argument (they
-don't read a prompt from stdin). Nothing is pushed or posted anywhere — `review-local` only ever
-prints to your terminal.
+scales the same way `pr-review-relay --diff` does; `agy` takes it as an argument (it doesn't read a
+prompt from stdin); `opencode` receives it as an attached file and reviews it in isolation from the
+repo (see the OpenCode note under [Notes & caveats](#-notes--caveats)). Nothing is pushed or posted
+anywhere — `review-local` only ever prints to your terminal.
 
 ## 🔁 Make it automatic (the handoff)
 
@@ -364,6 +365,13 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   demonstrably bypassable: allowing just `gh pr view` / `gh pr diff` (defeated by shell redirection —
   `gh pr view N > file` matches the allowed prefix and writes), omitting the `agent.plan` mirror, and
   denying tools by name (anything unnamed — custom tools, MCP servers — stays allowed by default).
+- **OpenCode runs outside the repository, and therefore reviews the diff alone.** It does not browse
+  the checkout the way the other reviewers do. This is not a limitation we could avoid: OpenCode reads
+  the project `opencode.json` from its working directory, and an `mcp` server declared there is
+  **launched at startup, before any tool permission applies** — so a pull request that adds an
+  `opencode.json` would get arbitrary command execution simply by being reviewed. Verified: a planted
+  MCP entry ran its command with `"*": "deny"` and `--pure` both in force. Neither the permission
+  policy nor `--pure` (plugins only) prevents it; not reading attacker-authored config does.
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in

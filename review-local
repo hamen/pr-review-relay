@@ -107,10 +107,14 @@ review_with() {
       # The shared prompt says the diff is "on stdin or appended below"; for opencode
       # neither is true, so override it rather than leave the agent looking in the
       # wrong place. Same note as pr-review-relay.
-      _oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. Commands will be refused; do not attempt them.\n- Nothing is on stdin, and nothing is appended below.\n- The complete diff is ATTACHED to this message as a file. Review that.\nYou may still read files in the repo for context.' "$PROMPT")"
+      _oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. Commands will be refused; do not attempt them.\n- Nothing is on stdin, nothing is appended below, and you do not have the repository checked out.\n- The complete diff is ATTACHED to this message as a file. It is your only source; review it on its own merits.' "$PROMPT")"
       # `-f` takes an array, so `--` must precede the prompt or it is swallowed as
       # another filename and opencode dies with "File not found".
-      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf"); rc=$?;;
+      # Run from $ATTACH_DIR, not the repo: OpenCode merges the project opencode.json
+      # from its working directory, and an `mcp` server declared there is launched at
+      # startup before any permission applies — arbitrary command execution from a
+      # branch you are reviewing. See the long note in pr-review-relay.
+      out=$(cd "$ATTACH_DIR" && OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf"); rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr.

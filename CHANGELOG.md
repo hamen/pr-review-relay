@@ -45,6 +45,15 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
   Deliberately not `--auto`, which auto-approves every `ask` permission. `review-local` gets the same
   policy, the same file attachment, and its own argv-contract tests.
+- **The OpenCode reviewer runs outside the repository.** OpenCode reads the project `opencode.json`
+  from its working directory and merges it under the inline override; an `mcp` server declared there
+  is launched at startup, *before* tool permissions apply. A pull request that adds an `opencode.json`
+  therefore achieves arbitrary command execution simply by being reviewed — verified with a planted
+  MCP entry, whose command ran with `"*": "deny"` and `--pure` both in force. Neither the permission
+  policy nor `--pure` (which covers plugins only) prevents it, and an `"mcp": {}` override does not
+  either, because project config is deep-merged rather than replaced. The reviewer is now launched
+  from the attachment directory, so the repo's config is never read. Consequence: this reviewer sees
+  the attached diff only and does not browse the checkout.
 - **Prompt attachments are cleaned up on interruption.** The attached diff lives in a mode-700 temp dir
   removed by the script's `EXIT` trap, which does fire on `SIGTERM`; a per-function `RETURN` trap does
   not, and would have left the full PR diff in `/tmp`. It is deliberately kept out of the status
