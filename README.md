@@ -394,7 +394,8 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   `glob` and `list` stay allowed — the reviewer needs them — and they are not confined to the
   attachment. A prompt-injected diff can therefore ask the model to read a file and quote it back in
   the review, which is then posted to the PR. Treat the review output as attacker-influenceable, and
-  don't run the relay from a directory holding secrets you would not want quoted.
+  note that this is not limited to the launch directory: the reviewer can read anything the
+  account running it can read, and quote it into a public PR comment.
 - **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
   a file instead, in both modes and at any size. Narrower designs were tried first and each was demonstrably
   bypassable: the original `--dangerously-skip-permissions` (an undocumented alias for `--auto`, so it

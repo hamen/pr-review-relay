@@ -62,6 +62,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Before ANY external command is trusted, including gh on the next line.
+relay_assert_path_outside_repo
+
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
 # After AUTHOR normalization, so opencode_is_selected compares like for like.

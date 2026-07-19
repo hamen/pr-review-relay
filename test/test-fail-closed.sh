@@ -498,6 +498,26 @@ rc=$?
 if [ "$rc" = 2 ]; then echo "  ok   [2] TMPDIR inside the repo is refused"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 2] reviewer would have run inside the repository"; FAIL=$((FAIL+1)); fi
 
+# PATH containing a directory inside the checkout compromises EVERY command the
+# relay runs — gh first of all — so it refuses to start rather than hardening one
+# command at a time.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/dotpath:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a PATH entry inside the repo refuses the whole run"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] ran with a repo-controlled PATH"; FAIL=$((FAIL+1)); fi
+
+# ...and a "." entry, which is the same thing spelled differently.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a '.' PATH entry inside the repo is refused too"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] '.' on PATH slipped through"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"

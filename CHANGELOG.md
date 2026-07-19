@@ -37,7 +37,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   at startup regardless of permissions — from loading. Since shell is denied, the reviewer can't fetch
   the PR itself, so the diff is attached as a file (`-f`) in both modes and at any size.
 
-  Six weaker designs were tried and discarded, each confirmed broken against a live opencode:
+  Seven weaker designs were tried and discarded, each confirmed broken against a live opencode:
   - The original `--dangerously-skip-permissions` — an undocumented alias for `--auto`, so it
     approved everything rather than erroring.
   - Selecting the built-in `plan` agent — its permissions stay user-configurable; asked to run

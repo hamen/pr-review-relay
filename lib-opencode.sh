@@ -121,6 +121,37 @@ opencode_reject_if_in_repo() {
 # Only call this when the opencode reviewer is actually selected: it exits 2 on an
 # unusable explicit override, and an optional reviewer must not break a run that
 # didn't ask for it.
+# The relay runs `gh`, `git`, `mktemp`, `node`, `timeout`, `stat`, `sed`, `awk` and
+# more, all resolved through PATH. If PATH contains a directory inside the checkout
+# under review, the branch author controls every one of those — `gh` runs before
+# anything else, so this is decided long before any OpenCode-level policy applies.
+#
+# Hardening one command (say, `timeout`) would be theatre while the rest stay
+# exposed, so the check is on PATH itself: refuse to run at all. One check, whole
+# class. Entries are compared physically, since a symlinked PATH entry pointing
+# into the checkout is the same problem wearing a different name.
+relay_assert_path_outside_repo() {
+  local _root _entry _resolved _oldifs
+  _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$_root" ] || return 0
+  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 0
+  _oldifs="$IFS"; IFS=':'
+  for _entry in $PATH; do
+    IFS="$_oldifs"
+    [ -n "$_entry" ] || _entry="."          # an empty PATH field means "."
+    _resolved="$(cd "$_entry" 2>/dev/null && pwd -P)" || { IFS=':'; continue; }
+    case "$_resolved" in
+      "$_root"|"$_root"/*)
+        echo "✖ PATH contains '$_entry' — inside the repository being reviewed." >&2
+        echo "  Every command the relay runs (gh, git, timeout, node, …) would be resolved from" >&2
+        echo "  the branch under review. Remove that entry from PATH and re-run." >&2
+        exit 2;;
+    esac
+    IFS=':'
+  done
+  IFS="$_oldifs"
+}
+
 opencode_resolve_bin() {
   # A shell FUNCTION named `opencode` would shadow the binary in `command -v` and
   # leave OPENCODE_BIN pointing at something that is not a file. Nothing here
@@ -180,7 +211,7 @@ opencode_resolve_bin() {
 # Applied per invocation through OPENCODE_CONFIG_CONTENT, a runtime override that
 # outranks the user's own opencode.json.
 #
-# DEFAULT-DENY with an explicit read-only allowlist. Six weaker designs were tried
+# DEFAULT-DENY with an explicit read-only allowlist. Seven weaker designs were tried
 # during cross-review and every one was verified broken by hand before being
 # discarded — each looked airtight until it was actually run:
 #
