@@ -31,7 +31,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 ### Changed
 
 - **OpenCode runs read-only, enforced by a default-deny permission policy.**
-  `opencode --pure run --agent plan` plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks
+  `opencode --pure run` with an agent the relay defines itself, plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks
   the user's own `opencode.json`) set to `"*": "deny"` with an explicit read-only allowlist (`read`,
   `grep`, `glob`, `list`), mirrored under `agent.plan`. `--pure` keeps external plugins — which execute
   at startup regardless of permissions — from loading. Since shell is denied, the reviewer can't fetch
@@ -40,7 +40,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   Six weaker designs were tried and discarded, each confirmed broken against a live opencode:
   - The original `--dangerously-skip-permissions` — an undocumented alias for `--auto`, so it
     approved everything rather than erroring.
-  - `--agent plan` with no config — the Plan agent's permissions stay user-configurable; asked to run
+  - Selecting the built-in `plan` agent — its permissions stay user-configurable; asked to run
     `id`, it ran it and returned real uid/gid.
   - A `gh pr view*` / `gh pr diff*` bash allowlist so link mode could still fetch — defeated by shell
     redirection: `gh pr view N > victim` matches the allowed prefix and overwrote the file despite
@@ -83,7 +83,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   provider authenticated, and free tiers may log the submitted diff.
 - `PR_RELAY_OPENCODE_BIN` — optional override for a non-standard OpenCode install.
 - Tests asserting the opencode **argv contract** (rejects the legacy flag and `--auto`, requires
-  `--agent plan`, `-m` present only when the env var is set) and both binary-resolution branches.
+  the relay's own agent, `-m` present only when the env var is set) and both binary-resolution branches.
   These fail against the pre-fix script.
 
 ## [1.1.0] — 2026-07-16

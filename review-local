@@ -54,10 +54,16 @@ echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHO
 # mode 700, and the EXIT trap fires on SIGTERM too, so an interrupted review does not
 # leave the branch diff sitting in /tmp.
 # Only the opencode reviewer attaches anything; skip the allocation otherwise.
+# Reviewer failures are recorded as files so they survive the subshells that
+# --parallel creates; without this the script printed "✔ Local review done." after
+# every reviewer had timed out or returned nothing.
+FAILDIR="$(mktemp -d)" || { echo "cannot create temp dir" >&2; exit 1; }
+trap 'rm -rf "$FAILDIR"' EXIT
+
 ATTACH_DIR=""
 if opencode_is_selected; then
   ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
-  trap 'rm -rf "$ATTACH_DIR"' EXIT
+  trap 'rm -rf "$ATTACH_DIR" "$FAILDIR"' EXIT
   opencode_assert_attach_dir_outside_repo "$ATTACH_DIR"
 fi
 
@@ -109,6 +115,7 @@ review_with() {
       127) why="command not found";;
     esac
     echo "  ! $name: no review — $why" >&2
+    printf 'fail' > "$FAILDIR/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
     # On timeout stderr only holds the agent's partial transcript — skip it.
     if [ "$rc" != 124 ] && [ -s "$errf" ]; then
       echo "    $name stderr (last 15 lines):" >&2
@@ -116,7 +123,10 @@ review_with() {
     fi
     rm -f "$errf"; return 0
   fi
-  [ "$rc" -ne 0 ] && echo "  ! $name: exited with code $rc — review may be truncated" >&2
+  if [ "$rc" -ne 0 ]; then
+    echo "  ! $name: exited with code $rc — review may be truncated" >&2
+    printf 'fail' > "$FAILDIR/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+  fi
   rm -f "$errf"
   printf '\n========== %s review ==========\n%s\n===============================\n' "$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}" "$out"
 }
@@ -146,6 +156,12 @@ done
 [ "$PARALLEL" = 1 ] && wait
 if [ "$MISSING" = 1 ]; then
   echo "✖ Local review incomplete: an explicitly requested reviewer was missing." >&2
+  exit 3
+fi
+_failed=0
+for _f in "$FAILDIR"/*; do [ -e "$_f" ] && _failed=$((_failed + 1)); done
+if [ "$_failed" -gt 0 ]; then
+  echo "✖ Local review NOT clean: $_failed reviewer(s) produced no usable review." >&2
   exit 3
 fi
 echo "✔ Local review done."

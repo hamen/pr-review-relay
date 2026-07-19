@@ -28,7 +28,7 @@ PR comments. Local, free (it uses the agent CLIs you already pay for), and idemp
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
    claude -p                       codex exec                      cursor-agent -p
-   agy -p                 opencode --pure run --agent plan                   │
+   agy -p                     opencode --pure run (own agent)                        │
          └───────────────────────────────┴───────────────────────────────┘
                                          │
                               each posts its review as a PR comment
@@ -61,7 +61,7 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`
   - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
-  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run --agent plan`
+  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run` with a read-only agent the relay defines
     (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
 
 You only need the agents you actually want as reviewers.
@@ -362,12 +362,13 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
     exactly what would try to talk it out of one.
 - **Read-only:** the remaining reviewers never modify code. They run with
   `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
-  keep the agent in Q&A/read-only mode), and `opencode --pure run --agent plan` with an
-  inline deny-list (`--pure` matters: it stops external plugins, which execute at startup
+  keep the agent in Q&A/read-only mode), and `opencode --pure run` with an agent the relay
+  defines itself and an inline deny-list (`--pure` matters: it stops external plugins, which execute at startup
   regardless of permissions).
-- **OpenCode read-only is enforced by config, not by the agent name.** `--agent plan` alone is *not* a
-  sandbox — the Plan agent's permissions remain user-configurable, and on a machine whose config allows
-  `bash` it will run shell commands that came from the PR text. Each invocation sets
+- **OpenCode read-only is enforced by config, not by the agent name.** selecting a built-in agent is *not* a
+  sandbox — their permissions are user-configurable, and `agent.plan.mode: "subagent"` in a config makes
+  OpenCode fall back to `build` with *that* agent's rules (verified: shell came back). The relay
+  therefore defines and selects its own primary agent, whose mode and permissions are both fixed. Each invocation sets
   `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks your own `opencode.json`) to a
   **default-deny** policy — `"*": "deny"` plus an explicit read-only allowlist (`read`, `grep`, `glob`,
   `list`) — mirrored under `agent.plan`, because OpenCode applies agent-scoped permissions *after* the
@@ -381,8 +382,8 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 - **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
   a file instead, in both modes and at any size. Narrower designs were tried first and each was demonstrably
   bypassable: the original `--dangerously-skip-permissions` (an undocumented alias for `--auto`, so it
-  approved everything); `--agent plan` with no policy at all (the Plan agent's permissions are
-  user-configurable — it ran `id`); allowing just `gh pr view` / `gh pr diff` (defeated by shell
+  approved everything); selecting the built-in `plan` agent (its permissions and even its mode are
+  user-configurable — it ran `id`, and redirecting it to a subagent fell back to `build`); allowing just `gh pr view` / `gh pr diff` (defeated by shell
   redirection — `gh pr view N > file` matches the allowed prefix and writes); omitting the
   `agent.plan` mirror (agent-scoped permissions apply after the global ones); and denying tools by
   name (anything unnamed — custom tools, MCP servers — stays allowed by default). The full list, with

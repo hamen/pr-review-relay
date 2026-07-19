@@ -185,7 +185,7 @@ make_strict_opencode() { # $1 = dir to install the stub into
 # Record argv so the test can assert on it, then enforce the contract.
 printf '%s\n' "$*" > "${OC_ARGV_FILE:?}"
 # Read-only is enforced by the inline permission config, not by --agent alone:
-# on a permissive machine `--agent plan` will still run shell from PR text.
+# a built-in agent can be redirected by user config, so the relay defines its own.
 printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-}" > "${OC_ARGV_FILE}.cfg"
 # Record the working directory: opencode must NOT be launched inside the repo, or
 # it reads the project opencode.json and starts any `mcp` server declared there
@@ -205,7 +205,10 @@ case " $* " in
   *" --auto "*)
     echo "rejected: --auto grants write+shell to a reviewer that reads untrusted PRs" >&2; exit 64;;
 esac
-case " $* " in *" --agent plan "*) ;; *) echo "missing --agent plan (read-only)" >&2; exit 64;; esac
+# Must select the relay's OWN agent, not a built-in: a built-in's mode is
+# user-configurable, and redirecting `plan` to a subagent makes OpenCode fall back
+# to `build` with that agent's permissions — verified, shell came back.
+case " $* " in *" --agent pr-review-relay-ro "*) ;; *) echo "not using the relay's own agent" >&2; exit 64;; esac
 # the prompt must actually reach the agent as the last argument
 case "${!#}" in "") echo "empty prompt" >&2; exit 64;; esac
 echo "LGTM from opencode."
@@ -241,8 +244,8 @@ oc_assert() { # oc_assert <desc> <grep-mode: has|hasnt> <pattern>
   esac
 }
 
-oc_run 0 "opencode runs read-only (--agent plan), link mode"
-oc_assert "link mode passes --agent plan" has "--agent plan"
+oc_run 0 "opencode runs read-only under its own agent, link mode"
+oc_assert "link mode selects the relay agent" has "--agent pr-review-relay-ro"
 oc_assert "no --dangerously-skip-permissions in argv" hasnt "--dangerously-skip-permissions"
 oc_assert "no --auto in argv" hasnt "--auto"
 oc_assert "PR_RELAY_OPENCODE_MODEL unset → no -m" hasnt " -m "
@@ -272,7 +275,8 @@ oc_cfg "never allows bash" hasnt '"bash":"allow"'
 oc_cfg "no bash prefix allowlist" hasnt 'gh pr'
 # OpenCode applies agent-specific permissions AFTER global ones, so a user's
 # agent.plan.permission would reinstate shell unless we deny there too.
-oc_cfg "mirrors the policy under agent.plan" has '"agent":{"plan":{"permission"'
+oc_cfg "defines its own primary agent" has '"pr-review-relay-ro":{"mode":"primary"'
+oc_cfg "that agent is default-deny too" has '"pr-review-relay-ro".*"\*":"deny"' 
 # External plugins load and can execute code at startup regardless of permissions.
 oc_assert "skips external plugins with --pure" has "--pure"
 # The diff is attached, so the inline link-mode fallback must NOT also be in the
@@ -303,7 +307,7 @@ oc_assert "never claims the diff is on stdin" hasnt "provided on stdin"
 oc_assert "never tells it to run gh" hasnt "gh pr view"
 
 oc_run 0 "opencode runs read-only, diff mode" -- --diff
-oc_assert "diff-mode argv still read-only" has "--agent plan"
+oc_assert "diff-mode argv still read-only" has "--agent pr-review-relay-ro"
 oc_assert "diff mode also attaches the diff" has " -f "
 # Prove we are actually in diff mode. Checking for the diff body would NOT prove it:
 # link mode inlines the same diff as a fallback under LINK_DIFF_FALLBACK_MAX_BYTES.
@@ -538,7 +542,7 @@ if [ -f "$RL" ]; then
              else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
     esac
   }
-  rl_assert "review-local: read-only agent"     has   "--agent plan"     "$OC_ARGV"
+  rl_assert "review-local: relay's own agent"   has   "--agent pr-review-relay-ro" "$OC_ARGV"
   rl_assert "review-local: --pure"              has   "--pure"           "$OC_ARGV"
   rl_assert "review-local: attaches the diff"   has   " -f "             "$OC_ARGV"
   rl_assert "review-local: no legacy flag"      hasnt "--dangerously-skip-permissions" "$OC_ARGV"
@@ -555,7 +559,7 @@ if [ -f "$RL" ]; then
   rc=$?
   if [ "$rc" = 3 ]; then echo "  ok   [3] review-local fails on an explicitly requested missing reviewer"; PASS=$((PASS+1))
   else echo "  FAIL [got $rc, want 3] review-local silently skipped a missing reviewer"; FAIL=$((FAIL+1)); fi
-  rl_assert "review-local: mirrors under agent.plan" has '"agent":{"plan"' "$OC_ARGV.cfg"
+  rl_assert "review-local: defines its own agent" has '"pr-review-relay-ro"' "$OC_ARGV.cfg"
   # The same isolation the relay is asserted on: project config off, and launched
   # outside the repo. Checking only one call site is how the two drift.
   rl_assert "review-local: disables project config" has "1" "$OC_ARGV.projcfg"

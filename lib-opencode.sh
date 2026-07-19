@@ -150,10 +150,15 @@ opencode_resolve_bin() {
 # during cross-review and every one was verified broken by hand before being
 # discarded — each looked airtight until it was actually run:
 #
+#  0'. Selecting OpenCode's built-in `plan` agent. Its MODE is configurable: a
+#     config with `agent.plan.mode: "subagent"` makes OpenCode warn and fall back to
+#     `build`, which then picks up whatever permissions that agent has — verified,
+#     `id` ran. So the relay defines and selects its OWN primary agent instead, whose
+#     mode and permissions are both fixed here and cannot be redirected.
 #  0. The original invocation, `--dangerously-skip-permissions`. Absent from
 #     `opencode run --help`, which is misleading: the binary accepts it as an
 #     undocumented alias for --auto, so it approved everything rather than erroring.
-#  1. `--agent plan` and nothing else. The Plan agent's permissions stay
+#  1. `--agent pr-review-relay-ro` and nothing else. The Plan agent's permissions stay
 #     user-configurable, so on a permissive machine it runs shell straight from PR
 #     text — asked to run `id`, it did, and returned real uid/gid.
 #  2. Global deny plus a `gh pr view*`/`gh pr diff*` allowlist, so link mode could
@@ -180,7 +185,7 @@ opencode_resolve_bin() {
 # (a real OpenCode env var — it is present in the 1.18.3 binary) is not a fix
 # either: it applies later still, but sets only the TOP-LEVEL permission block, so
 # an agent-scoped allow still wins — verified, bash ran.
-OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"plan":{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
+OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"pr-review-relay-ro":{"mode":"primary","description":"read-only cross-review agent","permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
 
 # --- The invocation ----------------------------------------------------------
 # opencode_review <attach_dir> <diff> <context_block> <subject> <errfile> <timeout>
@@ -257,7 +262,7 @@ opencode_review() {
     cd "$attach_dir" 2>/dev/null || { echo "cannot enter the attachment dir $attach_dir" >&2; exit 1; }
     OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" \
     timeout "$agent_timeout" "$OPENCODE_BIN" --pure run \
-      -f "$diff_file" --agent plan ${model[@]+"${model[@]}"} -- "$oc_prompt" 2>"$errf" )
+      -f "$diff_file" --agent pr-review-relay-ro ${model[@]+"${model[@]}"} -- "$oc_prompt" 2>"$errf" )
 }
 
 # --- Reviewer selection ------------------------------------------------------
