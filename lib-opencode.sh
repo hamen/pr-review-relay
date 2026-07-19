@@ -10,7 +10,7 @@
 #   OPENCODE_BIN            resolved absolute path (or a bare name if unresolvable)
 #   OPENCODE_RO_CONFIG      the read-only permission policy, as JSON
 #   opencode_resolve_bin    populate OPENCODE_BIN; exits 2 on a bad explicit override
-#   opencode_review         run one review; prints it on stdout
+#   opencode_review         run one review; prints it on stdout, returns the agent's exit code
 #   opencode_is_selected    is opencode in $REVIEWERS and not $AUTHOR?
 #   relay_trim              trim surrounding whitespace (shared normalization)
 #
@@ -193,9 +193,10 @@ opencode_resolve_bin() {
 #     still fetch. Defeated by shell redirection: `gh pr view N > victim` matches
 #     the allowed prefix and overwrote the file despite edit+write deny. Prefix
 #     matching cannot make a shell command read-only.
-#  3. Global deny with no agent.plan mirror. OpenCode applies agent-scoped
-#     permissions AFTER the global ones, so `agent.plan.permission.bash: allow` in
-#     a user's config reinstated shell — verified, `id` ran again.
+#  3. Global deny without repeating it on the agent actually selected. OpenCode
+#     applies agent-scoped permissions AFTER the global ones, so
+#     `agent.<name>.permission.bash: allow` in a user's config reinstated shell —
+#     verified, `id` ran again.
 #  4. Denying tools by NAME. Anything not named stays allowed by default, so custom
 #     tools and MCP servers remained reachable from prompt-injected PR text.
 #  5. Running elsewhere but still reading project config. An `mcp` server declared
@@ -252,6 +253,10 @@ OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glo
 # review. read/grep/glob stay allowed, so that hands a prompt-injected diff the
 # rest of the tree. Fail closed rather than quietly losing the isolation.
 opencode_assert_attach_dir_outside_repo() {
+  # NB this compares against the worktree we are RUNNING IN, which the relay
+  # requires to be the repo under review (`--pr N` resolves that repo's PR). Run it
+  # from somewhere else with an explicit --pr and the comparison is against the
+  # wrong repo — the README's "run it from inside the repo" is load-bearing here.
   local _root _dir
   _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$_root" ] || return 0

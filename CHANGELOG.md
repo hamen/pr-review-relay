@@ -33,7 +33,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 - **OpenCode runs read-only, enforced by a default-deny permission policy.**
   `opencode --pure run` with an agent the relay defines itself, plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks
   the user's own `opencode.json`) set to `"*": "deny"` with an explicit read-only allowlist (`read`,
-  `grep`, `glob`, `list`), mirrored under `agent.plan`. `--pure` keeps external plugins — which execute
+  `grep`, `glob`, `list`), repeated on a primary agent the relay defines for itself. `--pure` keeps external plugins — which execute
   at startup regardless of permissions — from loading. Since shell is denied, the reviewer can't fetch
   the PR itself, so the diff is attached as a file (`-f`) in both modes and at any size.
 
@@ -45,8 +45,11 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   - A `gh pr view*` / `gh pr diff*` bash allowlist so link mode could still fetch — defeated by shell
     redirection: `gh pr view N > victim` matches the allowed prefix and overwrote the file despite
     `edit` and `write` both denied. Prefix matching cannot make a shell command read-only.
-  - Global deny without the `agent.plan` mirror — OpenCode applies agent-scoped permissions after the
-    global ones, so a user's `agent.plan.permission.bash: allow` reinstated shell.
+  - Global deny without repeating it on the selected agent — OpenCode applies agent-scoped permissions
+    after the global ones, so a user's `agent.<name>.permission.bash: allow` reinstated shell.
+  - Selecting a BUILT-IN agent at all. An agent's mode is user-configurable:
+    `agent.plan.mode: "subagent"` makes OpenCode fall back to `build` and apply *that* agent's
+    permissions — verified, shell came back. The relay defines and selects its own primary agent.
   - Denying tools by name — anything not named (custom tools, MCP servers) stays allowed by default.
   - Running elsewhere while still reading project config — see the MCP-at-startup entry below.
 

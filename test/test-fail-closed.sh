@@ -274,7 +274,8 @@ oc_cfg "allows grep"  has '"grep":"allow"'
 oc_cfg "never allows bash" hasnt '"bash":"allow"'
 oc_cfg "no bash prefix allowlist" hasnt 'gh pr'
 # OpenCode applies agent-specific permissions AFTER global ones, so a user's
-# agent.plan.permission would reinstate shell unless we deny there too.
+# permissions on the SELECTED agent would reinstate shell unless it carries the
+# policy too — which is why the relay defines its own rather than using a built-in.
 oc_cfg "defines its own primary agent" has '"pr-review-relay-ro":{"mode":"primary"'
 oc_cfg "that agent is default-deny too" has '"pr-review-relay-ro".*"\*":"deny"'
 # External plugins load and can execute code at startup regardless of permissions.
@@ -549,6 +550,10 @@ if [ -f "$RL" ]; then
   rl_assert "review-local: overrides the stdin wording" has "ATTACHED" "$OC_ARGV"
   rl_assert "review-local: default-deny policy" has   '"\*":"deny"'     "$OC_ARGV.cfg"
   rl_assert "review-local: never allows bash"   hasnt '"bash":"allow"'  "$OC_ARGV.cfg"
+  rl_assert "review-local: defines its own agent" has '"pr-review-relay-ro"' "$OC_ARGV.cfg"
+  # From here on the runs must NOT dispatch opencode, so clear the recorded files:
+  # asserting on them afterwards would be reading the successful run above.
+  rm -f "$OC_ARGV" "$OC_ARGV.cfg" "$OC_ARGV.cwd" "$OC_ARGV.projcfg"
   # An explicitly requested but missing reviewer must FAIL, matching the relay —
   # otherwise `review-local --reviewers opencode` on a machine without it prints a
   # skip and exits 0, which reads as "reviewed".
@@ -559,7 +564,9 @@ if [ -f "$RL" ]; then
   rc=$?
   if [ "$rc" = 3 ]; then echo "  ok   [3] review-local fails on an explicitly requested missing reviewer"; PASS=$((PASS+1))
   else echo "  FAIL [got $rc, want 3] review-local silently skipped a missing reviewer"; FAIL=$((FAIL+1)); fi
-  rl_assert "review-local: defines its own agent" has '"pr-review-relay-ro"' "$OC_ARGV.cfg"
+  # The missing-reviewer run must not have invoked anything at all.
+  if [ ! -s "$OC_ARGV" ]; then echo "  ok   [-] review-local: nothing dispatched when the CLI is absent"; PASS=$((PASS+1))
+  else echo "  FAIL review-local dispatched a reviewer it reported as missing"; FAIL=$((FAIL+1)); fi
   # Zero dispatched reviewers must not read as a clean review.
   ( cd "$RLREPO" && env HOME="$WORK/nohome" PATH="/usr/bin:/bin" bash "$RL" --base mainline >/dev/null 2>&1 )
   rc=$?

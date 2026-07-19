@@ -28,7 +28,7 @@ PR comments. Local, free (it uses the agent CLIs you already pay for), and idemp
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
    claude -p                       codex exec                      cursor-agent -p
-   agy -p                     opencode --pure run (own agent)                        │
+   agy -p                  opencode --pure run (own agent)                      │
          └───────────────────────────────┴───────────────────────────────┘
                                          │
                               each posts its review as a PR comment
@@ -162,7 +162,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that opened the PR. It auto-excludes itself from reviewing. |
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` is supported but opt-in — name it explicitly to include it. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
 | `--link` *(default)* | Hand reviewers the PR reference; each fetches it itself (`gh pr view`/`gh pr diff`) and reads the full files in context. The diff is also embedded as a fallback so a reviewer whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still reviews something — **but only when the diff is under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000).** Above that the fallback is omitted so a huge inline diff can't blow past an agent's prompt limit and make it return empty; reviewers just fetch the PR via `gh`. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
@@ -365,14 +365,14 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   keep the agent in Q&A/read-only mode), and `opencode --pure run` with an agent the relay
   defines itself and an inline deny-list (`--pure` matters: it stops external plugins, which execute at startup
   regardless of permissions).
-- **OpenCode read-only is enforced by config, not by the agent name.** selecting a built-in agent is *not* a
+- **OpenCode read-only is enforced by config, not by the agent name.** Selecting a built-in agent is *not* a
   sandbox — their permissions are user-configurable, and `agent.plan.mode: "subagent"` in a config makes
   OpenCode fall back to `build` with *that* agent's rules (verified: shell came back). The relay
   therefore defines and selects its own primary agent, whose mode and permissions are both fixed. Each invocation sets
   `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks your own `opencode.json`) to a
   **default-deny** policy — `"*": "deny"` plus an explicit read-only allowlist (`read`, `grep`, `glob`,
-  `list`) — mirrored under `agent.plan`, because OpenCode applies agent-scoped permissions *after* the
-  global ones. It also runs with `--pure` so external plugins, which execute at startup, don't load.
+  `list`) — repeated on the relay's own agent, because OpenCode applies agent-scoped permissions
+  *after* the global ones, so the agent actually in use has to carry the policy too. It also runs with `--pure` so external plugins, which execute at startup, don't load.
   Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
 - **What the OpenCode policy does NOT stop:** it prevents *execution*, not *reading*. `read`, `grep`,
   `glob` and `list` stay allowed — the reviewer needs them — and they are not confined to the
@@ -385,7 +385,7 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   approved everything); selecting the built-in `plan` agent (its permissions and even its mode are
   user-configurable — it ran `id`, and redirecting it to a subagent fell back to `build`); allowing just `gh pr view` / `gh pr diff` (defeated by shell
   redirection — `gh pr view N > file` matches the allowed prefix and writes); omitting the
-  `agent.plan` mirror (agent-scoped permissions apply after the global ones); and denying tools by
+  policy on the agent actually selected (agent-scoped permissions apply after the global ones); and denying tools by
   name (anything unnamed — custom tools, MCP servers — stays allowed by default). The full list, with
   what each failed on, is in `lib-opencode.sh`.
 - **OpenCode runs outside the repository, and therefore reviews the diff alone.** It does not browse
