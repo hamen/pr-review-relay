@@ -36,6 +36,11 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WRAP_COMMENT="$SCRIPT_DIR/wrap-collapsed-pr-comment.mjs"
+# The OpenCode reviewer lives in a shared lib so its policy cannot drift between
+# this script and review-local — cross-review flagged that duplication repeatedly.
+OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
+[ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
+. "$OPENCODE_LIB"
 
 AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0
@@ -55,6 +60,12 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
+
+# After arg parsing: a bad PR_RELAY_OPENCODE_BIN exits 2, and that must not
+# happen for a run that never asked for the opencode reviewer... but it also
+# must not be deferred into a subshell where the exit would be swallowed.
+# Resolving here keeps it a clean top-level failure.
+opencode_resolve_bin
 
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
@@ -243,88 +254,7 @@ fi
 # availability check below and the invocation in review_with(). Resolving inside
 # review_with would be dead code: the reviewer loop skips on `command -v` first.
 # Falls back to the bare name so a genuinely missing CLI still reports as such.
-# NB "${HOME:-}", not "$HOME": this script runs under `set -u`, and HOME is unset in
-# plenty of cron/systemd/container environments. A bare $HOME there aborts the WHOLE
-# relay with "HOME: unbound variable" before any reviewer runs — resolution happens
-# at startup, so the blast radius is every reviewer, not just opencode.
-OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
-if [ -n "$OPENCODE_BIN" ]; then
-  # Resolve to an ABSOLUTE path. The opencode reviewer is launched after a
-  # `cd "$ATTACH_DIR"` (see the note at its dispatch), so a relative override like
-  # ./bin/opencode would satisfy a plain `command -v` here and then fail to execute
-  # from the new working directory.
-  case "$OPENCODE_BIN" in
-    /*)  ;;
-    */*) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
-    *)   OPENCODE_BIN="$(command -v "$OPENCODE_BIN" 2>/dev/null || printf '%s' "$OPENCODE_BIN")";;
-  esac
-  # `command -v` can hand back a RELATIVE path when PATH itself has relative
-  # entries, which breaks again after the cd. Canonicalize whatever we got.
-  case "$OPENCODE_BIN" in
-    /*) ;;
-    *)  OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
-  esac
-  # `command -v` can hand back a RELATIVE path when PATH itself has relative
-  # entries, which breaks again after the cd. Canonicalize whatever we got.
-  case "$OPENCODE_BIN" in
-    /*) ;;
-    *)  OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";;
-  esac
-  # An explicit override that isn't runnable is a user error worth naming here,
-  # rather than surfacing later as a confusing "not installed" skip.
-  # Fail fast: a user-supplied override that cannot run is a configuration error,
-  # not something to surface minutes later as a vague "not installed" skip.
-  [ -x "$OPENCODE_BIN" ] || {
-    echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} did not resolve to an executable." >&2
-    echo "  Give an absolute path, a relative path, or a name on PATH (a leading ~ is not expanded)." >&2
-    exit 2
-  }
-else
-  if command -v opencode >/dev/null 2>&1;           then OPENCODE_BIN="$(command -v opencode)"; case "$OPENCODE_BIN" in /*) ;; *) OPENCODE_BIN="$(cd "$(dirname "$OPENCODE_BIN")" 2>/dev/null && pwd)/$(basename "$OPENCODE_BIN")";; esac
-  elif [ -x "${HOME:-}/.opencode/bin/opencode" ];   then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
-  else OPENCODE_BIN=opencode; fi
-fi
 
-# Inline permission override for the opencode reviewer, applied per invocation via
-# OPENCODE_CONFIG_CONTENT (runtime override; outranks the user's own opencode.json).
-#
-# DEFAULT-DENY with an explicit read-only allowlist. Four weaker designs were tried
-# during review and every one of them was verified broken by hand before being
-# discarded — the pattern is that each looked airtight until it was actually run:
-#
-#  1. `--agent plan` with no config. The Plan agent's permissions stay
-#     user-configurable, so on a permissive machine it runs shell from PR text —
-#     asked to run `id`, it did, and returned real uid/gid.
-#  2. Global deny plus a `gh pr view*`/`gh pr diff*` allowlist, so link mode could
-#     still fetch. Defeated by shell redirection: `gh pr view N > victim.txt`
-#     matches the allowed prefix and overwrote the file despite edit+write deny.
-#     Prefix matching cannot make a shell command read-only.
-#  3. Global deny without an agent.plan mirror. OpenCode applies agent-scoped
-#     permissions AFTER the global ones, so `agent.plan.permission.bash: allow` in
-#     a user's config reinstated shell — verified, `id` ran again.
-#  4. Denying tools by NAME (bash/edit/write/...). Anything not named stays allowed
-#     by default, so a user's custom tools or MCP servers remain reachable from
-#     prompt-injected PR text. Hence "*": "deny" first, then allow only the read
-#     side: read/grep/glob/list.
-#
-# `--pure` on the invocation skips external plugins, which otherwise load and can
-# execute code at startup regardless of these permissions.
-#
-# KNOWN, ACCEPTED RESIDUAL: OPENCODE_CONFIG_CONTENT is not the last layer — managed
-# (organization) config is merged after it and could in principle re-allow bash.
-# That is deliberately not defended against here, because it is not reachable by
-# the threat this hardening exists for. The attacker we care about is whoever
-# authored the branch being reviewed, and managed config lives in /etc/opencode or
-# /Library/Application Support/opencode — root-owned, not writable by a pull
-# request. If the machine's administrator has configured a permissive policy for
-# every OpenCode run, that is their deliberate machine-wide choice, not something
-# a diff can reach. (OPENCODE_PERMISSION is also not a fix: it applies later still
-# but only sets the TOP-LEVEL permission block, so an agent-scoped
-# agent.plan.permission.bash: allow still wins — verified, bash ran.)
-#
-# With no shell the reviewer cannot fetch the PR itself, so the diff is attached as
-# a file instead (see the opencode case below).
-OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"plan":{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
@@ -351,49 +281,7 @@ review_with() {
         out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>"$errf")
       fi; rc=$?;;
     opencode)
-      # Read-only is enforced by OPENCODE_RO_CONFIG above, not by --agent alone; see
-      # the comment there for the four weaker designs that were tried and broken.
-      # Do NOT swap this for --auto: that auto-approves every `ask` permission, and
-      # the default `build` agent runs with {"permission":"*","action":"allow"}.
-      # NB: stricter than the codex reviewer above, which runs `-s danger-full-access`
-      # (review-local uses `-s read-only`). That inconsistency predates this change and
-      # is deliberately left alone — it deserves its own PR, not a bundled drive-by.
-      #
-      # Shell is denied, so this reviewer can never fetch the PR itself: the diff is
-      # ALWAYS attached as a file, in both modes and regardless of size. Attaching
-      # rather than inlining also keeps a large diff off the argv (Windows caps it
-      # near 32K), and sidesteps LINK_DIFF_FALLBACK_MAX_BYTES dropping the inline
-      # fallback on big PRs — which would otherwise leave opencode with nothing to
-      # review. `-f` takes an array, so `--` is required before the prompt.
-      # -m only when PR_RELAY_OPENCODE_MODEL is set; unset means "use the user's own
-      # opencode config" (pinning a model here would hard-fail anyone without that
-      # provider authenticated, and free tiers may log submitted code).
-      local -a _oc_model=()
-      [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && _oc_model=(-m "$PR_RELAY_OPENCODE_MODEL")
-      local _oc_diff _oc_prompt
-      # In $ATTACH_DIR (not $STATUS_DIR — see the note there) so the script-level
-      # EXIT trap removes it. A per-function `trap ... RETURN` was tried and is not
-      # enough: verified that on SIGTERM mid-review the RETURN trap never fires and
-      # the file survives — and it holds the full PR diff, which for a private repo
-      # must not be left lying in /tmp.
-      _oc_diff="$ATTACH_DIR/oc-diff-$skey"
-      printf '%s' "$DIFF" > "$_oc_diff"
-      # Both prompts tell the reviewer where the diff is (stdin in --diff mode, gh in
-      # link mode) and neither is true here, so override both explicitly — otherwise
-      # the agent is told two contradictory things about where to find the change.
-      _oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. `gh` and every other command will be refused; do not attempt them.\n- Nothing is on stdin, and you do not have the repository checked out.\n- The complete diff is ATTACHED to this message as a file. It is your only source; review it on its own merits.' "$PROMPT_NO_FALLBACK")"
-      # Run from $ATTACH_DIR, NOT the repo. OpenCode reads the project opencode.json
-      # from its working directory and merges it under our override, and an `mcp`
-      # server declared there is LAUNCHED at startup, before any tool permission
-      # applies. A PR that adds an opencode.json therefore gets arbitrary command
-      # execution the moment the reviewer starts — verified: a planted MCP entry ran
-      # its command with "*": "deny" and --pure both in force. Neither the permission
-      # policy nor --pure (which covers plugins only) stops it; not reading the file
-      # in the first place does.
-      # The cost is that this reviewer no longer browses the repo — it reviews the
-      # attached diff alone. That is the deliberate trade: the alternative is running
-      # attacker-authored config.
-      out=$(cd "$ATTACH_DIR" && OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" --pure run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf")
+      out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$PROMPT_NO_FALLBACK" "$errf" "$AGENT_TIMEOUT")
       rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms

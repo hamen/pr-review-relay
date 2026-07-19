@@ -80,11 +80,14 @@ curl -fsSL "$REPO/pr-review-fetch" -o "$BIN/pr-review-fetch"
 curl -fsSL "$REPO/pr-review-collapse-comments" -o "$BIN/pr-review-collapse-comments"
 curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
 curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
+curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
 chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
 # make sure ~/.local/bin is on your PATH
 ```
 
 `pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too. `review-local` doesn't need it (it never posts anywhere).
+
+`pr-review-relay` and `review-local` both source **`lib-opencode.sh`** from their own directory — it holds the OpenCode reviewer's binary resolution and read-only permission policy, kept in one place so the two scripts cannot drift apart on a security-relevant setting. Both refuse to start if it is missing.
 
 ### 🪟 Windows
 
@@ -136,7 +139,7 @@ bash review-local --author claude
 Run it from **inside the repo you want reviewed** (`cd` there first) — not from inside the
 pr-review-relay repo itself — since the relay resolves the PR for the current working repo's branch.
 
-`wrap-collapsed-pr-comment.mjs` still needs to sit next to the scripts, same as on Linux/macOS.
+`wrap-collapsed-pr-comment.mjs` and `lib-opencode.sh` still need to sit next to the scripts, same as on Linux/macOS.
 
 ## 🚀 Usage
 
