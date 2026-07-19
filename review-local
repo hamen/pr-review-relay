@@ -65,7 +65,7 @@ P
 # in environments that don't set it (cron, systemd, minimal containers).
 OPENCODE_BIN="${PR_RELAY_OPENCODE_BIN:-}"
 if [ -n "$OPENCODE_BIN" ]; then
-  [ -x "$OPENCODE_BIN" ] || echo "  ! PR_RELAY_OPENCODE_BIN=$OPENCODE_BIN is not executable" >&2
+  command -v "$OPENCODE_BIN" >/dev/null 2>&1 || echo "  ! PR_RELAY_OPENCODE_BIN=$OPENCODE_BIN is not executable (use an absolute path, or a name on PATH)" >&2
 else
   if command -v opencode >/dev/null 2>&1;         then OPENCODE_BIN=opencode
   elif [ -x "${HOME:-}/.opencode/bin/opencode" ]; then OPENCODE_BIN="${HOME:-}/.opencode/bin/opencode"
@@ -78,7 +78,7 @@ fi
 # individual tools to deny leaves anything not named — custom tools, MCP servers —
 # allowed by default. Mirrored under agent.plan, since OpenCode applies agent-scoped
 # permissions after the global ones. `--agent plan` is not a sandbox on its own.
-OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow","todoread":"allow","todowrite":"allow"},"agent":{"plan":{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow","todoread":"allow","todowrite":"allow"}}}}'
+OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"plan":{"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
@@ -132,7 +132,7 @@ review_with() {
   fi
   [ "$rc" -ne 0 ] && echo "  ! $name: exited with code $rc — review may be truncated" >&2
   rm -f "$errf"
-  printf '\n========== %s review ==========\n%s\n===============================\n' "${name^}" "$out"
+  printf '\n========== %s review ==========\n%s\n===============================\n' "$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}" "$out"
 }
 
 IFS=',' read -ra LIST <<< "$REVIEWERS"

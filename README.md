@@ -360,7 +360,7 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   global ones. It also runs with `--pure` so external plugins, which execute at startup, don't load.
   Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
 - **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
-  a file instead, in both modes and at any size. Three narrower designs were tried first and each was
+  a file instead, in both modes and at any size. Four narrower designs were tried first and each was
   demonstrably bypassable: allowing just `gh pr view` / `gh pr diff` (defeated by shell redirection —
   `gh pr view N > file` matches the allowed prefix and writes), omitting the `agent.plan` mirror, and
   denying tools by name (anything unnamed — custom tools, MCP servers — stays allowed by default).

@@ -269,6 +269,9 @@ oc_cfg "no bash prefix allowlist" hasnt 'gh pr'
 oc_cfg "mirrors the policy under agent.plan" has '"agent":{"plan":{"permission"'
 # External plugins load and can execute code at startup regardless of permissions.
 oc_assert "skips external plugins with --pure" has "--pure"
+# The diff is attached, so the inline link-mode fallback must NOT also be in the
+# prompt — same content twice, pointing the model at two different places.
+oc_assert "no duplicate inline diff fallback" hasnt "Fallback: the PR diff"
 
 # Shell is denied, so the reviewer can never fetch the PR: the diff must be ATTACHED
 # in both modes. `-f` takes an array, so `--` must precede the prompt or the prompt
@@ -314,6 +317,10 @@ fi
 # only when XDG_CACHE_HOME is absent, so both must be unset to exercise the real
 # minimal environment. (An earlier version of this test set XDG_CACHE_HOME and passed
 # while a second bare $HOME was still live.)
+# node must be reachable from the restricted PATH or the comment wrapper fails and
+# the relay returns 3 — which passes locally (node in /usr/bin) but is red on CI,
+# where setup-node installs outside /usr/bin and /bin. Symlink it in, as BIN5 does.
+ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
 rm -f "$WORK/sha_counter" "$OC_ARGV"
 env -u HOME -u XDG_CACHE_HOME PATH="$BIN:/usr/bin:/bin" \
   GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_MAX_ROUNDS=99 \
