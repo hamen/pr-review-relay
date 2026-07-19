@@ -193,7 +193,7 @@ opencode_review() {
   # the relay would count that as a clean reviewer. Fail instead.
   printf '%s' "$diff" > "$diff_file" || { echo "cannot write the diff attachment" >&2; return 1; }
 
-  oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is ATTACHED to this message as a file — that is your only source.\nYou have no shell and no checkout: commands will be refused, nothing is on stdin,\nand there is nothing appended below. Review the attached diff on its own merits.\n\nLook for correctness bugs, security issues, broken edge cases, and clear design or\nmaintainability problems. Be concise. Group findings by severity: Blocker /\nShould-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
+  oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is ATTACHED to this message as a file. That attachment, plus any\ncontext given above, is everything you have: there is no shell and no checkout, so\ncommands will be refused, nothing is on stdin, and nothing is appended below.\n\nLook for correctness bugs, security issues, broken edge cases, and clear design or\nmaintainability problems. Be concise. Group findings by severity: Blocker /\nShould-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
 
   ( cd "$attach_dir" && \
     OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" \

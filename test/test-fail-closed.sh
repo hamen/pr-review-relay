@@ -296,7 +296,7 @@ oc_assert "attaches the diff with -f" has " -f "
 # rewrite the same file while the other agent is reading it.
 oc_assert "attachment path is unique per invocation" has "oc-diff\."
 oc_assert "separates the prompt with --" has " -- "
-oc_assert "tells the agent it has no shell" has "You have no shell"
+oc_assert "tells the agent it has no shell" has "there is no shell and no checkout"
 # The prompt is BUILT for this reviewer rather than corrected afterwards, so it
 # must not contain the other reviewers' claims at all.
 oc_assert "never claims the diff is on stdin" hasnt "provided on stdin"

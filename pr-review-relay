@@ -100,8 +100,13 @@ trap 'rm -rf "$STATUS_DIR"' EXIT
 # command substitution, backgrounded subshells as under --parallel): all cleaned on
 # SIGTERM, and adding a TERM handler measurably delayed it. SIGKILL leaks, but no
 # trap of any kind can prevent that.
-ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
-trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
+# Only the opencode reviewer attaches anything, so don't allocate this (or widen the
+# trap) on runs that never select it.
+ATTACH_DIR=""
+if opencode_is_selected; then
+  ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
+  trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
+fi
 # Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
 # "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
 # prefix also guarantees the key is never a dotfile (which the tally glob "*"

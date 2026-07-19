@@ -51,8 +51,12 @@ echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHO
 # Prompt attachments (opencode receives the diff as a file) live here; mktemp -d is
 # mode 700, and the EXIT trap fires on SIGTERM too, so an interrupted review does not
 # leave the branch diff sitting in /tmp.
-ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
-trap 'rm -rf "$ATTACH_DIR"' EXIT
+# Only the opencode reviewer attaches anything; skip the allocation otherwise.
+ATTACH_DIR=""
+if opencode_is_selected; then
+  ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
+  trap 'rm -rf "$ATTACH_DIR"' EXIT
+fi
 
 DIFF=$(git diff "$BASE...$BRANCH")
 [ -z "$DIFF" ] && { echo "No diff between $BASE and $BRANCH_LABEL."; exit 1; }
