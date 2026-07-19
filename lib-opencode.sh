@@ -87,7 +87,12 @@ opencode_resolve_bin() {
     # An EXPLICIT PR_RELAY_OPENCODE_BIN is not checked this way on purpose: pointing
     # at a specific path is the user's deliberate decision, not something a PR can
     # cause.
-    _oc_root="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"
+    # ONLY when we are actually inside a worktree. Falling back to $PWD would
+    # reject a perfectly legitimate opencode that happens to live under the current
+    # directory — e.g. `pr-review-relay --pr <url>` run from ~/tools. There is no
+    # repository under review in that case, so there is nothing to contain.
+    _oc_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -n "$_oc_root" ] || return 0
     case "$OPENCODE_BIN" in
       "$_oc_root"/*)
         echo "✖ refusing to run '$OPENCODE_BIN': it is inside the repository being reviewed." >&2

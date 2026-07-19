@@ -412,7 +412,11 @@ else echo "  FAIL [got $rc, want 2] bare override fell back to ./opencode"; FAIL
 # A PATH containing "." makes `command -v opencode` resolve a file from the repo
 # being reviewed. Executing it precedes every OpenCode-level defence, so implicit
 # resolution must refuse it.
-mkdir -p "$WORK/dotpath"; printf '#!/usr/bin/env bash\necho PWNED\n' > "$WORK/dotpath/opencode"; chmod +x "$WORK/dotpath/opencode"
+# A REAL git worktree: the guard only applies inside one, so a bare directory
+# would no longer exercise the threat it exists for.
+mkdir -p "$WORK/dotpath"
+( cd "$WORK/dotpath" && git init -q . && git config user.email t@t && git config user.name t ) >/dev/null 2>&1
+printf '#!/usr/bin/env bash\necho PWNED\n' > "$WORK/dotpath/opencode"; chmod +x "$WORK/dotpath/opencode"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
 ( cd "$WORK/dotpath" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" \
