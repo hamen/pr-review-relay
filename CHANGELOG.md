@@ -28,15 +28,21 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 - **OpenCode runs read-only, enforced by an inline permission deny-list.** `opencode run --agent plan`
   plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks the user's own `opencode.json`)
-  denying `edit`/`write`/`patch`/`task`/`webfetch`/`websearch` and all `bash` except the read-only
-  `gh pr view` / `gh pr diff` calls link mode depends on.
+  denying `bash`, `edit`, `write`, `patch`, `task`, `webfetch`, `websearch` and `external_directory`,
+  mirrored under `agent.plan`. Since shell is denied, the reviewer can't fetch the PR itself, so the
+  diff is attached as a file (`-f`) in both modes and at any size.
 
-  `--agent plan` **on its own is not enough** and was not treated as sufficient: the Plan agent's
-  permissions stay user-configurable, and on a machine whose config allows `bash` it executes shell
-  commands supplied through the reviewed content — confirmed during review, where it ran `id` and
-  returned real output. Deliberately not `--auto`, which auto-approves every `ask` permission.
-  `review-local` gets the same treatment with a stricter blanket `bash: deny`, since it hands the
-  diff over directly and never needs to fetch anything.
+  Three weaker designs were tried and discarded, each confirmed broken against a live opencode:
+  - `--agent plan` with no config — the Plan agent's permissions stay user-configurable; asked to run
+    `id`, it ran it and returned real uid/gid.
+  - A `gh pr view*` / `gh pr diff*` bash allowlist so link mode could still fetch — defeated by shell
+    redirection: `gh pr view N > victim` matches the allowed prefix and overwrote the file despite
+    `edit` and `write` both denied.
+  - Global deny without the `agent.plan` mirror — OpenCode applies agent-scoped permissions after the
+    global ones, so a user's `agent.plan.permission.bash: allow` reinstated shell.
+
+  Deliberately not `--auto`, which auto-approves every `ask` permission. `review-local` gets the same
+  config and the same file attachment.
 
 ### Added
 

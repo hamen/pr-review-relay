@@ -72,14 +72,15 @@ fi
 # AFTER the global ones — a user's `agent.plan.permission.bash: allow` would
 # otherwise reinstate shell for exactly the agent we run. `--agent plan` is not a
 # sandbox on its own; this config is what enforces read-only.
-OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"},"agent":{"plan":{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"}}}}'
+OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"},"agent":{"plan":{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"}}}}'
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
 # Agents that read stdin (claude / codex / cursor) get the diff piped in, so a
 # large diff never hits the process argv limit (Windows caps it at ~32K chars).
-# agy / opencode don't read a prompt from stdin, so they take prompt+diff as an
-# argument — same behaviour as pr-review-relay's --diff mode.
+# agy doesn't read a prompt from stdin, so it takes prompt+diff as an argument.
+# opencode takes the diff as an ATTACHED FILE (-f) instead, which keeps a large
+# diff off the argv entirely — same approach as pr-review-relay.
 review_with() {
   local name="$1" out="" rc=0 errf
   errf="$(mktemp)"
@@ -91,7 +92,15 @@ review_with() {
     opencode)
       local -a _oc_model=()
       [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && _oc_model=(-m "$PR_RELAY_OPENCODE_MODEL")
-      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run --agent plan ${_oc_model[@]+"${_oc_model[@]}"} "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
+      local _oc_diff
+      _oc_diff="$(mktemp)"
+      # Remove the attachment even if we're interrupted mid-review, not just on the
+      # happy path — errf is cleaned the same way below.
+      trap 'rm -f "$_oc_diff" "$errf"' RETURN
+      printf '%s' "$DIFF" > "$_oc_diff"
+      # `-f` takes an array, so `--` must precede the prompt or it is swallowed as
+      # another filename and opencode dies with "File not found".
+      out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$PROMPT" 2>"$errf"); rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr.

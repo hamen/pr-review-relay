@@ -105,7 +105,9 @@ fi
 # --max-rounds must be a non-negative integer, else the arithmetic below breaks and
 # silently bypasses the cap — reject it as a usage error instead.
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
-ROUND_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review-relay"; mkdir -p "$ROUND_DIR"
+# Both XDG_CACHE_HOME and HOME can be unset (cron, systemd, minimal containers) and
+# this script runs under `set -u`, so a bare $HOME here aborts the relay outright.
+ROUND_DIR="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/pr-review-relay"; mkdir -p "$ROUND_DIR"
 ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
 [ "$RESET" = 1 ] && rm -f "$ROUND_FILE"
@@ -214,7 +216,7 @@ fi
 # With no shell, the reviewer cannot fetch the PR itself, so the diff is attached
 # as a file instead (see the opencode case below). read/grep/glob need no shell
 # and stay available for reading the repo.
-OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"},"agent":{"plan":{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny"}}}}'
+OPENCODE_RO_CONFIG='{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"},"agent":{"plan":{"permission":{"bash":"deny","edit":"deny","write":"deny","patch":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"}}}}'
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
@@ -262,10 +264,16 @@ review_with() {
       [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && _oc_model=(-m "$PR_RELAY_OPENCODE_MODEL")
       local _oc_diff _oc_prompt
       _oc_diff="$(mktemp)"
+      # Clean the attachment even if we're interrupted mid-review; the EXIT trap
+      # above only covers STATUS_DIR.
+      trap 'rm -f "$_oc_diff"' RETURN
       printf '%s' "$DIFF" > "$_oc_diff"
-      _oc_prompt="$(printf '%s\n\n---\nNOTE: shell access is disabled for you, so ignore any instruction above to run `gh` or other commands — they will be refused. The complete PR diff is ATTACHED as a file; review that. You may still read files in the repo for context.' "$PROMPT")"
+      # Both prompts tell the reviewer where the diff is (stdin in --diff mode, gh in
+      # link mode) and neither is true here, so override both explicitly — otherwise
+      # the agent is told two contradictory things about where to find the change.
+      _oc_prompt="$(printf '%s\n\n---\nNOTE — this overrides any instruction above about how to obtain the change:\n- Shell access is disabled for you. `gh` and every other command will be refused; do not attempt them.\n- Nothing is on stdin.\n- The complete diff is ATTACHED to this message as a file. Review that.\nYou may still read files in the repo for context.' "$PROMPT")"
       out=$(OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" timeout "$AGENT_TIMEOUT" "$OPENCODE_BIN" run -f "$_oc_diff" --agent plan ${_oc_model[@]+"${_oc_model[@]}"} -- "$_oc_prompt" 2>"$errf")
-      rc=$?; rm -f "$_oc_diff";;
+      rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr. "Empty" means no non-whitespace content, so

@@ -268,7 +268,8 @@ oc_cfg "mirrors the deny under agent.plan" has '"agent":{"plan":{"permission"'
 # is swallowed as another filename (opencode then dies with "File not found").
 oc_assert "attaches the diff with -f" has " -f "
 oc_assert "separates the prompt with --" has " -- "
-oc_assert "tells the agent shell is disabled" has "shell access is disabled"
+oc_assert "tells the agent shell is disabled" has "Shell access is disabled"
+oc_assert "overrides the stdin/gh instructions" has "this overrides any instruction above"
 
 oc_run 0 "opencode runs read-only, diff mode" -- --diff
 oc_assert "diff-mode argv still read-only" has "--agent plan"
@@ -302,13 +303,17 @@ fi
 # HOME unset (cron / systemd / minimal containers) must NOT abort the relay. Under
 # `set -u` a bare $HOME in the startup resolution kills every reviewer, not just
 # opencode, because it runs before any dispatch.
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
-env -u HOME PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
-  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+# Setting XDG_CACHE_HOME here would MASK the bug: ROUND_DIR falls back to $HOME/.cache
+# only when XDG_CACHE_HOME is absent, so both must be unset to exercise the real
+# minimal environment. (An earlier version of this test set XDG_CACHE_HOME and passed
+# while a second bare $HOME was still live.)
+rm -f "$WORK/sha_counter" "$OC_ARGV"
+env -u HOME -u XDG_CACHE_HOME PATH="$BIN:/usr/bin:/bin" \
+  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_MAX_ROUNDS=99 \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
 rc=$?
-if [ "$rc" = 0 ]; then echo "  ok   [0] HOME unset → relay still runs (no unbound variable)"; PASS=$((PASS+1))
-else echo "  FAIL [got $rc, want 0] HOME unset aborted the relay"; FAIL=$((FAIL+1)); fi
+if [ "$rc" = 0 ]; then echo "  ok   [0] HOME + XDG_CACHE_HOME both unset → relay still runs"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] minimal env aborted the relay"; FAIL=$((FAIL+1)); fi
 
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"

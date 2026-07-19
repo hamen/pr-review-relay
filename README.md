@@ -28,7 +28,7 @@ PR comments. Local, free (it uses the agent CLIs you already pay for), and idemp
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
    claude -p                       codex exec                      cursor-agent -p
-   agy -p                        opencode run                            │
+   agy -p                    opencode run --agent plan                      │
          └───────────────────────────────┴───────────────────────────────┘
                                          │
                               each posts its review as a PR comment
@@ -355,9 +355,14 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   sandbox — the Plan agent's permissions remain user-configurable, and on a machine whose config allows
   `bash` it will run shell commands that came from the PR text. So each invocation also sets
   `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks your own `opencode.json`) denying
-  `edit`/`write`/`patch`/`task`/`webfetch`/`websearch` and all `bash` except the two read-only
-  `gh pr view` / `gh pr diff` calls link mode needs. It is deliberately **not** run with `--auto`,
-  which would auto-approve every `ask` permission.
+  `bash`, `edit`, `write`, `patch`, `task`, `webfetch`, `websearch` and `external_directory` — mirrored
+  under `agent.plan`, because OpenCode applies agent-scoped permissions *after* the global ones.
+  Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
+- **Shell is denied outright, so OpenCode never fetches the PR itself** — the diff is attached to the
+  prompt as a file instead, in both modes and at any size. An earlier attempt allowed just
+  `gh pr view` / `gh pr diff` so link mode could still fetch; that was defeated by shell redirection
+  (`gh pr view N > file` matches the allowed prefix and writes), which is why prefix allowlists are
+  not used here.
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in
