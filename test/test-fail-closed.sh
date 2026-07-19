@@ -482,6 +482,17 @@ rc=$?
 if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] a symlinked install outside the repo still runs"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc] legitimate symlinked install was refused"; FAIL=$((FAIL+1)); fi
 
+# TMPDIR inside the checkout would put the attachment dir — and so opencode's
+# working directory — back inside the repository, losing the isolation silently.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+mkdir -p "$WORK/dotpath/intmp"
+( cd "$WORK/dotpath" && env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    TMPDIR="$WORK/dotpath/intmp" GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] TMPDIR inside the repo is refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] reviewer would have run inside the repository"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
@@ -534,6 +545,16 @@ if [ -f "$RL" ]; then
   rl_assert "review-local: overrides the stdin wording" has "ATTACHED" "$OC_ARGV"
   rl_assert "review-local: default-deny policy" has   '"\*":"deny"'     "$OC_ARGV.cfg"
   rl_assert "review-local: never allows bash"   hasnt '"bash":"allow"'  "$OC_ARGV.cfg"
+  # An explicitly requested but missing reviewer must FAIL, matching the relay —
+  # otherwise `review-local --reviewers opencode` on a machine without it prints a
+  # skip and exits 0, which reads as "reviewed".
+  # HOME must be the fake one: on a machine that really has ~/.opencode/bin/opencode
+  # the stock-path branch would resolve it and this test would run the real agent.
+  ( cd "$RLREPO" && env -u PR_RELAY_OPENCODE_BIN HOME="$WORK/nohome" PATH="$BIN5:/usr/bin:/bin" \
+      bash "$RL" --base mainline --reviewers opencode >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 3 ]; then echo "  ok   [3] review-local fails on an explicitly requested missing reviewer"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want 3] review-local silently skipped a missing reviewer"; FAIL=$((FAIL+1)); fi
   rl_assert "review-local: mirrors under agent.plan" has '"agent":{"plan"' "$OC_ARGV.cfg"
   # The same isolation the relay is asserted on: project config off, and launched
   # outside the repo. Checking only one call site is how the two drift.

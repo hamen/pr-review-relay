@@ -232,7 +232,7 @@ instructions file (these are global, so they apply in every repo):
 > After you open a Pull Request, run `pr-review-relay --author antigravity` (or `--author agy`).
 > Use `agy -p` from a normal shell — not from inside the interactive agy chat.
 
-> **Note:** the relay invokes Antigravity as `agy --dangerously-skip-permissions -p` (headless, read-only review).
+> **Note:** the relay invokes Antigravity as `agy --dangerously-skip-permissions -p`. That is headless, but it is **not** sandboxed — see the caveat under [Notes & caveats](#-notes--caveats).
 
 **⚪ OpenCode** — `~/.opencode/AGENTS.md`:
 > After you open a Pull Request, run `pr-review-relay --author opencode`.
@@ -373,6 +373,11 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
   `list`) — mirrored under `agent.plan`, because OpenCode applies agent-scoped permissions *after* the
   global ones. It also runs with `--pure` so external plugins, which execute at startup, don't load.
   Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
+- **What the OpenCode policy does NOT stop:** it prevents *execution*, not *reading*. `read`, `grep`,
+  `glob` and `list` stay allowed — the reviewer needs them — and they are not confined to the
+  attachment. A prompt-injected diff can therefore ask the model to read a file and quote it back in
+  the review, which is then posted to the PR. Treat the review output as attacker-influenceable, and
+  don't run the relay from a directory holding secrets you would not want quoted.
 - **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
   a file instead, in both modes and at any size. Narrower designs were tried first and each was demonstrably
   bypassable: the original `--dangerously-skip-permissions` (an undocumented alias for `--auto`, so it

@@ -133,6 +133,10 @@ opencode_resolve_bin() {
     # test would probe "/.opencode/bin/opencode", a path in the filesystem root
     # that nothing should ever be looking at.
     OPENCODE_BIN="$(opencode_abs_path "$HOME/.opencode/bin/opencode")"
+    # HOME can itself sit inside the checkout, in which case .opencode/bin/opencode
+    # is PR-controlled. Every resolution branch gets the same check — this is the
+    # third time a branch was missing it.
+    opencode_reject_if_in_repo "$OPENCODE_BIN"
   else
     OPENCODE_BIN=opencode   # keep the bare name so the caller's "not installed" path reports it
   fi
@@ -208,6 +212,27 @@ OPENCODE_RO_CONFIG='{"permission":{"*":"deny","read":"allow","grep":"allow","glo
 # `--pure` skips external plugins, which load and can execute code at startup
 # regardless of permissions. `-f` takes an array, so `--` must precede the prompt or
 # it is swallowed as another filename and opencode dies with "File not found".
+# opencode_assert_attach_dir_outside_repo <dir>
+#
+# mktemp honours TMPDIR, so a TMPDIR inside the checkout puts the attachment dir —
+# and therefore opencode's working directory — back inside the repository under
+# review. read/grep/glob stay allowed, so that hands a prompt-injected diff the
+# rest of the tree. Fail closed rather than quietly losing the isolation.
+opencode_assert_attach_dir_outside_repo() {
+  local _root _dir
+  _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$_root" ] || return 0
+  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 0
+  _dir="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  case "$_dir" in
+    "$_root"/*|"$_root")
+      echo "✖ the attachment dir '$_dir' is inside the repository being reviewed." >&2
+      echo "  TMPDIR points into the checkout, so the reviewer would run there. Set TMPDIR" >&2
+      echo "  to a path outside the repository." >&2
+      exit 2;;
+  esac
+}
+
 opencode_review() {
   local attach_dir="$1" diff="$2" context_block="$3" subject="$4" errf="$5" agent_timeout="$6"
   local diff_file oc_prompt

@@ -21,14 +21,14 @@ OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
 . "$OPENCODE_LIB"
 
-AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0
+AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; REVIEWERS_EXPLICIT=0
 AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --author)    need_value "$@"; AUTHOR="$2"; shift 2;;
     --base)      need_value "$@"; BASE="$2"; shift 2;;
-    --reviewers) need_value "$@"; REVIEWERS="$2"; shift 2;;
+    --reviewers) need_value "$@"; REVIEWERS="$2"; REVIEWERS_EXPLICIT=1; shift 2;;
     --parallel)  PARALLEL=1; shift;;
     -h|--help)   sed -n '2,14p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -58,6 +58,7 @@ ATTACH_DIR=""
 if opencode_is_selected; then
   ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
   trap 'rm -rf "$ATTACH_DIR"' EXIT
+  opencode_assert_attach_dir_outside_repo "$ATTACH_DIR"
 fi
 
 DIFF=$(git diff "$BASE...$BRANCH")
@@ -120,16 +121,31 @@ review_with() {
   printf '\n========== %s review ==========\n%s\n===============================\n' "$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}" "$out"
 }
 
+MISSING=0
 IFS=',' read -ra LIST <<< "$REVIEWERS"
 for r in "${LIST[@]}"; do
   r="$(relay_trim "$r")"   # same normalization as opencode_is_selected
   [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }
   local_tool=$(tool_for "$r")
-  [ -z "$local_tool" ] && { echo "  ! unknown reviewer '$r' (skip)"; continue; }
-  command -v "$local_tool" >/dev/null || { echo "  ! $local_tool not installed (skip $r)"; continue; }
+  # Same contract as pr-review-relay: a missing CLI from the DEFAULT set is a
+  # tolerated skip, but one you named explicitly is an error. With opencode opt-in,
+  # `--reviewers opencode` on a machine without it would otherwise print a skip and
+  # exit 0, which reads as "reviewed".
+  if [ -z "$local_tool" ]; then
+    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! unknown reviewer '$r' (explicitly requested)" >&2; MISSING=1; else echo "  ! unknown reviewer '$r' (skip)"; fi
+    continue
+  fi
+  if ! command -v "$local_tool" >/dev/null; then
+    if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! $local_tool not installed but explicitly requested" >&2; MISSING=1; else echo "  ! $local_tool not installed (skip $r)"; fi
+    continue
+  fi
   echo "  → $r reviewing…"
   if [ "$PARALLEL" = 1 ]; then review_with "$r" & else review_with "$r"; fi
 done
 [ "$PARALLEL" = 1 ] && wait
+if [ "$MISSING" = 1 ]; then
+  echo "✖ Local review incomplete: an explicitly requested reviewer was missing." >&2
+  exit 3
+fi
 echo "✔ Local review done."
