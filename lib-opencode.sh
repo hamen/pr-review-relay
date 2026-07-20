@@ -37,7 +37,7 @@ export CDPATH
 # "${HOME:-}" rather than "$HOME": under `set -u` a bare $HOME aborts the whole
 # script wherever HOME is unset (cron, systemd units, minimal containers).
 opencode_abs_path() {
-  local _dir
+  local _dir _base _parent
   case "$1" in
     /*) printf '%s' "$1"; return;;
   esac
@@ -267,12 +267,15 @@ opencode_resolve_bin() {
     # it because users expect it to work — but only when HOME is actually set,
     # otherwise "~/bin/opencode" would silently become "/bin/opencode".
     case "$OPENCODE_BIN" in
-      '~/'*)
+      '~'|'~/'*)
         [ -n "${HOME:-}" ] || {
           echo "✖ PR_RELAY_OPENCODE_BIN=${PR_RELAY_OPENCODE_BIN} starts with ~ but HOME is unset." >&2
           exit 2
         }
-        OPENCODE_BIN="$HOME/${OPENCODE_BIN#\~/}";;
+        case "$OPENCODE_BIN" in
+          '~')  OPENCODE_BIN="$HOME";;
+          *)    OPENCODE_BIN="$HOME/${OPENCODE_BIN#\~/}";;
+        esac;;
     esac
     case "$OPENCODE_BIN" in
       */*)
@@ -409,6 +412,15 @@ OPENCODE_RO_CONFIG='{"share":"disabled","permission":{"*":"deny","read":"allow",
 # and therefore opencode's working directory — back inside the repository under
 # review. read/grep/glob stay allowed, so that hands a prompt-injected diff the
 # rest of the tree. Fail closed rather than quietly losing the isolation.
+# Assert TMPDIR itself, once, for every run — not just the opencode dirs. errf,
+# the comment body and the reviewer output files all come from the same TMPDIR, so
+# a TMPDIR inside the checkout writes PR data into the repo on runs that never
+# touch opencode, and a crash leaves it there.
+relay_assert_tmpdir_outside_repo_global() {
+  local _t="${TMPDIR:-/tmp}"
+  relay_assert_tmpdir_outside_repo "$_t"
+}
+
 relay_assert_tmpdir_outside_repo() {
   # NB this compares against the worktree we are RUNNING IN, which the relay
   # requires to be the repo under review (`--pr N` resolves that repo's PR). Run it

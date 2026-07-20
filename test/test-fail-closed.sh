@@ -616,6 +616,18 @@ rc=$?
 if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 opts back in"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc] the documented opt-in did not work"; FAIL=$((FAIL+1)); fi
 
+# TMPDIR inside the checkout must be refused for EVERY run, not only ones that
+# select opencode: errf, the comment body and the reviewer output all use it, so a
+# crash would leave PR data sitting in the repository.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+mkdir -p "$WORK/dotpath/intmp2"
+( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" TMPDIR="$WORK/dotpath/intmp2" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] TMPDIR in the repo is refused even without opencode"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] temp files would have landed in the repository"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"

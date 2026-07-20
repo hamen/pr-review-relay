@@ -78,6 +78,7 @@ done
 
 # Before ANY external command is trusted, including gh on the next line.
 relay_assert_path_outside_repo
+relay_assert_tmpdir_outside_repo_global
 
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac

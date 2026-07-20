@@ -49,6 +49,7 @@ done
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
 
 relay_assert_path_outside_repo   # before any external command is trusted
+relay_assert_tmpdir_outside_repo_global
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 [ -z "$BRANCH" ] && { echo "Not inside a git repo."; exit 1; }
