@@ -191,7 +191,7 @@ Environment:
 
 Same cross-review, but for a branch you haven't opened a PR for yet — no `gh`, no PR number, no
 posted comments. It diffs your **current checked-out branch** against a base ref, sends that diff
-to the other agents read-only, and prints each review straight to the screen. Use it to get a clean,
+to the other agents and prints each review straight to the screen. Use it to get a clean,
 already-reviewed branch before you push and open the PR.
 
 ```bash
@@ -398,8 +398,8 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
   OpenCode fall back to `build` with *that* agent's rules (verified: shell came back). The relay
   therefore defines and selects its own primary agent, whose mode and permissions are both fixed. Each invocation sets
   `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks your own `opencode.json`) to a
-  **default-deny** policy — `"*": "deny"` plus an explicit read-only allowlist (`read`, `grep`, `glob`,
-  `list`) — repeated on the relay's own agent, because OpenCode applies agent-scoped permissions
+  **deny-everything** policy — `"*": "deny"`, no allowlist (see the next bullet) — repeated on the
+  relay's own agent, because OpenCode applies agent-scoped permissions
   *after* the global ones, so the agent actually in use has to carry the policy too. It also runs with `--pure` so external plugins, which execute at startup, don't load.
   Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
 - **The OpenCode reviewer gets no tools at all.** Not "no writes" — nothing: `"*": "deny"`, with no
