@@ -276,8 +276,10 @@ oc_cfg "default-deny baseline" has '"\*":"deny"'
 # diff — to a public link. Pinned off so someone else's setting cannot leak a
 # private PR.
 oc_cfg "session sharing pinned off" has '"share":"disabled"'
-oc_cfg "allows read"  has '"read":"allow"'
-oc_cfg "allows grep"  has '"grep":"allow"'
+# Nothing is allowed — not even reads. The diff arrives as prompt content, so the
+# reviewer needs no filesystem at all, and allowing reads was the last route by
+# which a prompt-injected diff could quote a secret into a posted PR comment.
+oc_cfg "allows nothing at all" hasnt '"allow"'
 # Shell must never be allowed. An allowlist was tried and defeated by redirection
 # (`gh pr view N > file` matches the allowed prefix and writes).
 oc_cfg "never allows bash" hasnt '"bash":"allow"'

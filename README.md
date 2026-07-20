@@ -180,7 +180,7 @@ Environment:
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
 | `PR_RELAY_OPENCODE_ALLOW_IN_REPO` | Set to `1` to allow `PR_RELAY_OPENCODE_BIN` to point at a binary **inside the repository under review**. Refused by default: that file is written by whoever wrote the diff. |
-| `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. Giving a value **containing a `/`** is exempt: naming a specific file is your decision and cannot be caused by a pull request. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
+| `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. A value **containing a `/`** that resolves inside the repo is refused too, unless `PR_RELAY_OPENCODE_ALLOW_IN_REPO=1`. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
 
 > **Before pinning `PR_RELAY_OPENCODE_MODEL`:** free-tier models can log submitted
 > code for product improvement, and your PR diff is the input. Check the provider's
@@ -402,12 +402,12 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
   `list`) — repeated on the relay's own agent, because OpenCode applies agent-scoped permissions
   *after* the global ones, so the agent actually in use has to carry the policy too. It also runs with `--pure` so external plugins, which execute at startup, don't load.
   Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
-- **What the OpenCode policy does NOT stop:** it prevents *execution*, not *reading*. `read`, `grep`,
-  `glob` and `list` stay allowed — the reviewer needs them — and they are not confined to the
-  attachment. A prompt-injected diff can therefore ask the model to read a file and quote it back in
-  the review, which is then posted to the PR. Treat the review output as attacker-influenceable, and
-  note that this is not limited to the launch directory: the reviewer can read anything the
-  account running it can read, and quote it into a public PR comment.
+- **The OpenCode reviewer gets no tools at all.** Not "no writes" — nothing: `"*": "deny"`, with no
+  allowlist. It does not need any, because the diff reaches it as prompt content via `-f` rather than
+  through a tool call; a review of the attachment is identical with every tool denied. Allowing reads
+  was the last exfiltration route, since they were not confined to the attachment and the relay
+  **posts** the result: a prompt-injected diff could have had the model read a credential and quote it
+  into a public PR comment.
 - **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
   a file instead, in both modes and at any size. Narrower designs were tried first and each was demonstrably
   bypassable: the original `--dangerously-skip-permissions` (an undocumented alias for `--auto`, so it

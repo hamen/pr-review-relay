@@ -169,17 +169,22 @@ opencode_reject_if_in_repo() {
 # root and switch the guard off. Bootstrapping a PATH check with a PATH lookup is
 # circular; walking up for .git is not.
 relay_worktree_root() {
-  local _d
+  local _d _found=""
   _d="$(pwd -P)" || return 1
   while [ "$_d" != "/" ] && [ -n "$_d" ]; do
     # -e, NOT -d: in a linked worktree (and a submodule) .git is a FILE. Since this
     # project mandates working in worktrees, a -d check would fail to find the root
     # in the normal setup — silently switching the PATH guard off exactly where it
     # is needed. Verified against this repo's own worktree.
-    [ -e "$_d/.git" ] && { printf '%s' "$_d"; return 0; }
+    # Remember the OUTERMOST match instead of returning at the first. A branch can
+    # add a `.git` FILE in a subdirectory; running the relay from there would then
+    # make the guard treat that subdirectory as the root and stop protecting
+    # everything above it. The outermost boundary is the conservative one.
+    [ -e "$_d/.git" ] && _found="$_d"
     _d="$(cd "$_d/.." 2>/dev/null && pwd -P)" || return 1
   done
-  [ -e "/.git" ] && { printf '/'; return 0; }
+  [ -e "/.git" ] && _found="/"
+  [ -n "$_found" ] && { printf '%s' "$_found"; return 0; }
   return 1
 }
 
@@ -325,7 +330,17 @@ opencode_resolve_bin() {
 # Applied per invocation through OPENCODE_CONFIG_CONTENT, a runtime override that
 # outranks the user's own opencode.json.
 #
-# DEFAULT-DENY with an explicit read-only allowlist. Seven weaker designs were tried
+# DENY EVERYTHING. Not "deny writes and allow reads" — nothing at all.
+#
+# The read tools were allowed for most of this change's life, on the assumption the
+# reviewer needed them. It does not: the diff arrives as prompt CONTENT via -f, not
+# through a tool call, so a review of the attachment works with every tool denied
+# (verified — same findings, no tools).
+#
+# Keeping read/grep/glob was the last exfiltration route. They were not confined to
+# the attachment, and the relay POSTS the result to the PR — so a prompt-injected
+# diff could have the model read a credential file and quote it into a public
+# comment. Nothing to deny halfway: the reviewer needs no filesystem at all. Seven weaker designs were tried
 # during cross-review and every one was verified broken by hand before being
 # discarded — each looked airtight until it was actually run:
 #
@@ -370,7 +385,7 @@ opencode_resolve_bin() {
 # (a real OpenCode env var — it is present in the 1.18.3 binary) is not a fix
 # either: it applies later still, but sets only the TOP-LEVEL permission block, so
 # an agent-scoped allow still wins — verified, bash ran.
-OPENCODE_RO_CONFIG='{"share":"disabled","permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"},"agent":{"pr-review-relay-ro":{"mode":"primary","description":"read-only cross-review agent","permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}}}'
+OPENCODE_RO_CONFIG='{"share":"disabled","permission":{"*":"deny"},"agent":{"pr-review-relay-ro":{"mode":"primary","description":"read-only cross-review agent","permission":{"*":"deny"}}}}'
 
 # --- The invocation ----------------------------------------------------------
 # opencode_review <attach_dir> <diff> <context_block> <subject> <errfile> <timeout>

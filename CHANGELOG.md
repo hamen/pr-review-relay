@@ -32,8 +32,10 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 - **OpenCode runs read-only, enforced by a default-deny permission policy.**
   `opencode --pure run` with an agent the relay defines itself, plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks
-  the user's own `opencode.json`) set to `"*": "deny"` with an explicit read-only allowlist (`read`,
-  `grep`, `glob`, `list`), repeated on a primary agent the relay defines for itself. `--pure` keeps external plugins — which execute
+  the user's own `opencode.json`) set to `"*": "deny"` with **no allowlist at all**, repeated on a primary
+  agent the relay defines for itself. The reviewer needs no tools: the diff arrives as prompt content
+  via `-f`, not through a tool call, so the review is unchanged with everything denied — and reads
+  were the last way a prompt-injected diff could have quoted a secret into a posted comment. `--pure` keeps external plugins — which execute
   at startup regardless of permissions — from loading. Since shell is denied, the reviewer can't fetch
   the PR itself, so the diff is attached as a file (`-f`) in both modes and at any size.
 
