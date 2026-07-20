@@ -628,6 +628,17 @@ rc=$?
 if [ "$rc" = 2 ]; then echo "  ok   [2] TMPDIR in the repo is refused even without opencode"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 2] temp files would have landed in the repository"; FAIL=$((FAIL+1)); fi
 
+# ".." through a SYMLINK: plain `cd` resolves it logically, so "link/../x" looks
+# like it lives beside the link when physically it lives inside the repo.
+mkdir -p "$WORK/dotpath/sub"; ln -sfn "$WORK/dotpath/sub" "$WORK/symlnk"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/symlnk/../future-bin:$BIN2:/usr/bin:/bin" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] '..' through a symlink is resolved physically"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] logical '..' let a repo-local PATH entry through"; FAIL=$((FAIL+1)); fi
+
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"

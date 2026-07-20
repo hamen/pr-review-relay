@@ -98,7 +98,7 @@ opencode_target_in_repo() {
   local _root _target
   _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$_root" ] || return 1
-  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 1
+  _root="$(cd -P "$_root" 2>/dev/null && pwd -P)" || return 1
   _target="$(opencode_resolve_symlinks "$1")" || return 1
   case "$_target" in "$_root"/*) printf '%s' "$_target";; *) return 1;; esac
 }
@@ -127,7 +127,7 @@ opencode_reject_if_in_repo() {
   local _root _target
   _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$_root" ] || return 0          # no worktree → nothing under review to contain
-  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 0
+  _root="$(cd -P "$_root" 2>/dev/null && pwd -P)" || return 0
   # Check what the name actually RESOLVES to, not the name itself: a trusted PATH
   # directory can hold `opencode -> <reviewed-repo>/malicious`, and canonicalizing
   # only the parent directory would wave that straight through.
@@ -159,6 +159,10 @@ opencode_reject_if_in_repo() {
 # this one. What the guard does cover is everything from the first line onward, and
 # SCRIPT_DIR is computed with builtins so even the library path cannot be steered. Entries are compared physically, since a symlinked PATH entry pointing
 # into the checkout is the same problem wearing a different name.
+# NB every `cd` used for canonicalization below is `cd -P`. Plain `cd` handles ".."
+# LOGICALLY — "link/.." becomes the link's textual parent, not the directory it
+# physically sits in — which is exactly how a containment check gets fooled.
+#
 # Find the worktree root using ONLY shell builtins — cd, pwd, [ — and no external
 # command. `git rev-parse` cannot be used here: git is itself resolved through the
 # PATH this function exists to validate, so a repo-local `git` could report an empty
@@ -199,22 +203,14 @@ relay_print_header() {
 # Walk up until something exists, so a not-yet-created PATH entry is still judged
 # against where it WOULD live. Builtins only, same reason as relay_worktree_root.
 relay_nearest_existing_dir() {
-  local _d="$1" _out="" _seg _rest
+  local _d="$1"
   case "$_d" in /*) ;; *) _d="$(pwd -P)/$_d";; esac
-  # Collapse "." and ".." textually first: without this, "/trusted/../repo/bin" is
-  # judged against /trusted instead of the repo it actually points into.
-  _rest="${_d#/}/"
-  while [ -n "$_rest" ] && [ "$_rest" != "/" ]; do
-    _seg="${_rest%%/*}"; _rest="${_rest#*/}"
-    case "$_seg" in
-      ''|'.') ;;
-      '..')   _out="${_out%/*}";;
-      *)      _out="$_out/$_seg";;
-    esac
-  done
-  _d="${_out:-/}"
+  # No lexical ".." collapsing. Through a symlink it gives the WRONG answer:
+  # for `link -> repo/sub`, "link/.." is textually the link's parent but physically
+  # `repo`. Trimming segments and letting `cd -P` resolve each candidate gets the
+  # directory that would really be used.
   while [ -n "$_d" ] && [ "$_d" != "/" ]; do
-    if [ -d "$_d" ]; then (cd "$_d" 2>/dev/null && pwd -P); return 0; fi
+    if [ -d "$_d" ]; then (cd -P "$_d" 2>/dev/null && pwd -P); return 0; fi
     _d="${_d%/*}"
     [ -n "$_d" ] || _d="/"
   done
@@ -240,7 +236,7 @@ relay_assert_path_outside_repo() {
     # reviewers run with write access, so one of them can create it mid-round and
     # every later command resolves from there. Judge it by its nearest existing
     # ancestor — if that is inside the checkout, so is anything created under it.
-    _resolved="$(cd "$_entry" 2>/dev/null && pwd -P)" || _resolved="$(relay_nearest_existing_dir "$_entry")"
+    _resolved="$(cd -P "$_entry" 2>/dev/null && pwd -P)" || _resolved="$(relay_nearest_existing_dir "$_entry")"
     [ -n "$_resolved" ] || continue
     case "$_resolved" in
       "$_root"|"$_root"/*)
@@ -429,8 +425,8 @@ relay_assert_tmpdir_outside_repo() {
   local _root _dir
   _root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$_root" ] || return 0
-  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 0
-  _dir="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  _root="$(cd -P "$_root" 2>/dev/null && pwd -P)" || return 0
+  _dir="$(cd -P "$1" 2>/dev/null && pwd -P)" || return 0
   case "$_dir" in
     "$_root"/*|"$_root")
       echo "✖ the attachment dir '$_dir' is inside the repository being reviewed." >&2
@@ -452,7 +448,9 @@ opencode_review() {
   # other's agent is still reading it — a silently incomplete review, which is worse than
   # a failed one because it still looks like a verdict. mktemp inside the
   # already-private attach dir keeps the EXIT-trap cleanup working unchanged.
-  diff_file="$(mktemp "$attach_dir/oc-diff.XXXXXX")" || return 1
+  diff_file="$(mktemp "$attach_dir/oc-diff.XXXXXX")" || {
+    echo "cannot create the diff attachment in $attach_dir" >&2; return 1
+  }
   # Canonicalize before the cd below: with a RELATIVE TMPDIR, mktemp hands back a
   # relative path, and `-f "$diff_file"` / `2>"$errf"` would then resolve against
   # the attachment dir instead of where the files actually are.
@@ -474,10 +472,14 @@ opencode_review() {
   while [ -n "$_rest" ]; do
     _pe="${_rest%%:*}"; _rest="${_rest#*:}"
     [ -n "$_pe" ] || _pe="."
-    _pe="$(cd "$_pe" 2>/dev/null && pwd -P)" || continue
+    _pe="$(cd -P "$_pe" 2>/dev/null && pwd -P)" || continue
     _abs_path="${_abs_path:+$_abs_path:}$_pe"
   done
 
+  [ -n "$_abs_path" ] || {
+    echo "no usable absolute PATH entry — cannot locate the tools the reviewer needs" >&2
+    return 1
+  }
   (
     cd "$attach_dir" 2>/dev/null || { echo "cannot enter the attachment dir $attach_dir" >&2; exit 1; }
     PATH="$_abs_path"
