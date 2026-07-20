@@ -281,9 +281,8 @@ opencode_resolve_bin() {
     case "$OPENCODE_BIN" in
       */*)
         OPENCODE_BIN="$(opencode_abs_path "$OPENCODE_BIN")"
-        # A path you typed is exempt from the hard refusal — that is the escape
-        # hatch — but a typo or a stale relative path can still land inside the
-        # checkout, so say so rather than letting it pass in silence.
+        # A typed path is contained too: refused if it lands inside the checkout,
+        # with PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 as the deliberate way through.
         opencode_reject_explicit_in_repo "$OPENCODE_BIN";;
       *)
         # A BARE name means "on PATH", so resolve it there and nowhere else — never
@@ -421,8 +420,9 @@ OPENCODE_RO_CONFIG='{"share":"disabled","permission":{"*":"deny"},"agent":{"pr-r
 #
 # mktemp honours TMPDIR, so a TMPDIR inside the checkout puts the attachment dir —
 # and therefore opencode's working directory — back inside the repository under
-# review. read/grep/glob stay allowed, so that hands a prompt-injected diff the
-# rest of the tree. Fail closed rather than quietly losing the isolation.
+# review. No tools are granted, so nothing can be read from there — but the working
+# directory is still the wrong one, and the isolation is meant to be structural
+# rather than dependent on the policy staying exactly as it is today.
 # Assert TMPDIR itself, once, for every run — not just the opencode dirs. errf,
 # the comment body and the reviewer output files all come from the same TMPDIR, so
 # a TMPDIR inside the checkout writes PR data into the repo on runs that never
