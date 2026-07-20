@@ -62,8 +62,8 @@ OPENCODE_BIN=opencode
 # policy, all of it. So ANY resolution that went through PATH is checked, including
 # a bare PR_RELAY_OPENCODE_BIN, which is a PATH lookup and not a trusted path.
 #
-# Only an override containing a "/" is exempt: naming a specific file is the user's
-# deliberate decision, and cannot be caused by a pull request.
+# Every form is contained, including an override containing a "/": that one is
+# refused too unless PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 makes it deliberate.
 #
 # Both sides are compared physically (pwd -P): git reports a physical toplevel while
 # $PWD stays logical, so entering the checkout through a symlink would otherwise
@@ -500,7 +500,11 @@ opencode_review() {
     PATH="$_abs_path"
     OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" \
     timeout "$agent_timeout" "$OPENCODE_BIN" --pure run \
-      -f "$diff_file" --agent pr-review-relay-ro ${model[@]+"${model[@]}"} -- "$oc_prompt" 2>"$errf" )
+      -f "$diff_file" --agent pr-review-relay-ro ${model[@]+"${model[@]}"} -- "$oc_prompt" \
+      </dev/null 2>"$errf" )
+  # </dev/null is not cosmetic: opencode reads non-TTY stdin and appends it to the
+  # prompt. The relay pipes data to other reviewers, so whatever it was invoked with
+  # would otherwise reach the model — and the prompt tells it nothing is on stdin.
 }
 
 # --- Reviewer selection ------------------------------------------------------
