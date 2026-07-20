@@ -2,8 +2,10 @@
 # pr-review-relay — hand a PR off to the OTHER agents for cross-review.
 #
 # Whoever created the PR calls this with --author <self>. The other agents
-# (claude / codex / cursor / antigravity / opencode) review the PR headless +
-# read-only and post their review as a PR comment. The author auto-excludes itself.
+# (claude / codex / cursor / antigravity / opencode) review the PR headless and
+# post their review as a PR comment. The author auto-excludes itself.
+# NB "read-only" is ENFORCED only for opencode; the others are asked, not confined.
+# See the caveats in the README.
 #
 # By default the reviewers are handed the PR *reference* and fetch it themselves
 # (gh pr view/diff) — they get the full PR: title, body, discussion, and every
@@ -18,6 +20,7 @@
 # Usage:
 #   pr-review-relay [--author claude|codex|cursor|antigravity] [--pr <number|url>] \
 #                   [--reviewers claude,codex,cursor,antigravity] [--parallel] \
+#                   (opencode is also supported, opt-in: name it explicitly)
 #                   [--context-file <path>] [--diff] [--dry-run]
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 #
@@ -34,10 +37,27 @@
 # named explicitly via --reviewers are required to be present.
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SCRIPT_DIR is computed with BUILTINS ONLY (case/cd/pwd). The obvious
+# `$(cd "$(dirname "$0")" && pwd)` resolves `dirname` through PATH — before the PATH
+# guard below has had a chance to run — so a repo-local `dirname` would decide which
+# library this script sources. Sourcing itself takes a path and never consults PATH.
+_self="${BASH_SOURCE[0]}"
+case "$_self" in
+  */*) SCRIPT_DIR="${_self%/*}";;
+  *)   SCRIPT_DIR=".";;
+esac
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
+unset _self
 WRAP_COMMENT="$SCRIPT_DIR/wrap-collapsed-pr-comment.mjs"
+# The OpenCode reviewer lives in a shared lib so its policy cannot drift between
+# this script and review-local — cross-review flagged that duplication repeatedly.
+OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
+[ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
+. "$OPENCODE_LIB"
 
 AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+# Validate here rather than letting `timeout` fail with a bare exit 125.
+case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -51,13 +71,19 @@ while [ $# -gt 0 ]; do
     --dry-run)      DRY=1; shift;;
     --max-rounds)   MAX_ROUNDS="$2"; shift 2;;
     --reset)        RESET=1; shift;;
-    -h|--help)      awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "$0"; exit 0;;
+    -h|--help)      relay_print_header "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
 
+# Before ANY external command is trusted, including gh on the next line.
+relay_assert_path_outside_repo
+relay_assert_tmpdir_outside_repo_global
+
 command -v gh >/dev/null || { echo "gh not found"; exit 1; }
 case "$AUTHOR" in agy) AUTHOR=antigravity;; esac
+# After AUTHOR normalization, so opencode_is_selected compares like for like.
+opencode_is_selected && opencode_resolve_bin
 [ -z "$PR" ] && PR=$(gh pr view --json number -q .number 2>/dev/null)
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
@@ -73,7 +99,33 @@ echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-no
 # $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
 # hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
 STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
+# Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
+# trap already installed STATUS_DIR would be left behind.
 trap 'rm -rf "$STATUS_DIR"' EXIT
+# Prompt attachments (the opencode reviewer gets the diff as a file) live in their
+# OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs "$STATUS_DIR"/*
+# and treats every file there as a reviewer outcome, so an attachment dropped in
+# there would be counted as a failed reviewer and poison the verdict.
+# Both are mktemp -d (mode 700) and both are removed by the EXIT trap, which does
+# run on SIGTERM — a per-function RETURN trap does not, and would leave the full
+# PR diff behind in /tmp.
+#
+# EXIT alone is deliberate; do NOT add `INT TERM HUP` handlers here. Bash defers a
+# trapped signal until the running foreground command finishes, so trapping TERM
+# would make the relay sit through the rest of `timeout $AGENT_TIMEOUT <agent>` —
+# minutes — before cleaning, whereas an untrapped TERM kills bash immediately and
+# the EXIT trap fires right then. Verified in three shapes (plain child, child in a
+# command substitution, backgrounded subshells as under --parallel): all cleaned on
+# SIGTERM, and adding a TERM handler measurably delayed it. SIGKILL leaks, but no
+# trap of any kind can prevent that.
+# Only the opencode reviewer attaches anything, so don't allocate this (or widen the
+# trap) on runs that never select it.
+ATTACH_DIR=""
+if opencode_is_selected; then
+  ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
+  trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
+  relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
+fi
 # Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
 # "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
 # prefix also guarantees the key is never a dotfile (which the tally glob "*"
@@ -105,9 +157,54 @@ fi
 # --max-rounds must be a non-negative integer, else the arithmetic below breaks and
 # silently bypasses the cap — reject it as a usage error instead.
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
-ROUND_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pr-review-relay"; mkdir -p "$ROUND_DIR"
+# Both XDG_CACHE_HOME and HOME can be unset (cron, systemd, minimal containers) and
+# this script runs under `set -u`, so a bare $HOME here aborts the relay outright.
+# The last-resort path is per-UID and mode 700, NOT a shared /tmp/.cache: a fixed
+# world-writable path lets another user pre-create it (or plant a symlink) and then
+# read or steer another user's round state.
+if [ -n "${XDG_CACHE_HOME:-}" ]; then   ROUND_DIR="$XDG_CACHE_HOME/pr-review-relay"; ROUND_SHARED=0
+elif [ -n "${HOME:-}" ]; then           ROUND_DIR="$HOME/.cache/pr-review-relay";     ROUND_SHARED=0
+else                                    ROUND_DIR="${TMPDIR:-/tmp}/pr-review-relay-$(id -u)"; ROUND_SHARED=1; fi
+if [ "$ROUND_SHARED" = 1 ]; then
+  # The last-resort path is predictable and lives on a shared /tmp, so another user
+  # can pre-create it or plant a symlink and then read or steer our round counter —
+  # which is the loop guard. Checking and THEN creating leaves a race, so create
+  # first with the mode already applied (mkdir -m is atomic — no writable window a
+  # racer can slip through, and no chmod that could land on a swapped-in target),
+  # then validate what we ended up with and fail closed if it isn't ours.
+  mkdir -m 700 -p "$ROUND_DIR" 2>/dev/null
+  if [ -L "$ROUND_DIR" ] || [ ! -d "$ROUND_DIR" ] || [ ! -O "$ROUND_DIR" ]; then
+    echo "✖ refusing to use round-state dir '$ROUND_DIR': not a directory owned by this user." >&2
+    echo "  Set XDG_CACHE_HOME or HOME to a private path and re-run." >&2
+    exit 1
+  fi
+  # `mkdir -m` sets the mode only when it CREATES the directory. One we own but
+  # that was left group/other-writable by an earlier run (or by an attacker who
+  # got there first and lost the ownership check) would still let someone plant a
+  # round-file symlink, so check the mode we actually ended up with.
+  # BSD/macOS `stat -f %Lp` includes the file-type bits (a 0700 dir reads as
+  # 40700), so compare only the low three octal digits or the check never matches
+  # and we chmod on every run.
+  _round_mode="$(stat -c %a "$ROUND_DIR" 2>/dev/null || stat -f %Lp "$ROUND_DIR" 2>/dev/null || echo '')"
+  _round_mode="${_round_mode: -3}"
+  case "$_round_mode" in
+    700|'') ;;   # empty = no usable stat; the ownership check above still applied
+    *) chmod 700 "$ROUND_DIR" 2>/dev/null || { echo "✖ cannot secure round-state dir '$ROUND_DIR' (mode $_round_mode)" >&2; exit 1; };;
+  esac
+else
+  # -m 700 here too, not just on the shared fallback: it costs nothing and does not
+  # depend on the caller's umask being sane.
+  mkdir -m 700 -p "$ROUND_DIR" || { echo "cannot create round-state dir '$ROUND_DIR'" >&2; exit 1; }
+fi
 ROUND_KEY=$(printf '%s#%s' "${REPO:-unknown}" "$PR" | tr -c 'A-Za-z0-9._#-' '_')
 ROUND_FILE="$ROUND_DIR/$ROUND_KEY.round"
+# Even inside a directory we own, refuse to follow a symlinked state file: the
+# counter is read, deleted and rewritten below, so a planted link would redirect
+# those writes at whatever it points to.
+if [ -L "$ROUND_FILE" ]; then
+  echo "✖ round-state file '$ROUND_FILE' is a symlink — refusing to follow it." >&2
+  exit 1
+fi
 [ "$RESET" = 1 ] && rm -f "$ROUND_FILE"
 # mtime: GNU `stat -c %Y`, BSD/macOS `stat -f %m`.
 _round_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
@@ -163,6 +260,8 @@ PROMPT="${CONTEXT_BLOCK}${BASE}"
 # PR themselves via `gh` (the whole point of link mode). Tune via env
 # LINK_DIFF_FALLBACK_MAX_BYTES (default 100000; set 0 to always omit).
 LINK_DIFF_FALLBACK_MAX_BYTES="${LINK_DIFF_FALLBACK_MAX_BYTES:-100000}"
+# Validated: a non-numeric value would blow up in the arithmetic below.
+case "$LINK_DIFF_FALLBACK_MAX_BYTES" in ''|*[!0-9]*) echo "invalid LINK_DIFF_FALLBACK_MAX_BYTES: '$LINK_DIFF_FALLBACK_MAX_BYTES' (want bytes)" >&2; exit 2;; esac
 if [ "$MODE" = link ]; then
   _diff_bytes=$(printf '%s' "$DIFF" | wc -c | tr -d ' ')
   if [ "$_diff_bytes" -le "$LINK_DIFF_FALLBACK_MAX_BYTES" ]; then
@@ -172,7 +271,11 @@ if [ "$MODE" = link ]; then
   fi
 fi
 
-tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo opencode;; *) echo "";; esac; }
+# $OPENCODE_BIN is already resolved (opencode_resolve_bin, near the top) so the same
+# value feeds both the `command -v` availability check in the reviewer loop and the
+# invocation in review_with(). It has to happen before that loop: resolving lazily
+# inside tool_for() would be dead code, because the loop skips on `command -v` first.
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; *) echo "";; esac; }
 
 review_with() {
   local name="$1" out="" feed="" rc=0 errf skey Name id
@@ -197,11 +300,9 @@ review_with() {
         out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>"$errf")
       fi; rc=$?;;
     opencode)
-      if [ "$MODE" = diff ]; then
-        out=$(timeout "$AGENT_TIMEOUT" opencode run --dangerously-skip-permissions "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
-      else
-        out=$(timeout "$AGENT_TIMEOUT" opencode run --dangerously-skip-permissions "$PROMPT" 2>"$errf")
-      fi; rc=$?;;
+      out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
+              "PR #$PR in $REPO ${PR_URL:+($PR_URL)}" "$errf" "$AGENT_TIMEOUT")
+      rc=$?;;
   esac
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr. "Empty" means no non-whitespace content, so
@@ -282,7 +383,7 @@ IFS=',' read -ra LIST <<< "$REVIEWERS"
 SEEN_LIST=""
 would_run=0; skipped=0   # reviewers that would run / were tolerated-skipped (default set)
 for r in "${LIST[@]}"; do
-  r="${r// }"
+  r="$(relay_trim "$r")"   # same normalization as opencode_is_selected
   [ -z "$r" ] && continue           # tolerate empty items (e.g. "claude,,codex")
   [ "$r" = "agy" ] && r=antigravity
   [ "$r" = "$AUTHOR" ] && { echo "  – skip $r (author)"; continue; }

@@ -15,7 +15,15 @@ jobs:
           node-version: '20'
       - name: bash syntax check
         run: |
+          # Every shell file, not just the entrypoint: `bash -n pr-review-relay`
+          # does not parse lib-opencode.sh, which is sourced at runtime, so a syntax
+          # error there would only surface when a user selects the opencode reviewer.
           bash -n pr-review-relay
+          bash -n review-local
+          bash -n lib-opencode.sh
+          bash -n pr-review-fetch
+          bash -n pr-review-collapse-comments
+          bash -n pr-review-consensus
           bash -n test/test-fail-closed.sh
       - name: fail-closed exit-code tests
         run: bash test/test-fail-closed.sh

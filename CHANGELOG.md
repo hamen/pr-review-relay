@@ -4,6 +4,93 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The `opencode` reviewer never ran** — because the binary was never found. OpenCode installs to
+  `~/.opencode/bin/opencode`, which is not on `PATH`, so `command -v opencode` missed and the reviewer
+  was skipped before it could be dispatched at all. It is now resolved from the stock path.
+- **And when it did run, it ran with auto-approval.** The invocation used
+  `--dangerously-skip-permissions`. That flag is absent from `opencode run --help`, but it is *not*
+  rejected: the 1.18.3 binary accepts it as an undocumented alias for `--auto`
+  (`args.auto || args.yolo || args["dangerously-skip-permissions"]`). So the reviewer was configured to
+  auto-approve every permission it was asked for — on a machine where `command -v opencode` did
+  succeed, it would have reviewed untrusted diffs with edit and shell rights. That is the behaviour the
+  read-only work below exists to remove.
+- **OpenCode is now resolved from the stock install path.** `PATH` first, then
+  `~/.opencode/bin/opencode`, overridable with `PR_RELAY_OPENCODE_BIN`. Resolution happens once at
+  startup so it feeds both the availability check and the invocation.
+- **`review-local` had the same two faults** (nonexistent flag, bare `opencode` name) and is fixed
+  alongside — otherwise the companion command would stay broken while the docs claimed otherwise.
+- **`HOME` unset no longer aborts the relay.** The startup binary resolution referenced a bare
+  `$HOME`; under `set -u` that dies with `HOME: unbound variable` in cron, systemd units and minimal
+  containers — and because resolution runs before any dispatch, it took down *every* reviewer, not
+  just opencode. Now `${HOME:-}`, with a regression test.
+
+### Changed
+
+- **OpenCode runs read-only, enforced by a default-deny permission policy.**
+  `opencode --pure run` with an agent the relay defines itself, plus `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks
+  the user's own `opencode.json`) set to `"*": "deny"` with **no allowlist at all**, repeated on a primary
+  agent the relay defines for itself. The reviewer needs no tools: the diff arrives as prompt content
+  via `-f`, not through a tool call, so the review is unchanged with everything denied — and reads
+  were the last way a prompt-injected diff could have quoted a secret into a posted comment. `--pure` keeps external plugins — which execute
+  at startup regardless of permissions — from loading. Since shell is denied, the reviewer can't fetch
+  the PR itself, so the diff is attached as a file (`-f`) in both modes and at any size.
+
+  Seven weaker designs were tried and discarded, each confirmed broken against a live opencode:
+  - The original `--dangerously-skip-permissions` — an undocumented alias for `--auto`, so it
+    approved everything rather than erroring.
+  - Selecting the built-in `plan` agent — its permissions stay user-configurable; asked to run
+    `id`, it ran it and returned real uid/gid.
+  - A `gh pr view*` / `gh pr diff*` bash allowlist so link mode could still fetch — defeated by shell
+    redirection: `gh pr view N > victim` matches the allowed prefix and overwrote the file despite
+    `edit` and `write` both denied. Prefix matching cannot make a shell command read-only.
+  - Global deny without repeating it on the selected agent — OpenCode applies agent-scoped permissions
+    after the global ones, so a user's `agent.<name>.permission.bash: allow` reinstated shell.
+  - Selecting a BUILT-IN agent at all. An agent's mode is user-configurable:
+    `agent.plan.mode: "subagent"` makes OpenCode fall back to `build` and apply *that* agent's
+    permissions — verified, shell came back. The relay defines and selects its own primary agent.
+  - Denying tools by name — anything not named (custom tools, MCP servers) stays allowed by default.
+  - Running elsewhere while still reading project config — see the MCP-at-startup entry below.
+
+  Deliberately not `--auto`, which auto-approves every `ask` permission. `review-local` gets the same
+  policy, the same file attachment, and its own argv-contract tests.
+- **Project config loading is disabled for the OpenCode reviewer** via
+  `OPENCODE_DISABLE_PROJECT_CONFIG=1`. The config loader walks *up* from its working directory to the
+  worktree root looking for `opencode.json`, so choosing a different directory alone is not a
+  guarantee — a `TMPDIR` inside the repository, for instance, would put the reviewer back under it.
+  This env var is the supported switch that stops the search outright; verified to block a planted
+  `mcp` entry even with the config sitting in the working directory. Kept *in addition to* running
+  outside the repo, because every single-layer defence in this area has turned out to be bypassable.
+- **The OpenCode reviewer runs outside the repository.** OpenCode reads the project `opencode.json`
+  from its working directory and merges it under the inline override; an `mcp` server declared there
+  is launched at startup, *before* tool permissions apply. A pull request that adds an `opencode.json`
+  therefore achieves arbitrary command execution simply by being reviewed — verified with a planted
+  MCP entry, whose command ran with `"*": "deny"` and `--pure` both in force. Neither the permission
+  policy nor `--pure` (which covers plugins only) prevents it, and an `"mcp": {}` override does not
+  either, because project config is deep-merged rather than replaced. The reviewer is now launched
+  from the attachment directory, so the repo's config is never read. Consequence: this reviewer sees
+  the attached diff only and does not browse the checkout.
+- **Prompt attachments are cleaned up on interruption.** The attached diff lives in a mode-700 temp dir
+  removed by the script's `EXIT` trap, which does fire on `SIGTERM`; a per-function `RETURN` trap does
+  not, and would have left the full PR diff in `/tmp`. It is deliberately kept out of the status
+  directory, whose contents are tallied as reviewer outcomes.
+- **The round-state fallback is per-user.** With neither `XDG_CACHE_HOME` nor `HOME` set, state now goes
+  to a mode-700 `${TMPDIR:-/tmp}/pr-review-relay-$(id -u)` instead of a shared, predictable path another
+  user could pre-create or symlink.
+
+### Added
+
+- `PR_RELAY_OPENCODE_MODEL` — optional model pin for the opencode reviewer. **Unset by default**, so
+  opencode uses your own configured model; pinning one here would hard-fail anyone without that
+  provider authenticated, and free tiers may log the submitted diff.
+- `PR_RELAY_OPENCODE_BIN` — optional override for a non-standard OpenCode install.
+- Tests asserting the opencode **argv contract** (rejects the legacy flag and `--auto`, requires
+  the relay's own agent, `-m` present only when the env var is set) and both binary-resolution branches.
+  These fail against the pre-fix script.
+
 ## [1.1.0] — 2026-07-16
 
 ### Changed

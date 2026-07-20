@@ -66,6 +66,11 @@ for a in claude codex cursor-agent agy opencode; do make_agent "$a"; done
 
 # --- test harness ------------------------------------------------------------
 PASS=0; FAIL=0
+# Assertions use `grep -q ... <<< "$var"`, never `printf ... | grep -q`. Under
+# `set -o pipefail`, grep -q exits as soon as it matches, printf takes SIGPIPE, and
+# the pipeline reports 141 — so a SUCCESSFUL match reads as a failed assertion. It
+# passes locally whenever the payload fits the pipe buffer before grep leaves,
+# which is why this only ever went red on CI.
 run() { # run <expected_exit> <desc> -- <extra env assignments...>
   local expect="$1" desc="$2"; shift 2
   rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"
@@ -136,7 +141,7 @@ rc=$?; if [ "$rc" = 0 ]; then echo "  ok   [0] default set, subset installed →
 # wrap helper: a review that merely MENTIONS <details> must still be wrapped with our summary.
 printf '## Heading\nThis review discusses a <details> element in the code.\n' > "$WORK/rev.md"
 wout=$(node "$HERE/../wrap-collapsed-pr-comment.mjs" --summary "MARK-42" --footer "<sub>f</sub>" --file "$WORK/rev.md")
-if printf '%s' "$wout" | grep -q "<summary>MARK-42</summary>"; then echo "  ok   [-] wrap keeps summary when body mentions <details>"; PASS=$((PASS+1)); else echo "  FAIL wrap dropped summary"; FAIL=$((FAIL+1)); fi
+if grep -q "<summary>MARK-42</summary>" <<< "$wout"; then echo "  ok   [-] wrap keeps summary when body mentions <details>"; PASS=$((PASS+1)); else echo "  FAIL wrap dropped summary"; FAIL=$((FAIL+1)); fi
 
 # invalid --max-rounds is a usage error (must not silently bypass the cap)
 runx 2 "invalid --max-rounds → usage error"             --reviewers claude,codex --max-rounds nope
@@ -170,6 +175,564 @@ env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_cou
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
 rc=$?
 if [ "$rc" = 4 ]; then echo "  ok   [4] round cap reached → exit 4"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 4] round cap"; FAIL=$((FAIL+1)); fi
+
+# --- opencode invocation contract --------------------------------------------
+# These assert the ARGV the relay builds, not just that a review was posted — the
+# generic stub above accepts anything, so it would pass against a broken flag too.
+# Each of these fails against the pre-fix script (which sent
+# --dangerously-skip-permissions — an undocumented alias for --auto, i.e. approve
+# everything — and hardcoded the bare `opencode` name).
+OC_ARGV="$WORK/oc_argv"
+make_strict_opencode() { # $1 = dir to install the stub into
+  mkdir -p "$1"
+  cat > "$1/opencode" <<'OC'
+#!/usr/bin/env bash
+# Record argv so the test can assert on it, then enforce the contract.
+printf '%s\n' "$*" > "${OC_ARGV_FILE:?}"
+# Read-only is enforced by the inline permission config, not by --agent alone:
+# a built-in agent can be redirected by user config, so the relay defines its own.
+printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-}" > "${OC_ARGV_FILE}.cfg"
+# Record the working directory: opencode must NOT be launched inside the repo, or
+# it reads the project opencode.json and starts any `mcp` server declared there
+# before permissions apply — arbitrary command execution from the reviewed branch.
+pwd > "${OC_ARGV_FILE}.cwd"
+printf '%s\n' "${OPENCODE_DISABLE_PROJECT_CONFIG:-}" > "${OC_ARGV_FILE}.projcfg"
+case "${OPENCODE_CONFIG_CONTENT:-}" in
+  *'"*":"deny"'*) ;;
+  *) echo "OPENCODE_CONFIG_CONTENT missing the default-deny baseline" >&2; exit 64;;
+esac
+# Global flags (e.g. --pure) may precede the subcommand, so scan rather than
+# assuming argv[1] is it.
+case " $* " in *" run "*) ;; *) echo "no 'run' subcommand in argv: $*" >&2; exit 64;; esac
+case " $* " in
+  *" --dangerously-skip-permissions "*)
+    echo "rejected: --dangerously-skip-permissions is an undocumented alias for --auto" >&2; exit 64;;
+  *" --auto "*)
+    echo "rejected: --auto grants write+shell to a reviewer that reads untrusted PRs" >&2; exit 64;;
+esac
+# Must select the relay's OWN agent, not a built-in: a built-in's mode is
+# user-configurable, and redirecting `plan` to a subagent makes OpenCode fall back
+# to `build` with that agent's permissions — verified, shell came back.
+case " $* " in *" --agent pr-review-relay-ro "*) ;; *) echo "not using the relay's own agent" >&2; exit 64;; esac
+# the prompt must actually reach the agent as the last argument
+case "${!#}" in "") echo "empty prompt" >&2; exit 64;; esac
+echo "LGTM from opencode."
+exit 0
+OC
+  chmod +x "$1/opencode"
+}
+make_strict_opencode "$BIN"
+
+oc_run() { # oc_run <expected_exit> <desc> [VAR=val ...] [-- <relay args...>]
+  local expect="$1" desc="$2"; shift 2
+  local -a envs=() relay_args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in --) shift; relay_args=("$@"); break;; *) envs+=("$1"); shift;; esac
+  done
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    OC_ARGV_FILE="$OC_ARGV" ${envs[@]+"${envs[@]}"} \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode \
+      ${relay_args[@]+"${relay_args[@]}"} >/dev/null 2>&1
+  local rc=$?
+  if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
+}
+oc_assert() { # oc_assert <desc> <grep-mode: has|hasnt> <pattern>
+  local desc="$1" mode="$2" pat="$3"
+  local got; got="$(cat "$OC_ARGV" 2>/dev/null || true)"
+  case "$mode" in
+    has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+           else echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1)); fi;;
+    hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1));
+           else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
+  esac
+}
+
+oc_run 0 "opencode runs read-only under its own agent, link mode"
+oc_assert "link mode selects the relay agent" has "--agent pr-review-relay-ro"
+oc_assert "no --dangerously-skip-permissions in argv" hasnt "--dangerously-skip-permissions"
+oc_assert "no --auto in argv" hasnt "--auto"
+oc_assert "PR_RELAY_OPENCODE_MODEL unset → no -m" hasnt " -m "
+# the permission config is what actually enforces read-only (see the stub's check)
+oc_cfg() { # oc_cfg <desc> <has|hasnt> <pattern>
+  local desc="$1" mode="$2" pat="$3" got
+  got="$(cat "$OC_ARGV.cfg" 2>/dev/null || true)"
+  case "$mode" in
+    has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+           else echo "  FAIL $desc (cfg: $got)"; FAIL=$((FAIL+1)); fi;;
+    hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc (cfg: $got)"; FAIL=$((FAIL+1));
+           else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
+  esac
+}
+# NOTE ON WHAT THESE CAN AND CANNOT PROVE: they assert the policy the relay SENDS,
+# not the policy OpenCode ENFORCES — a hermetic test cannot run the real agent. Both
+# holes fixed here were found by review and confirmed by hand against a live
+# opencode, not by this file. Treat these as regression guards on the config string.
+# Default-deny: naming tools to deny leaves anything unnamed (custom tools, MCP
+# servers) allowed, so the policy must start from "*": "deny".
+oc_cfg "default-deny baseline" has '"\*":"deny"'
+# A user config of "share":"auto" would publish the session — including the attached
+# diff — to a public link. Pinned off so someone else's setting cannot leak a
+# private PR.
+oc_cfg "session sharing pinned off" has '"share":"disabled"'
+# Nothing is allowed — not even reads. The diff arrives as prompt content, so the
+# reviewer needs no filesystem at all, and allowing reads was the last route by
+# which a prompt-injected diff could quote a secret into a posted PR comment.
+oc_cfg "allows nothing at all" hasnt '"allow"'
+# Shell must never be allowed. An allowlist was tried and defeated by redirection
+# (`gh pr view N > file` matches the allowed prefix and writes).
+oc_cfg "never allows bash" hasnt '"bash":"allow"'
+oc_cfg "no bash prefix allowlist" hasnt 'gh pr'
+# OpenCode applies agent-specific permissions AFTER global ones, so a user's
+# permissions on the SELECTED agent would reinstate shell unless it carries the
+# policy too — which is why the relay defines its own rather than using a built-in.
+oc_cfg "defines its own primary agent" has '"pr-review-relay-ro":{"mode":"primary"'
+oc_cfg "that agent is default-deny too" has '"pr-review-relay-ro".*"\*":"deny"'
+# External plugins load and can execute code at startup regardless of permissions.
+oc_assert "skips external plugins with --pure" has "--pure"
+# The diff is attached, so the inline link-mode fallback must NOT also be in the
+# prompt — same content twice, pointing the model at two different places.
+oc_assert "no duplicate inline diff fallback" hasnt "Fallback: the PR diff"
+# The single most severe hole found in review: a project opencode.json in the
+# reviewed repo can declare an `mcp` server that runs at startup, before any
+# permission applies. The only defence is not being in that directory.
+if [ -s "$OC_ARGV.cwd" ] && [ "$(cat "$OC_ARGV.cwd")" != "$PWD" ]; then
+  echo "  ok   [-] opencode is not launched inside the repo (no project config read)"; PASS=$((PASS+1))
+else
+  echo "  FAIL opencode ran in the repo cwd — project opencode.json/mcp would be honoured"; FAIL=$((FAIL+1))
+fi
+
+# Shell is denied, so the reviewer can never fetch the PR: the diff must be ATTACHED
+# in both modes. `-f` takes an array, so `--` must precede the prompt or the prompt
+# is swallowed as another filename (opencode then dies with "File not found").
+oc_assert "attaches the diff with -f" has " -f "
+# Unique per invocation, not a fixed name: both callers dedupe their
+# reviewer list, so two concurrent opencode runs would otherwise truncate and
+# rewrite the same file while the other agent is reading it.
+oc_assert "attachment path is unique per invocation" has "oc-diff\."
+oc_assert "separates the prompt with --" has " -- "
+oc_assert "tells the agent it has no shell" has "there is no shell and no checkout"
+# The prompt is BUILT for this reviewer rather than corrected afterwards, so it
+# must not contain the other reviewers' claims at all.
+oc_assert "never claims the diff is on stdin" hasnt "provided on stdin"
+oc_assert "never tells it to run gh" hasnt "gh pr view"
+
+oc_run 0 "opencode runs read-only, diff mode" -- --diff
+oc_assert "diff-mode argv still read-only" has "--agent pr-review-relay-ro"
+oc_assert "diff mode also attaches the diff" has " -f "
+# Prove we are actually in diff mode. Checking for the diff body would NOT prove it:
+# link mode inlines the same diff as a fallback under LINK_DIFF_FALLBACK_MAX_BYTES.
+# The prompt preamble is the real discriminator between the two modes.
+# Mode no longer changes this reviewer's prompt: it always gets the attachment
+# and an accurate description, so both modes must look the same here.
+oc_assert "diff mode uses the same composed prompt" has "ATTACHED to this message"
+
+oc_run 0 "PR_RELAY_OPENCODE_MODEL set → model pinned" PR_RELAY_OPENCODE_MODEL=opencode/some-model
+oc_assert "sets exactly -m <value>" has "-m opencode/some-model"
+
+# PATH miss + stock install at \$HOME/.opencode/bin → reviewer must still RUN,
+# not be skipped by the `command -v` check that precedes dispatch.
+FAKEHOME="$WORK/fakehome"; make_strict_opencode "$FAKEHOME/.opencode/bin"
+BIN5="$WORK/bin5"; mkdir -p "$BIN5"
+for t in gh claude; do ln -sf "$BIN/$t" "$BIN5/$t"; done
+ln -sf "$(command -v node)" "$BIN5/node" 2>/dev/null
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
+  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then
+  echo "  ok   [0] opencode off PATH but at \$HOME/.opencode/bin → resolved and run"; PASS=$((PASS+1))
+else
+  echo "  FAIL [got $rc] off-PATH stock install was skipped (argv file empty=$([ -s "$OC_ARGV" ] || echo yes))"; FAIL=$((FAIL+1))
+fi
+
+# HOME unset (cron / systemd / minimal containers) must NOT abort the relay. Under
+# `set -u` a bare $HOME in the startup resolution kills every reviewer, not just
+# opencode, because it runs before any dispatch.
+# Setting XDG_CACHE_HOME here would MASK the bug: ROUND_DIR falls back to $HOME/.cache
+# only when XDG_CACHE_HOME is absent, so both must be unset to exercise the real
+# minimal environment. (An earlier version of this test set XDG_CACHE_HOME and passed
+# while a second bare $HOME was still live.)
+# node must be reachable from the restricted PATH or the comment wrapper fails and
+# the relay returns 3 — which passes locally (node in /usr/bin) but is red on CI,
+# where setup-node installs outside /usr/bin and /bin. Symlink it in, as BIN5 does.
+ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
+rm -f "$WORK/sha_counter" "$OC_ARGV"
+# TMPDIR under $WORK so the run's round state (which falls back to
+# $TMPDIR/pr-review-relay-$(id -u) when HOME and XDG_CACHE_HOME are both unset)
+# stays inside the test sandbox. Without this the suite writes to the real
+# /tmp/pr-review-relay-$UID and repeated runs eventually hit the round cap.
+# It must EXIST: mktemp -d honours TMPDIR and fails if it is missing.
+mkdir -p "$WORK/tmphome"
+env -u HOME -u XDG_CACHE_HOME PATH="$BIN:/usr/bin:/bin" TMPDIR="$WORK/tmphome" \
+  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_MAX_ROUNDS=99 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   [0] HOME + XDG_CACHE_HOME both unset → relay still runs"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] minimal env aborted the relay"; FAIL=$((FAIL+1)); fi
+
+# A RELATIVE PR_RELAY_OPENCODE_BIN must still work: the reviewer is launched after
+# a `cd "$ATTACH_DIR"`, so it has to be resolved to an absolute path up front or it
+# executes from the wrong directory.
+BIN7="$WORK/bin7"; make_strict_opencode "$BIN7"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK" && env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="./bin7/opencode" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] relative PR_RELAY_OPENCODE_BIN resolved to absolute"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] relative PR_RELAY_OPENCODE_BIN broke after cd"; FAIL=$((FAIL+1)); fi
+
+# A broken PR_RELAY_OPENCODE_BIN must fail fast when opencode IS selected...
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  PR_RELAY_OPENCODE_BIN=/nonexistent/opencode \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] unusable PR_RELAY_OPENCODE_BIN fails fast when selected"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] bad override did not fail fast"; FAIL=$((FAIL+1)); fi
+
+# ...and must NOT affect a run that never asked for that reviewer.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  PR_RELAY_OPENCODE_BIN=/nonexistent/opencode \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   [0] bad override is irrelevant when opencode is not a reviewer"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] optional reviewer broke an unrelated run"; FAIL=$((FAIL+1)); fi
+
+# A DIRECTORY passes a bare `[ -x ]`, so it must be rejected explicitly rather
+# than passing validation and failing confusingly at launch.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  PR_RELAY_OPENCODE_BIN="$WORK" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a directory override is rejected, not treated as executable"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] directory override passed validation"; FAIL=$((FAIL+1)); fi
+
+# A BARE override that is not on PATH must fail, NOT silently resolve to
+# ./opencode in the working directory — which can be a repo whose PR added a file
+# by that name.
+mkdir -p "$WORK/bare"; printf '#!/usr/bin/env bash\necho PWNED\n' > "$WORK/bare/opencode"; chmod +x "$WORK/bare/opencode"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/bare" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" PR_RELAY_OPENCODE_BIN=opencode \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] bare override not on PATH is rejected, not read from cwd"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] bare override fell back to ./opencode"; FAIL=$((FAIL+1)); fi
+
+# A PATH containing "." makes `command -v opencode` resolve a file from the repo
+# being reviewed. Executing it precedes every OpenCode-level defence, so implicit
+# resolution must refuse it.
+# A REAL git worktree: the guard only applies inside one, so a bare directory
+# would no longer exercise the threat it exists for.
+mkdir -p "$WORK/dotpath"
+( cd "$WORK/dotpath" && git init -q . && git config user.email t@t && git config user.name t ) >/dev/null 2>&1
+printf '#!/usr/bin/env bash\necho PWNED\n' > "$WORK/dotpath/opencode"; chmod +x "$WORK/dotpath/opencode"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a repo-local opencode on PATH is refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] ran an opencode from the reviewed checkout"; FAIL=$((FAIL+1)); fi
+
+# Same threat, reached through a SYMLINK to the worktree: git reports a physical
+# toplevel while $PWD stays logical, so a prefix comparison of the two misses.
+ln -sfn "$WORK/dotpath" "$WORK/dotlink"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotlink" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] repo-local opencode refused through a symlinked worktree"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] symlinked worktree bypassed the containment guard"; FAIL=$((FAIL+1)); fi
+
+# A BARE override is a PATH lookup, not a trusted path, so it must get the same
+# containment check — otherwise setting PR_RELAY_OPENCODE_BIN=opencode with "." on
+# PATH walks straight past the guard.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" PR_RELAY_OPENCODE_BIN=opencode \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] bare override is PATH-resolved and still contained"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] bare override bypassed the containment guard"; FAIL=$((FAIL+1)); fi
+
+# ...while an explicit PATH-ful override outside the repo remains usable.
+BINOUT="$WORK/binout"; make_strict_opencode "$BINOUT"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="$BINOUT/opencode" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] explicit path override outside the repo still runs"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] explicit path override was wrongly refused"; FAIL=$((FAIL+1)); fi
+
+# A PATH entry in a TRUSTED directory that symlinks INTO the checkout: the name
+# looks safe, the target is not. Containment must follow the chain.
+mkdir -p "$WORK/trustedbin"
+printf '#!/usr/bin/env bash\necho PWNED\n' > "$WORK/dotpath/malicious"; chmod +x "$WORK/dotpath/malicious"
+ln -sf "$WORK/dotpath/malicious" "$WORK/trustedbin/opencode"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/trustedbin:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a symlink into the repo is followed and refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] symlink chain bypassed containment"; FAIL=$((FAIL+1)); fi
+
+# ...and a legitimate symlinked install outside the repo is NOT refused.
+mkdir -p "$WORK/legit/real" "$WORK/legit/bin"
+make_strict_opencode "$WORK/legit/real"
+ln -sf "$WORK/legit/real/opencode" "$WORK/legit/bin/opencode"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK/dotpath" && env PATH="$WORK/legit/bin:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] a symlinked install outside the repo still runs"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] legitimate symlinked install was refused"; FAIL=$((FAIL+1)); fi
+
+# TMPDIR inside the checkout would put the attachment dir — and so opencode's
+# working directory — back inside the repository, losing the isolation silently.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+mkdir -p "$WORK/dotpath/intmp"
+( cd "$WORK/dotpath" && env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    TMPDIR="$WORK/dotpath/intmp" GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] TMPDIR inside the repo is refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] reviewer would have run inside the repository"; FAIL=$((FAIL+1)); fi
+
+# PATH containing a directory inside the checkout compromises EVERY command the
+# relay runs — gh first of all — so it refuses to start rather than hardening one
+# command at a time.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/dotpath:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a PATH entry inside the repo refuses the whole run"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] ran with a repo-controlled PATH"; FAIL=$((FAIL+1)); fi
+
+# An EMPTY PATH field means the current directory, and word splitting silently
+# drops a trailing one — so "PATH=/usr/bin:" looked clean while the shell resolved
+# commands from the checkout. Leading and doubled colons are the same field.
+for _p in "$BIN2:/usr/bin:/bin:" ":$BIN2:/usr/bin:/bin" "$BIN2::/usr/bin:/bin"; do
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  ( cd "$WORK/dotpath" && env PATH="$_p" XDG_CACHE_HOME="$WORK/cache" \
+      GH_SHA_COUNTER="$WORK/sha_counter" \
+      bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 2 ]; then echo "  ok   [2] empty PATH field refused ($_p)"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want 2] empty PATH field slipped through ($_p)"; FAIL=$((FAIL+1)); fi
+done
+unset _p
+
+# A PATH entry that does not exist YET must still be judged: the unsandboxed
+# reviewers can create it mid-round, after which commands resolve from the repo.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/dotpath/not/created/yet:$BIN2:/usr/bin:/bin" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a not-yet-existing PATH entry in the repo is refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] unresolved repo-local PATH entry was skipped"; FAIL=$((FAIL+1)); fi
+
+# ...while a nonexistent entry OUTSIDE the repo must not block anything.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="/opt/definitely/not/here:$BIN2:/usr/bin:/bin" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   [0] a nonexistent PATH entry outside the repo is fine"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] harmless missing PATH entry was rejected"; FAIL=$((FAIL+1)); fi
+
+# ...even when the repo also ships a hostile `git`, which is the bootstrap problem:
+# the guard cannot use a PATH-resolved command to decide whether PATH is safe.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$WORK/dotpath/git"; chmod +x "$WORK/dotpath/git"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/dotpath:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] refused even with a repo-controlled 'git' on PATH"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] a hostile git disabled the PATH guard"; FAIL=$((FAIL+1)); fi
+rm -f "$WORK/dotpath/git"
+
+# ...and a "." entry, which is the same thing spelled differently.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH=".:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a '.' PATH entry inside the repo is refused too"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] '.' on PATH slipped through"; FAIL=$((FAIL+1)); fi
+
+# A RELATIVE TMPDIR makes mktemp return relative paths, which then resolve against
+# the attachment dir once opencode_review cds into it.
+mkdir -p "$WORK/reltmp"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK" && env PATH="$BIN:$PATH" TMPDIR="reltmp" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] a relative TMPDIR still produces a usable review"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] relative TMPDIR broke the attachment paths"; FAIL=$((FAIL+1)); fi
+oc_assert "attachment path is absolute" has " -f /"
+
+# CDPATH can steer `cd`, so a relative PATH entry could be canonicalized to a
+# CDPATH match outside the repo while the shell still resolves commands from the
+# repo-local one. The guard must not be foolable that way.
+mkdir -p "$WORK/decoy/bin" "$WORK/dotpath/bin"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env CDPATH="$WORK/decoy" PATH="bin:$BIN2:/usr/bin:/bin" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] CDPATH cannot steer the PATH containment check"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] CDPATH redirected the guard away from the repo"; FAIL=$((FAIL+1)); fi
+
+# An EXPLICIT override inside the repo is refused, not just warned about...
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+cp "$BIN/opencode" "$WORK/dotpath/oc-inrepo"; chmod +x "$WORK/dotpath/oc-inrepo"
+( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" PR_RELAY_OPENCODE_BIN="$WORK/dotpath/oc-inrepo" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] an explicit in-repo override is refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] explicit in-repo override only warned"; FAIL=$((FAIL+1)); fi
+
+# ...unless the user deliberately opts in.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
+    PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 PR_RELAY_OPENCODE_BIN="$WORK/dotpath/oc-inrepo" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 opts back in"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] the documented opt-in did not work"; FAIL=$((FAIL+1)); fi
+
+# TMPDIR inside the checkout must be refused for EVERY run, not only ones that
+# select opencode: errf, the comment body and the reviewer output all use it, so a
+# crash would leave PR data sitting in the repository.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+mkdir -p "$WORK/dotpath/intmp2"
+( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" TMPDIR="$WORK/dotpath/intmp2" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] TMPDIR in the repo is refused even without opencode"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] temp files would have landed in the repository"; FAIL=$((FAIL+1)); fi
+
+# ".." through a SYMLINK: plain `cd` resolves it logically, so "link/../x" looks
+# like it lives beside the link when physically it lives inside the repo.
+mkdir -p "$WORK/dotpath/sub"; ln -sfn "$WORK/dotpath/sub" "$WORK/symlnk"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/dotpath" && env PATH="$WORK/symlnk/../future-bin:$BIN2:/usr/bin:/bin" \
+    XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] '..' through a symlink is resolved physically"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] logical '..' let a repo-local PATH entry through"; FAIL=$((FAIL+1)); fi
+
+# PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
+BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
+  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="$BIN6/opencode" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] PR_RELAY_OPENCODE_BIN override honoured"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] PR_RELAY_OPENCODE_BIN override ignored"; FAIL=$((FAIL+1)); fi
+
+# --- review-local: same opencode contract ------------------------------------
+# review-local is a separate script that duplicates the opencode invocation, so it
+# can drift from pr-review-relay. It was changed in the same PR with no coverage,
+# which is exactly how the two fall out of sync.
+RL="$HERE/../review-local"
+if [ -f "$RL" ]; then
+  RLREPO="$WORK/rlrepo"; mkdir -p "$RLREPO"
+  (
+    cd "$RLREPO" || exit 1
+    git init -q . 2>/dev/null
+    git config user.email t@t; git config user.name t
+    echo base > f.txt; git add f.txt; git commit -qm base
+    git branch -M mainline
+    git checkout -qb feature
+    echo changed > f.txt; git add f.txt; git commit -qm change
+  ) >/dev/null 2>&1
+  rm -f "$OC_ARGV" "$OC_ARGV.cfg"
+  ( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" \
+      bash "$RL" --base mainline --reviewers opencode >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then
+    echo "  ok   [0] review-local dispatches opencode"; PASS=$((PASS+1))
+  else
+    echo "  FAIL [got $rc] review-local did not dispatch opencode"; FAIL=$((FAIL+1))
+  fi
+  rl_assert() { # rl_assert <desc> <has|hasnt> <pattern> <file>
+    local desc="$1" mode="$2" pat="$3" file="$4" got
+    got="$(cat "$file" 2>/dev/null || true)"
+    case "$mode" in
+      has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+             else echo "  FAIL $desc"; FAIL=$((FAIL+1)); fi;;
+      hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc"; FAIL=$((FAIL+1));
+             else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
+    esac
+  }
+  rl_assert "review-local: relay's own agent"   has   "--agent pr-review-relay-ro" "$OC_ARGV"
+  rl_assert "review-local: --pure"              has   "--pure"           "$OC_ARGV"
+  rl_assert "review-local: attaches the diff"   has   " -f "             "$OC_ARGV"
+  rl_assert "review-local: no legacy flag"      hasnt "--dangerously-skip-permissions" "$OC_ARGV"
+  rl_assert "review-local: overrides the stdin wording" has "ATTACHED" "$OC_ARGV"
+  rl_assert "review-local: default-deny policy" has   '"\*":"deny"'     "$OC_ARGV.cfg"
+  rl_assert "review-local: never allows bash"   hasnt '"bash":"allow"'  "$OC_ARGV.cfg"
+  rl_assert "review-local: defines its own agent" has '"pr-review-relay-ro"' "$OC_ARGV.cfg"
+  # From here on the runs must NOT dispatch opencode, so clear the recorded files:
+  # asserting on them afterwards would be reading the successful run above.
+  rm -f "$OC_ARGV" "$OC_ARGV.cfg" "$OC_ARGV.cwd" "$OC_ARGV.projcfg"
+  # An explicitly requested but missing reviewer must FAIL, matching the relay —
+  # otherwise `review-local --reviewers opencode` on a machine without it prints a
+  # skip and exits 0, which reads as "reviewed".
+  # HOME must be the fake one: on a machine that really has ~/.opencode/bin/opencode
+  # the stock-path branch would resolve it and this test would run the real agent.
+  ( cd "$RLREPO" && env -u PR_RELAY_OPENCODE_BIN HOME="$WORK/nohome" PATH="$BIN5:/usr/bin:/bin" \
+      bash "$RL" --base mainline --reviewers opencode >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 3 ]; then echo "  ok   [3] review-local fails on an explicitly requested missing reviewer"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want 3] review-local silently skipped a missing reviewer"; FAIL=$((FAIL+1)); fi
+  # The missing-reviewer run must not have invoked anything at all.
+  if [ ! -s "$OC_ARGV" ]; then echo "  ok   [-] review-local: nothing dispatched when the CLI is absent"; PASS=$((PASS+1))
+  else echo "  FAIL review-local dispatched a reviewer it reported as missing"; FAIL=$((FAIL+1)); fi
+  # Zero dispatched reviewers must not read as a clean review.
+  ( cd "$RLREPO" && env HOME="$WORK/nohome" PATH="/usr/bin:/bin" bash "$RL" --base mainline >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 3 ]; then echo "  ok   [3] review-local fails when no reviewer ran"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want 3] review-local reported success with zero reviewers"; FAIL=$((FAIL+1)); fi
+  # Duplicates are deduped, and empty items tolerated, like the relay.
+  rm -f "$OC_ARGV"
+  ( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" \
+      bash "$RL" --base mainline --reviewers 'opencode,,opencode' >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 0 ]; then echo "  ok   [0] review-local dedupes and tolerates empty items"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want 0] duplicate/empty reviewer list mishandled"; FAIL=$((FAIL+1)); fi
+  # The same isolation the relay is asserted on: project config off, and launched
+  # outside the repo. Checking only one call site is how the two drift.
+  rl_assert "review-local: disables project config" has "1" "$OC_ARGV.projcfg"
+  if [ -s "$OC_ARGV.cwd" ] && [ "$(cat "$OC_ARGV.cwd")" != "$RLREPO" ]; then
+    echo "  ok   [-] review-local: opencode is not launched inside the repo"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local: opencode ran in the repo cwd"; FAIL=$((FAIL+1))
+  fi
+else
+  echo "  ok   [-] review-local not present (skip)"; PASS=$((PASS+1))
+fi
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

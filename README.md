@@ -19,8 +19,9 @@
 ---
 
 You build a feature with one agent (Claude Code, Codex, Cursor, or Antigravity), it opens a PR — and the
-**others** automatically review that PR, headless and read-only, and post their findings as
-PR comments. Local, free (it uses the agent CLIs you already pay for), and idempotent.
+**others** automatically review that PR, headless, and post their findings as PR comments. (Reviewers
+are *asked* to be read-only; only the OpenCode one has that enforced — see
+[Notes & caveats](#-notes--caveats).) Local, free (it uses the agent CLIs you already pay for), and idempotent.
 
 ```
  build feature  ──►  open PR  ──►  pr-review-relay --author <self>
@@ -28,7 +29,7 @@ PR comments. Local, free (it uses the agent CLIs you already pay for), and idemp
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
    claude -p                       codex exec                      cursor-agent -p
-   agy -p                        opencode run                            │
+   agy -p                  opencode --pure run (own agent)                      │
          └───────────────────────────────┴───────────────────────────────┘
                                          │
                               each posts its review as a PR comment
@@ -61,7 +62,8 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`
   - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
-  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode run`
+  - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run` with a read-only agent the relay defines
+    (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
 
 You only need the agents you actually want as reviewers.
 
@@ -79,11 +81,15 @@ curl -fsSL "$REPO/pr-review-fetch" -o "$BIN/pr-review-fetch"
 curl -fsSL "$REPO/pr-review-collapse-comments" -o "$BIN/pr-review-collapse-comments"
 curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
 curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
+curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
 chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
+# lib-opencode.sh is sourced, not executed — it needs no +x
 # make sure ~/.local/bin is on your PATH
 ```
 
 `pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too. `review-local` doesn't need it (it never posts anywhere).
+
+`pr-review-relay` and `review-local` both source **`lib-opencode.sh`** from their own directory — it holds the OpenCode reviewer's binary resolution and read-only permission policy, kept in one place so the two scripts cannot drift apart on a security-relevant setting. Both refuse to start if it is missing.
 
 ### 🪟 Windows
 
@@ -135,7 +141,7 @@ bash review-local --author claude
 Run it from **inside the repo you want reviewed** (`cd` there first) — not from inside the
 pr-review-relay repo itself — since the relay resolves the PR for the current working repo's branch.
 
-`wrap-collapsed-pr-comment.mjs` still needs to sit next to the scripts, same as on Linux/macOS.
+`wrap-collapsed-pr-comment.mjs` and `lib-opencode.sh` still need to sit next to the scripts, same as on Linux/macOS.
 
 ## 🚀 Usage
 
@@ -157,7 +163,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that opened the PR. It auto-excludes itself from reviewing. |
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` is supported but opt-in — name it explicitly to include it. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
 | `--link` *(default)* | Hand reviewers the PR reference; each fetches it itself (`gh pr view`/`gh pr diff`) and reads the full files in context. The diff is also embedded as a fallback so a reviewer whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still reviews something — **but only when the diff is under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000).** Above that the fallback is omitted so a huge inline diff can't blow past an agent's prompt limit and make it return empty; reviewers just fetch the PR via `gh`. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
@@ -172,12 +178,20 @@ Environment:
 |----------|---------|
 | `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. |
+| `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
+| `PR_RELAY_OPENCODE_ALLOW_IN_REPO` | Set to `1` to allow `PR_RELAY_OPENCODE_BIN` to point at a binary **inside the repository under review**. Refused by default: that file is written by whoever wrote the diff. |
+| `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. A value **containing a `/`** that resolves inside the repo is refused too, unless `PR_RELAY_OPENCODE_ALLOW_IN_REPO=1`. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` or `~/` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; the `~user/…` form is *not* supported, give a real path for that; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
+
+> **Before pinning `PR_RELAY_OPENCODE_MODEL`:** free-tier models can log submitted
+> code for product improvement, and your PR diff is the input. Check the provider's
+> terms before pointing this at a private repo. Leaving it unset keeps whatever you
+> already trust in your own opencode config.
 
 ## 🧪 Review before there's a PR (`review-local`)
 
 Same cross-review, but for a branch you haven't opened a PR for yet — no `gh`, no PR number, no
 posted comments. It diffs your **current checked-out branch** against a base ref, sends that diff
-to the other agents read-only, and prints each review straight to the screen. Use it to get a clean,
+to the other agents and prints each review straight to the screen. Use it to get a clean,
 already-reviewed branch before you push and open the PR.
 
 ```bash
@@ -193,13 +207,14 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that wrote the branch. It auto-excludes itself from reviewing. |
 | `--base <ref>` | Ref to diff against. Default: `main`. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` is supported but opt-in — name it explicitly to include it. |
 | `--parallel` | Run the reviewers concurrently. |
 
 Reviewers that read stdin (`claude` / `codex` / `cursor`) get the diff piped in, so a large branch
-scales the same way `pr-review-relay --diff` does; `agy` / `opencode` take it as an argument (they
-don't read a prompt from stdin). Nothing is pushed or posted anywhere — `review-local` only ever
-prints to your terminal.
+scales the same way `pr-review-relay --diff` does; `agy` takes it as an argument (it doesn't read a
+prompt from stdin); `opencode` receives it as an attached file and reviews it in isolation from the
+repo (see the OpenCode note under [Notes & caveats](#-notes--caveats)). Nothing is pushed or posted
+anywhere — `review-local` only ever prints to your terminal.
 
 ## 🔁 Make it automatic (the handoff)
 
@@ -219,7 +234,7 @@ instructions file (these are global, so they apply in every repo):
 > After you open a Pull Request, run `pr-review-relay --author antigravity` (or `--author agy`).
 > Use `agy -p` from a normal shell — not from inside the interactive agy chat.
 
-> **Note:** the relay invokes Antigravity as `agy --dangerously-skip-permissions -p` (headless, read-only review).
+> **Note:** the relay invokes Antigravity as `agy --dangerously-skip-permissions -p`. That is headless, but it is **not** sandboxed — see the caveat under [Notes & caveats](#-notes--caveats).
 
 **⚪ OpenCode** — `~/.opencode/AGENTS.md`:
 > After you open a Pull Request, run `pr-review-relay --author opencode`.
@@ -299,7 +314,7 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 
 1. Resolves the PR (current branch or `--pr`) and reads the diff with `gh pr diff` (used as a sanity
    guard and for the line/byte summary).
-2. For each reviewer (except `--author`), runs the agent **headless and read-only** with a focused
+2. For each reviewer (except `--author`), runs the agent **headless** with a focused
    review prompt. By default (**`--link`**) the prompt hands the agent the PR reference and tells it to
    fetch the PR itself (`gh pr view`/`gh pr diff`) and read the changed files in context — so it reviews
    the *whole* PR, not just a diff snapshot. The diff is also embedded as a **fallback** so a reviewer
@@ -336,18 +351,85 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 > and read the fresh round. A round that actually dispatched reviewers **consumes one cap slot even when it
 > ends in `3`** (a persistently flaky reviewer must still hit the cap) — a round where *nobody* ran does not.
 
+### A note on `PATH`
+
+Both scripts **refuse to start** (exit `2`) if any `PATH` entry resolves inside the repository being
+reviewed — a `.` entry, a repo-local `bin/`, or a symlink to either. Everything the relay runs (`gh`,
+`git`, `timeout`, `node`, …) comes from `PATH`, so a repo-controlled entry means the branch under
+review chooses those binaries. If you see that error, take the entry out of `PATH`.
+
+One limit worth knowing: the check cannot cover the *interpreter*. `#!/usr/bin/env bash` has already
+picked a `bash` through `PATH` before the first line runs. Nothing a script does can fix that — if
+`PATH` points into an untrusted checkout, every command you type is affected, not just this one.
+
+### `review-local` exit codes
+
+`review-local` follows the same fail-closed idea as the relay, on a smaller surface:
+
+| Code | Meaning |
+|------|---------|
+| `0` | every dispatched reviewer produced a review |
+| `3` | a reviewer produced nothing usable (empty / whitespace-only / timed out / non-zero), **or** an explicitly requested reviewer was missing, **or** no reviewer ran at all |
+| `1`/`2` | precondition or usage error (not a repo, unknown base ref, bad argument, unusable `PR_RELAY_OPENCODE_BIN`) |
+
 ## 📋 Notes & caveats
 
-- **Read-only:** reviewers never modify code. They run with `codex exec -s read-only`,
-  `claude -p` (no auto-approve), `cursor-agent -p --trust --mode=ask` (trust the workspace to read it, but
-  keep the agent in Q&A/read-only mode), `agy --dangerously-skip-permissions -p` (skips interactive
-  permission prompts; the prompt itself is read-only), and `opencode run --dangerously-skip-permissions` (skips permission prompts).
+- **⚠️ Only the OpenCode reviewer is enforced read-only.** The others are asked not to modify
+  anything and normally don't — but a prompt is not a boundary, and the thing they are reading is
+  exactly what would try to argue them out of one. They all predate the OpenCode work and are
+  documented rather than quietly changed: tightening any of them affects that agent's reviews and
+  belongs in its own PR, where the effect can be tested.
+  - **Codex** — `pr-review-relay` invokes it as `codex exec -s danger-full-access`, so it can write
+    files and run commands while reading a diff an untrusted contributor wrote. (`review-local` uses
+    `-s read-only`, so the two disagree with each other.)
+  - **Antigravity** — `agy --dangerously-skip-permissions -p` auto-approves permissions. The prompt
+    asks it not to modify anything, but a prompt is not a boundary, and the content it is reading is
+    exactly what would try to talk it out of one.
+  - **Claude** — `claude -p` honours permission rules from `settings.json`, and the relay runs inside
+    the checkout, so a PR-controlled `.claude/settings.json` can pre-authorise Bash or Write. No
+    enforced deny-list is supplied on the command line.
+  - **Cursor** — `cursor-agent -p --trust --mode=ask` keeps it in Q&A mode, which is the closest to a
+    real constraint of the three, but it is still the agent's own mode rather than an enforced policy.
+- **OpenCode is the exception, and it is enforced:** `opencode --pure run` with a primary agent the
+  relay defines itself and an inline default-deny policy. `--pure` matters — it stops external plugins,
+  which execute at startup regardless of permissions.
+- **OpenCode read-only is enforced by config, not by the agent name.** Selecting a built-in agent is *not* a
+  sandbox — their permissions are user-configurable, and `agent.plan.mode: "subagent"` in a config makes
+  OpenCode fall back to `build` with *that* agent's rules (verified: shell came back). The relay
+  therefore defines and selects its own primary agent, whose mode and permissions are both fixed. Each invocation sets
+  `OPENCODE_CONFIG_CONTENT` (a runtime override that outranks your own `opencode.json`) to a
+  **deny-everything** policy — `"*": "deny"`, no allowlist (see the next bullet) — repeated on the
+  relay's own agent, because OpenCode applies agent-scoped permissions
+  *after* the global ones, so the agent actually in use has to carry the policy too. It also runs with `--pure` so external plugins, which execute at startup, don't load.
+  Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
+- **The OpenCode reviewer gets no tools at all.** Not "no writes" — nothing: `"*": "deny"`, with no
+  allowlist. It does not need any, because the diff reaches it as prompt content via `-f` rather than
+  through a tool call; a review of the attachment is identical with every tool denied. Allowing reads
+  was the last exfiltration route, since they were not confined to the attachment and the relay
+  **posts** the result: a prompt-injected diff could have had the model read a credential and quote it
+  into a public PR comment.
+- **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
+  a file instead, in both modes and at any size. Narrower designs were tried first and each was demonstrably
+  bypassable: the original `--dangerously-skip-permissions` (an undocumented alias for `--auto`, so it
+  approved everything); selecting the built-in `plan` agent (its permissions and even its mode are
+  user-configurable — it ran `id`, and redirecting it to a subagent fell back to `build`); allowing just `gh pr view` / `gh pr diff` (defeated by shell
+  redirection — `gh pr view N > file` matches the allowed prefix and writes); omitting the
+  policy on the agent actually selected (agent-scoped permissions apply after the global ones); and denying tools by
+  name (anything unnamed — custom tools, MCP servers — stays allowed by default). The full list, with
+  what each failed on, is in `lib-opencode.sh`.
+- **OpenCode runs outside the repository, and therefore reviews the diff alone.** It does not browse
+  the checkout the way the other reviewers do. This is not a limitation we could avoid: OpenCode reads
+  the project `opencode.json` from its working directory, and an `mcp` server declared there is
+  **launched at startup, before any tool permission applies** — so a pull request that adds an
+  `opencode.json` would get arbitrary command execution simply by being reviewed. Verified: a planted
+  MCP entry ran its command with `"*": "deny"` and `--pure` both in force. Neither the permission
+  policy nor `--pure` (plugins only) prevents it; not reading attacker-authored config does.
 - **Cursor needs `--trust`** in headless mode or it blocks on a workspace-trust prompt — handled.
 - **Cursor is slower/chattier** than Codex; its comment may land a bit later.
 - **Link mode is the default:** each reviewer fetches the PR itself and reads the changed files in
   context — deeper than a diff snapshot. The diff is embedded as a fallback, so a sandbox that can't run
   `gh` (notably `codex exec --read-only`) still reviews the diff instead of returning nothing. Pass
-  `--diff` for the older diff-only behaviour. Either way the agent runs in the repo.
+  `--diff` for the older diff-only behaviour. Either way the agent runs in the repo — except OpenCode, which is deliberately launched outside it (see the caveats above).
 - **Verify against sources** with `--context-file <path>`: the document is prepended to every
   reviewer's prompt, so they cross-check the PR against e.g. an official spec or API reference instead
   of relying on memory. The reviewer comment is footnoted with the context file's name.
