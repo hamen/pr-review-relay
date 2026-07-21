@@ -18,7 +18,7 @@
 # put the synthesized work card in the PR description with pr-review-consensus.
 #
 # Usage:
-#   pr-review-relay [--author claude|codex|cursor|antigravity] [--pr <number|url>] \
+#   pr-review-relay [--author claude|codex|cursor|antigravity|opencode|qwen] [--pr <number|url>] \
 #                   [--reviewers claude,codex,cursor,antigravity] [--parallel] \
 #                   (opencode and qwen are also supported, opt-in: name them explicitly)
 #                   [--context-file <path>] [--diff] [--dry-run]
@@ -287,7 +287,7 @@ review_with() {
   case "$name" in
     claude)       out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>"$errf"); rc=$?;;
     codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access "$PROMPT" 2>"$errf"); rc=$?;;
-    qwen)         out=$(printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
+    qwen)         out=$(printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)
       if [ "$MODE" = diff ]; then
         out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf")

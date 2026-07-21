@@ -9,7 +9,7 @@
 # purely so you get a clean, reviewed branch before you open the PR.
 #
 # Usage:
-#   review-local [--author claude|codex|cursor|antigravity|opencode] [--base <ref>] \
+#   review-local [--author claude|codex|cursor|antigravity|opencode|qwen] [--base <ref>] \
 #                [--reviewers claude,codex,cursor,antigravity] [--parallel]
 #                (opencode and qwen are also supported, opt-in: name them explicitly)
 #   (run from inside the repo, on the branch you want reviewed)
@@ -113,7 +113,7 @@ review_with() {
   case "$name" in
     claude)      out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>"$errf"); rc=$?;;
     codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>"$errf"); rc=$?;;
-    qwen)        out=$(printf '%s' "$DIFF" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
+    qwen)        out=$(printf '%s' "$DIFF" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
     antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
     opencode)
