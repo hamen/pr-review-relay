@@ -30,7 +30,7 @@ are *asked* to be read-only; only the OpenCode one has that enforced — see
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
    claude -p                       codex exec                      cursor-agent -p
-   agy -p            opencode --pure run (own agent)      qwen --safe-mode -p       │
+   agy -p          opencode --pure run (own agent)     qwen --safe-mode --approval-mode yolo -p
          └───────────────────────────────┴───────────────────────────────┘
                                          │
                               each posts its review as a PR comment
@@ -217,7 +217,7 @@ Flags:
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` and `qwen` are supported but opt-in — name them explicitly to include them. |
 | `--parallel` | Run the reviewers concurrently. |
 
-Reviewers that read stdin (`claude` / `codex` / `cursor`) get the diff piped in, so a large branch
+Reviewers that read stdin (`claude` / `codex` / `cursor` / `qwen`) get the diff piped in, so a large branch
 scales the same way `pr-review-relay --diff` does; `agy` takes it as an argument (it doesn't read a
 prompt from stdin); `opencode` receives it as an attached file and reviews it in isolation from the
 repo (see the OpenCode note under [Notes & caveats](#-notes--caveats)). Nothing is pushed or posted

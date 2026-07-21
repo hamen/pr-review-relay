@@ -801,6 +801,28 @@ qw_assert "disables checkout customizations with --safe-mode" has "--safe-mode"
 qw_assert "keeps gh via --approval-mode yolo (not plan)"      has "--approval-mode yolo"
 qw_assert "never runs in the unconfined default approval mode" hasnt "--approval-mode default"
 
+# The same qwen contract for review-local: the two scripts drift exactly when a
+# security-relevant flag is asserted on only one of them. Without this, dropping
+# --safe-mode in review-local would leave every test green.
+if [ -f "$RL" ]; then
+  # Reuse the RLREPO git fixture built in the review-local block above; rebuild it
+  # if that block was skipped (review-local absent → we wouldn't be here anyway).
+  if [ ! -d "${RLREPO:-}/.git" ]; then
+    RLREPO="$WORK/rlrepo"; mkdir -p "$RLREPO"
+    ( cd "$RLREPO" && git init -q . && git config user.email t@t && git config user.name t \
+        && echo base > f.txt && git add f.txt && git commit -qm base && git branch -M mainline \
+        && git checkout -qb feature && echo changed > f.txt && git add f.txt && git commit -qm change ) >/dev/null 2>&1
+  fi
+  rm -f "$QW_ARGV"
+  ( cd "$RLREPO" && env PATH="$BINQW:/usr/bin:/bin" QW_ARGV_FILE="$QW_ARGV" \
+      bash "$RL" --base mainline --reviewers qwen >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 0 ] && [ -s "$QW_ARGV" ]; then echo "  ok   [0] review-local dispatches qwen with the enforced flags"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc] review-local qwen argv contract not met (argv empty=$([ -s "$QW_ARGV" ] || echo yes))"; FAIL=$((FAIL+1)); fi
+  qw_assert "review-local: qwen keeps --safe-mode"          has "--safe-mode"
+  qw_assert "review-local: qwen keeps --approval-mode yolo" has "--approval-mode yolo"
+fi
+
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

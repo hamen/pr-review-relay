@@ -102,7 +102,7 @@ P
 
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; qwen) echo qwen;; *) echo "";; esac; }
 
-# Agents that read stdin (claude / codex / cursor) get the diff piped in, so a
+# Agents that read stdin (claude / codex / cursor / qwen) get the diff piped in, so a
 # large diff never hits the process argv limit (Windows caps it at ~32K chars).
 # agy doesn't read a prompt from stdin, so it takes prompt+diff as an argument.
 # opencode takes the diff as an ATTACHED FILE (-f) instead, which keeps a large
