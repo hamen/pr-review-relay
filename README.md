@@ -11,6 +11,7 @@
 [![Works with Cursor](https://img.shields.io/badge/works%20with-Cursor-0098FF?logo=cursor&logoColor=white)](https://cursor.com)
 [![Works with Antigravity](https://img.shields.io/badge/works%20with-Antigravity-orange)](https://antigravity.dev)
 [![Works with OpenCode](https://img.shields.io/badge/works%20with-OpenCode-white)](https://opencode.ai)
+[![Works with Qwen Code](https://img.shields.io/badge/works%20with-Qwen%20Code-yellow)](https://qwen.ai/qwencode)
 
 **Hand a pull request off to your *other* AI coding agents for an automated cross-review.**
 
@@ -29,7 +30,7 @@ are *asked* to be read-only; only the OpenCode one has that enforced — see
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
    claude -p                       codex exec                      cursor-agent -p
-   agy -p                  opencode --pure run (own agent)                      │
+   agy -p          opencode --pure run (own agent)     qwen --safe-mode --approval-mode yolo -p
          └───────────────────────────────┴───────────────────────────────┘
                                          │
                               each posts its review as a PR comment
@@ -64,6 +65,12 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
   - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run` with a read-only agent the relay defines
     (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
+  - 🟡 [`qwen`](https://qwen.ai/qwencode) (Qwen Code CLI) — uses `qwen --safe-mode --approval-mode yolo -p`
+    (`--safe-mode` ignores any hooks/extensions/skills/MCP/project config in the reviewed checkout — see
+    [Notes & caveats](#-notes--caveats)). Auth is the CLI's own: sign in with the free Qwen OAuth tier, or
+    point it at a paid Qwen Cloud / DashScope OpenAI-compatible endpoint via `~/.qwen/.env`
+    (`QWEN_DEFAULT_AUTH_TYPE`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). Opt-in: name it
+    explicitly in `--reviewers`.
 
 You only need the agents you actually want as reviewers.
 
@@ -163,7 +170,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that opened the PR. It auto-excludes itself from reviewing. |
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` is supported but opt-in — name it explicitly to include it. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` and `qwen` are supported but opt-in — name them explicitly to include them. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
 | `--link` *(default)* | Hand reviewers the PR reference; each fetches it itself (`gh pr view`/`gh pr diff`) and reads the full files in context. The diff is also embedded as a fallback so a reviewer whose sandbox can't run `gh` (e.g. `codex exec --read-only`) still reviews something — **but only when the diff is under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000).** Above that the fallback is omitted so a huge inline diff can't blow past an agent's prompt limit and make it return empty; reviewers just fetch the PR via `gh`. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
@@ -207,10 +214,10 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that wrote the branch. It auto-excludes itself from reviewing. |
 | `--base <ref>` | Ref to diff against. Default: `main`. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` is supported but opt-in — name it explicitly to include it. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` and `qwen` are supported but opt-in — name them explicitly to include them. |
 | `--parallel` | Run the reviewers concurrently. |
 
-Reviewers that read stdin (`claude` / `codex` / `cursor`) get the diff piped in, so a large branch
+Reviewers that read stdin (`claude` / `codex` / `cursor` / `qwen`) get the diff piped in, so a large branch
 scales the same way `pr-review-relay --diff` does; `agy` takes it as an argument (it doesn't read a
 prompt from stdin); `opencode` receives it as an attached file and reviews it in isolation from the
 repo (see the OpenCode note under [Notes & caveats](#-notes--caveats)). Nothing is pushed or posted
@@ -238,6 +245,13 @@ instructions file (these are global, so they apply in every repo):
 
 **⚪ OpenCode** — `~/.opencode/AGENTS.md`:
 > After you open a Pull Request, run `pr-review-relay --author opencode`.
+
+**🟡 Qwen Code** — `~/.qwen/QWEN.md`:
+> After you open a Pull Request, run `pr-review-relay --author qwen`.
+
+> **Note:** as a *reviewer*, qwen runs `--safe-mode`, so it ignores this `QWEN.md` (and any other
+> checkout config) — the snippet only wires the *authoring* role. See the caveat under
+> [Notes & caveats](#-notes--caveats).
 
 Now whoever opens the PR, the others review it — no manual step.
 
@@ -390,6 +404,16 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
     enforced deny-list is supplied on the command line.
   - **Cursor** — `cursor-agent -p --trust --mode=ask` keeps it in Q&A mode, which is the closest to a
     real constraint of the three, but it is still the agent's own mode rather than an enforced policy.
+  - **Qwen** — `qwen --safe-mode --approval-mode yolo -p`. `yolo` auto-approves shell/write with no
+    sandbox, the same unconfined posture as Codex and Antigravity above. What it adds over them is
+    `--safe-mode`: Qwen Code otherwise loads `.qwen/settings.json` / `QWEN.md` / hooks / extensions /
+    skills / MCP servers from the checkout it runs in — the same PR-controlled injection surface the
+    Claude bullet warns about — and `--safe-mode` turns all of that off, so a reviewed branch can't ship
+    config that executes during review. `yolo` (rather than `--approval-mode plan`) is kept so the
+    reviewer can still run `gh` to fetch the PR in link mode; for stricter isolation, run it under a
+    sandbox (`--sandbox` / `QWEN_SANDBOX`) if your machine has one configured. The relay sets
+    `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` on the invocation purely to keep the yolo-no-sandbox banner off
+    the captured review output — it changes nothing about what the reviewer may do.
 - **OpenCode is the exception, and it is enforced:** `opencode --pure run` with a primary agent the
   relay defines itself and an inline default-deny policy. `--pure` matters — it stops external plugins,
   which execute at startup regardless of permissions.

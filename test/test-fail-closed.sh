@@ -47,7 +47,7 @@ exit 0
 GH
 chmod +x "$BIN/gh"
 
-# --- stub: agents (claude / codex / cursor-agent / agy / opencode) -----------
+# --- stub: agents (claude / codex / cursor-agent / agy / opencode / qwen) ----
 make_agent() {
   cat > "$BIN/$1" <<AG
 #!/usr/bin/env bash
@@ -62,7 +62,7 @@ exit 0
 AG
   chmod +x "$BIN/$1"
 }
-for a in claude codex cursor-agent agy opencode; do make_agent "$a"; done
+for a in claude codex cursor-agent agy opencode qwen; do make_agent "$a"; done
 
 # --- test harness ------------------------------------------------------------
 PASS=0; FAIL=0
@@ -127,6 +127,26 @@ else
 fi
 
 runx 0 "sequential run (no --parallel) → clean pass"    --reviewers claude,codex
+
+# --- qwen: opt-in reviewer dispatch (generic stub) ---------------------------
+# qwen is opt-in like opencode: absent from the default set, dispatched only when
+# named. These exercise the new dispatch path through the generic stub; the exact
+# argv (incl. the security-relevant --safe-mode) is asserted separately below.
+runx 0 "qwen named explicitly → runs and passes"        --reviewers claude,qwen --parallel
+runx 0 "qwen deduped like any reviewer → clean pass"    --reviewers qwen,qwen --parallel
+# qwen empty / non-zero exit must fail the round, same as the built-in reviewers.
+qwen_env_run() { # <expected> <desc> <VAR=val>
+  local expect="$1" desc="$2" envassign="$3"
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" "$envassign" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,qwen --parallel >/dev/null 2>&1
+  local rc=$?
+  if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
+}
+qwen_env_run 3 "qwen returns empty → not clean"         FAIL_EMPTY=qwen
+qwen_env_run 3 "qwen exits non-zero (truncated) → not clean" FAIL_RC=qwen
+qwen_env_run 3 "qwen whitespace-only review → not valid"     WS_ONLY=qwen
 
 # default set with only a subset of CLIs installed → skip the missing ones, exit 0.
 # PATH excludes the real agent dir; BIN2 has gh+claude+codex (+node for the wrapper).
@@ -732,6 +752,75 @@ if [ -f "$RL" ]; then
   fi
 else
   echo "  ok   [-] review-local not present (skip)"; PASS=$((PASS+1))
+fi
+
+# --- qwen invocation contract ------------------------------------------------
+# Assert the ARGV the relay builds for qwen, not just that a review was posted —
+# the generic stub accepts anything, so it would pass against a dropped flag too.
+# The security-relevant part is --safe-mode: without it, a reviewed PR's
+# .qwen/settings.json / QWEN.md / hooks / extensions / MCP load from the checkout
+# and execute before the review runs. --approval-mode yolo (not plan) is what lets
+# the reviewer still run `gh` in link mode. This guards both against regression.
+QW_ARGV="$WORK/qw_argv"
+make_strict_qwen() { # $1 = dir to install the stub into
+  mkdir -p "$1"
+  cat > "$1/qwen" <<'QW'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${QW_ARGV_FILE:?}"
+case " $* " in *" --safe-mode "*) ;; *) echo "missing --safe-mode: $*" >&2; exit 64;; esac
+case " $* " in *" --approval-mode yolo "*) ;; *) echo "missing --approval-mode yolo: $*" >&2; exit 64;; esac
+case " $* " in *" -p "*) ;; *) echo "missing -p prompt flag: $*" >&2; exit 64;; esac
+echo "LGTM from qwen."
+exit 0
+QW
+  chmod +x "$1/qwen"
+}
+# A dedicated PATH with a strict qwen plus the helpers the relay needs (gh, node,
+# and claude as the co-reviewer). node must be reachable or the comment wrapper
+# fails and the relay returns 3 — green locally, red on CI (setup-node installs
+# outside /usr/bin). Symlink it in, as the opencode off-PATH test does.
+BINQW="$WORK/binqw"; mkdir -p "$BINQW"
+for t in gh claude; do ln -sf "$BIN/$t" "$BINQW/$t"; done
+ln -sf "$(command -v node)" "$BINQW/node" 2>/dev/null
+make_strict_qwen "$BINQW"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$QW_ARGV"
+env PATH="$BINQW:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  QW_ARGV_FILE="$QW_ARGV" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,qwen >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ] && [ -s "$QW_ARGV" ]; then echo "  ok   [0] qwen dispatched with the enforced flags"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] qwen argv contract not met (argv empty=$([ -s "$QW_ARGV" ] || echo yes))"; FAIL=$((FAIL+1)); fi
+qw_assert() { # <desc> <has|hasnt> <pattern>
+  local desc="$1" mode="$2" pat="$3" got; got="$(cat "$QW_ARGV" 2>/dev/null || true)"
+  case "$mode" in
+    has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1)); else echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1)); fi;;
+    hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1)); else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
+  esac
+}
+qw_assert "disables checkout customizations with --safe-mode" has "--safe-mode"
+qw_assert "keeps gh via --approval-mode yolo (not plan)"      has "--approval-mode yolo"
+qw_assert "never runs in the unconfined default approval mode" hasnt "--approval-mode default"
+
+# The same qwen contract for review-local: the two scripts drift exactly when a
+# security-relevant flag is asserted on only one of them. Without this, dropping
+# --safe-mode in review-local would leave every test green.
+if [ -f "$RL" ]; then
+  # Reuse the RLREPO git fixture built in the review-local block above; rebuild it
+  # if that block was skipped (review-local absent → we wouldn't be here anyway).
+  if [ ! -d "${RLREPO:-}/.git" ]; then
+    RLREPO="$WORK/rlrepo"; mkdir -p "$RLREPO"
+    ( cd "$RLREPO" && git init -q . && git config user.email t@t && git config user.name t \
+        && echo base > f.txt && git add f.txt && git commit -qm base && git branch -M mainline \
+        && git checkout -qb feature && echo changed > f.txt && git add f.txt && git commit -qm change ) >/dev/null 2>&1
+  fi
+  rm -f "$QW_ARGV"
+  ( cd "$RLREPO" && env PATH="$BINQW:/usr/bin:/bin" QW_ARGV_FILE="$QW_ARGV" \
+      bash "$RL" --base mainline --reviewers qwen >/dev/null 2>&1 )
+  rc=$?
+  if [ "$rc" = 0 ] && [ -s "$QW_ARGV" ]; then echo "  ok   [0] review-local dispatches qwen with the enforced flags"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc] review-local qwen argv contract not met (argv empty=$([ -s "$QW_ARGV" ] || echo yes))"; FAIL=$((FAIL+1)); fi
+  qw_assert "review-local: qwen keeps --safe-mode"          has "--safe-mode"
+  qw_assert "review-local: qwen keeps --approval-mode yolo" has "--approval-mode yolo"
 fi
 
 echo "-------------------------------------------"
