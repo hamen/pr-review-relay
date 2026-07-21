@@ -11,6 +11,7 @@
 [![Works with Cursor](https://img.shields.io/badge/works%20with-Cursor-0098FF?logo=cursor&logoColor=white)](https://cursor.com)
 [![Works with Antigravity](https://img.shields.io/badge/works%20with-Antigravity-orange)](https://antigravity.dev)
 [![Works with OpenCode](https://img.shields.io/badge/works%20with-OpenCode-white)](https://opencode.ai)
+[![Works with Qwen Code](https://img.shields.io/badge/works%20with-Qwen%20Code-yellow)](https://qwen.ai/qwencode)
 
 **Hand a pull request off to your *other* AI coding agents for an automated cross-review.**
 
@@ -64,6 +65,10 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
   - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run` with a read-only agent the relay defines
     (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
+  - 🟡 [`qwen`](https://qwen.ai/qwencode) (Qwen Code CLI) — uses `qwen --approval-mode yolo -p`. Auth is the
+    CLI's own: sign in with the free Qwen OAuth tier, or point it at a paid Qwen Cloud / DashScope
+    OpenAI-compatible endpoint via `~/.qwen/.env` (`QWEN_DEFAULT_AUTH_TYPE`, `OPENAI_BASE_URL`,
+    `OPENAI_API_KEY`, `OPENAI_MODEL`). Opt-in: name it explicitly in `--reviewers`.
 
 You only need the agents you actually want as reviewers.
 

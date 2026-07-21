@@ -6,6 +6,14 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Added
+
+- **`qwen` reviewer (Qwen Code CLI).** A sixth supported reviewer, opt-in like `opencode`: name it in
+  `--reviewers` (e.g. `--reviewers claude,qwen`). It runs headless via `qwen --approval-mode yolo -p`
+  in both `pr-review-relay` and `review-local`, and posts collapsed with a 🟡 marker. Auth is the CLI's
+  own — the free Qwen OAuth tier or a paid Qwen Cloud / DashScope OpenAI-compatible endpoint configured
+  in `~/.qwen/.env`. Not in the default reviewer set, so existing runs are unaffected.
+
 ### Fixed
 
 - **The `opencode` reviewer never ran** — because the binary was never found. OpenCode installs to
