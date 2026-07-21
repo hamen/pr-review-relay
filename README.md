@@ -246,6 +246,13 @@ instructions file (these are global, so they apply in every repo):
 **⚪ OpenCode** — `~/.opencode/AGENTS.md`:
 > After you open a Pull Request, run `pr-review-relay --author opencode`.
 
+**🟡 Qwen Code** — `~/.qwen/QWEN.md`:
+> After you open a Pull Request, run `pr-review-relay --author qwen`.
+
+> **Note:** as a *reviewer*, qwen runs `--safe-mode`, so it ignores this `QWEN.md` (and any other
+> checkout config) — the snippet only wires the *authoring* role. See the caveat under
+> [Notes & caveats](#-notes--caveats).
+
 Now whoever opens the PR, the others review it — no manual step.
 
 ## 🔄 Closing the loop: read the reviews and iterate
@@ -404,7 +411,9 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
     Claude bullet warns about — and `--safe-mode` turns all of that off, so a reviewed branch can't ship
     config that executes during review. `yolo` (rather than `--approval-mode plan`) is kept so the
     reviewer can still run `gh` to fetch the PR in link mode; for stricter isolation, run it under a
-    sandbox (`--sandbox` / `QWEN_SANDBOX`) if your machine has one configured.
+    sandbox (`--sandbox` / `QWEN_SANDBOX`) if your machine has one configured. The relay sets
+    `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` on the invocation purely to keep the yolo-no-sandbox banner off
+    the captured review output — it changes nothing about what the reviewer may do.
 - **OpenCode is the exception, and it is enforced:** `opencode --pure run` with a primary agent the
   relay defines itself and an inline default-deny policy. `--pure` matters — it stops external plugins,
   which execute at startup regardless of permissions.
