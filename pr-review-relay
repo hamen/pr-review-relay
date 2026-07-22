@@ -145,18 +145,26 @@ DIFF=$(gh pr diff "$PR" 2>/dev/null)
 # The speed win is separate: when the current checkout PROVABLY is this PR's head AND is
 # clean, we tell reviewers to read the changed files straight off disk instead of running
 # `gh` themselves. Each `gh` an agentic reviewer runs is a full LLM round-trip — the main
-# cause of slow-model timeouts — so removing them is the whole point. It's gated hard:
-#   - same commit (`git rev-parse HEAD` == the PR head), and
-#   - a clean worktree (no staged/unstaged/untracked changes),
-# so a reviewer reading files on disk can never see content that isn't in the PR. If either
-# fails (foreign/stale/dirty checkout, or run from outside the repo), reviewers are told to
-# fetch via `gh` as before. `gh` also still POSTS the reviews (the consensus trail).
+# cause of slow-model timeouts — so removing them is the whole point.
+# local_context_ok() is the single eligibility gate — used both here and at the end of the
+# round, so the two invariants can't drift. It is FAIL-CLOSED: any git command that ERRORS
+# (not just prints) makes it false, so a broken/foreign/dirty checkout is never trusted.
+#   - inside a git work tree, and
+#   - HEAD is exactly the PR head, and
+#   - the tree is clean (no staged/unstaged/untracked changes).
+# When it's false, reviewers are told to fetch via `gh` as before. `gh` also still POSTS the
+# reviews (the consensus trail).
+local_context_ok() {
+  [ -n "$HEAD_SHA" ] || return 1
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  local _h _st
+  _h=$(git rev-parse HEAD 2>/dev/null) || return 1
+  [ "$_h" = "$HEAD_SHA" ] || return 1
+  _st=$(git status --porcelain 2>/dev/null) || return 1   # git status errored → not eligible
+  [ -z "$_st" ]                                            # any output → dirty → not eligible
+}
 LOCAL_CONTEXT=0
-if [ -n "$HEAD_SHA" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-   && [ "$(git rev-parse HEAD 2>/dev/null || true)" = "$HEAD_SHA" ] \
-   && [ -z "$(git status --porcelain 2>/dev/null)" ]; then
-  LOCAL_CONTEXT=1
-fi
+local_context_ok && LOCAL_CONTEXT=1
 [ "$LOCAL_CONTEXT" = 1 ] && _ctx="reviewers read files locally" || _ctx="reviewers fetch via gh"
 echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes ($_ctx)"
 
@@ -309,8 +317,8 @@ if [ "$MODE" = link ]; then
     fi
   else
     if [ "$LOCAL_CONTEXT" = 1 ]; then
-      echo "  (diff ${_diff_bytes}B > ${LINK_DIFF_FALLBACK_MAX_BYTES}B — omitting inline; reviewers read files locally and can run \`gh pr diff $PR\` for the hunks)"
-      PROMPT=$(printf '%s\n\n---\nThe change is large, so it is not inlined. The changed files are on disk in this checkout — read them directly. For the full hunks: gh pr diff %s\n' "$PROMPT" "$PR")
+      echo "  (diff ${_diff_bytes}B > ${LINK_DIFF_FALLBACK_MAX_BYTES}B — omitting inline; reviewers read files locally, may run \`gh pr diff $PR\` for the hunks)"
+      PROMPT=$(printf '%s\n\n---\nThe change is large, so it is not inlined here. The changed files are on disk in this checkout — read them directly. If you need the exact hunks, you MAY run just `gh pr diff %s` to get them — that single command is allowed as an exception to the "do not run gh" note above; do not fetch anything else.\n' "$PROMPT" "$PR")
     else
       echo "  (diff ${_diff_bytes}B > ${LINK_DIFF_FALLBACK_MAX_BYTES}B — omitting inline fallback; reviewers fetch the PR via gh)"
     fi
@@ -496,18 +504,11 @@ if [ "$HEAD_SHA" != "$NEW_SHA" ]; then
   exit 3
 fi
 # In local-context mode the reviewers read the working tree, so a local commit, checkout, or
-# edit during the round would make their reviews stale — verify the local HEAD stayed put AND
-# the tree is still clean, the same invariant we required to enable it.
-if [ "$LOCAL_CONTEXT" = 1 ]; then
-  LOCAL_END=$(git rev-parse HEAD 2>/dev/null || true)
-  if [ -z "$LOCAL_END" ] || [ "$LOCAL_END" != "$HEAD_SHA" ]; then
-    echo "✖ Local HEAD moved during the round (${HEAD_SHA:0:7} → ${LOCAL_END:-unknown}): reviews are stale. Re-run." >&2
-    exit 3
-  fi
-  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-    echo "✖ Working tree changed during the round (now dirty): reviewers may have read files not in the PR. Re-run." >&2
-    exit 3
-  fi
+# edit during the round would make their reviews stale. Re-assert the SAME eligibility gate
+# (HEAD unchanged AND still clean) with the same fail-closed helper.
+if [ "$LOCAL_CONTEXT" = 1 ] && ! local_context_ok; then
+  echo "✖ Local checkout changed during the round (HEAD moved or working tree now dirty): reviewers may have read code not in the PR. Re-run." >&2
+  exit 3
 fi
 
 if [ "$ran" = 0 ]; then

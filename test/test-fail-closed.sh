@@ -22,10 +22,9 @@ cat > "$BIN/gh" <<'GH'
 #!/usr/bin/env bash
 case "$1 $2" in
   "pr view")
-    if printf '%s\n' "$@" | grep -q baseRefName; then echo "${GH_BASE_REF:-}"
-    elif printf '%s\n' "$@" | grep -q headRefOid; then
-      # Local-mode tests pin the PR head to a real local commit so the relay reads the
-      # diff from git instead of `gh pr diff`.
+    if printf '%s\n' "$@" | grep -q headRefOid; then
+      # Local-context tests pin the PR head to the test repo's real HEAD so the
+      # LOCAL_CONTEXT gate (HEAD == PR head, clean tree) passes.
       if [ -n "${GH_LOCAL_HEAD:-}" ]; then echo "$GH_LOCAL_HEAD"; exit 0; fi
       c=$(cat "$GH_SHA_COUNTER" 2>/dev/null || echo 0); c=$((c+1)); echo "$c" > "$GH_SHA_COUNTER"
       # Simulate a failed SHA read (empty output) at start (call 1) or end (call 2).
@@ -870,6 +869,13 @@ lc_run GH_LOCAL_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 if grep -q 'reviewers fetch via gh' <<< "$out"; then
   echo "  ok   [-] a non-matching checkout falls back to gh"; PASS=$((PASS+1))
 else echo "  FAIL non-matching checkout did not fall back to gh"; FAIL=$((FAIL+1)); fi
+# end-of-round re-check: if a reviewer dirties the working tree DURING the round (local
+# context was enabled on a clean tree), the reviews are stale → exit 3.
+printf '#!/usr/bin/env bash\necho scratch >> file.txt\necho "LGTM"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
+lc_run GH_LOCAL_HEAD="$LHEAD"
+[ "$rc" = 3 ] && { echo "  ok   [3] a mid-round working-tree change fails the round (stale)"; PASS=$((PASS+1)); } \
+             || { echo "  FAIL [got $rc, want 3] mid-round dirty tree not caught"; FAIL=$((FAIL+1)); }
+( cd "$LREPO" && git checkout -q -- file.txt )   # clean up the scratch write
 printf '#!/usr/bin/env bash\necho "LGTM"\n' > "$BIN/claude"; chmod +x "$BIN/claude"   # restore
 
 echo "-------------------------------------------"
