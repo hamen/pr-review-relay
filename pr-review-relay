@@ -37,17 +37,32 @@
 # named explicitly via --reviewers are required to be present.
 set -uo pipefail
 
-# SCRIPT_DIR is computed with BUILTINS ONLY (case/cd/pwd). The obvious
-# `$(cd "$(dirname "$0")" && pwd)` resolves `dirname` through PATH — before the PATH
-# guard below has had a chance to run — so a repo-local `dirname` would decide which
-# library this script sources. Sourcing itself takes a path and never consults PATH.
+# SCRIPT_DIR must be the directory of the REAL script, so the sibling library and helper
+# resolve even when the script is invoked through a symlink (e.g. ~/.local/bin/pr-review-relay
+# -> the repo checkout). `pwd -P` resolves a symlinked *directory* but NOT a symlinked
+# *script file*, so we first walk the script's own symlink chain to the real file.
+# `dirname`/`$0` are still avoided (they'd resolve through PATH before the PATH guard runs,
+# letting a repo-local tool pick which library we source). A builtin can't read a symlink
+# target, so readlink is used — but at an ABSOLUTE path, never via PATH, which keeps that
+# guarantee. The loop only runs when the script is actually a symlink, and is bounded
+# against a symlink cycle.
 _self="${BASH_SOURCE[0]}"
+_rl=/usr/bin/readlink; [ -x "$_rl" ] || _rl=/bin/readlink
+_n=0
+while [ -h "$_self" ] && [ -x "$_rl" ] && [ "$_n" -lt 40 ]; do
+  _n=$((_n + 1))
+  _link="$("$_rl" "$_self" 2>/dev/null)" || break
+  case "$_link" in
+    /*) _self="$_link";;                # absolute symlink target
+    *)  _self="${_self%/*}/$_link";;    # relative target → resolve against the link's dir
+  esac
+done
 case "$_self" in
   */*) SCRIPT_DIR="${_self%/*}";;
   *)   SCRIPT_DIR=".";;
 esac
 SCRIPT_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
-unset _self
+unset _self _rl _n _link
 WRAP_COMMENT="$SCRIPT_DIR/wrap-collapsed-pr-comment.mjs"
 # The OpenCode reviewer lives in a shared lib so its policy cannot drift between
 # this script and review-local — cross-review flagged that duplication repeatedly.

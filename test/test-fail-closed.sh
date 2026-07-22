@@ -823,6 +823,32 @@ if [ -f "$RL" ]; then
   qw_assert "review-local: qwen keeps --approval-mode yolo" has "--approval-mode yolo"
 fi
 
+# --- SCRIPT_DIR follows the script's own symlink to find the sibling lib ------------
+# Regression: invoked through a symlink whose directory has NO lib-opencode.sh next to it
+# (exactly how ~/.local/bin/pr-review-relay -> the repo checkout is installed), the relay
+# must still locate the lib from the REAL script directory. `pwd -P` resolves a symlinked
+# *directory* but not a symlinked *file*, so an earlier version aborted with
+# "missing lib-opencode.sh" for every symlinked install — it broke the tool for anyone
+# not running it from the repo. `--help` sources the lib (relay_print_header lives there)
+# and exits 0 without touching gh, so it's a clean probe.
+SLINK_BIN="$WORK/slinkbin"; mkdir -p "$SLINK_BIN"
+ln -s "$RELAY" "$SLINK_BIN/pr-review-relay"
+if out=$(bash "$SLINK_BIN/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+  echo "  ok   [-] absolute symlink invocation resolves the sibling lib"; PASS=$((PASS+1))
+else
+  echo "  FAIL absolute symlink invocation could not find lib-opencode.sh"; FAIL=$((FAIL+1))
+fi
+# A RELATIVE symlink target must resolve against the LINK's directory, not the cwd.
+REALD="$WORK/real"; mkdir -p "$REALD"
+cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
+LINKD="$WORK/linkbin"; mkdir -p "$LINKD"
+( cd "$LINKD" && ln -s "../real/pr-review-relay" pr-review-relay )
+if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+  echo "  ok   [-] relative symlink resolves against the link's own dir"; PASS=$((PASS+1))
+else
+  echo "  FAIL relative symlink did not resolve the lib"; FAIL=$((FAIL+1))
+fi
+
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]
