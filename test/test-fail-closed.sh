@@ -864,6 +864,17 @@ if out=$(bash "$RLINK/review-local" --help 2>&1) && ! printf '%s' "$out" | grep 
 else
   echo "  FAIL review-local symlink did not resolve the lib"; FAIL=$((FAIL+1))
 fi
+# The other sibling-locating entry points (pr-review-consensus / -collapse-comments) got the
+# same bootstrap; through a symlink they must not die at SCRIPT_DIR resolution. They fail
+# later on missing args/gh — that's fine; we only assert the resolve step itself worked.
+cp "$HERE/../pr-review-consensus" "$HERE/../pr-review-collapse-comments" "$REALD/" 2>/dev/null
+for s in pr-review-consensus pr-review-collapse-comments; do
+  ln -sf "$REALD/$s" "$RLINK/$s"
+  err=$( PATH="$BIN:$PATH" bash "$RLINK/$s" 2>&1 || true )
+  if ! grep -q 'cannot resolve' <<< "$err"; then
+    echo "  ok   [-] $s resolves its own symlink (no SCRIPT_DIR error)"; PASS=$((PASS+1))
+  else echo "  FAIL $s failed to resolve its symlink"; FAIL=$((FAIL+1)); fi
+done
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

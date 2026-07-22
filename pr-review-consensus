@@ -10,7 +10,23 @@
 #   pr-review-consensus --consensus-file path.md --append-original
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the script's own symlink before taking its dir, so a symlinked install
+# (~/.local/bin/pr-review-consensus -> the repo) still finds its siblings. Same block as in
+# pr-review-relay / review-local — keep them in sync. See pr-review-relay for the rationale.
+_self="${BASH_SOURCE[0]}"
+_rl=/usr/bin/readlink; [ -x "$_rl" ] || _rl=/bin/readlink
+_n=0
+while [ -h "$_self" ] && [ -x "$_rl" ] && [ "$_n" -lt 40 ]; do
+  _n=$((_n + 1)); _link="$("$_rl" "$_self" 2>/dev/null)" || break
+  case "$_link" in
+    /*) _self="$_link";;
+    *)  case "$_self" in */*) _self="${_self%/*}/$_link";; *) _self="$_link";; esac;;
+  esac
+done
+if [ -h "$_self" ]; then echo "cannot resolve the script's own symlink: $_self" >&2; exit 1; fi
+case "$_self" in */*) SCRIPT_DIR="${_self%/*}";; *) SCRIPT_DIR=".";; esac
+SCRIPT_DIR="$(cd -- "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
+unset _self _rl _n _link
 COLLAPSE="$SCRIPT_DIR/pr-review-collapse-comments"
 
 PR=""; CONSENSUS_FILE=""; NO_COLLAPSE=0; APPEND_ORIGINAL=0

@@ -37,11 +37,19 @@ while [ -h "$_self" ] && [ -x "$_rl" ] && [ "$_n" -lt 40 ]; do
         esac;;
   esac
 done
+# Fail CLOSED: if it's STILL a symlink, we couldn't resolve it (readlink missing, or a
+# cycle). Do NOT fall through to source a lib next to the *link* — that's the very bug this
+# fixes, and a repo-local lib there would defeat the PATH guard. Error clearly instead.
+if [ -h "$_self" ]; then
+  echo "cannot resolve the script's own symlink (readlink unavailable or a symlink cycle): $_self" >&2
+  exit 1
+fi
 case "$_self" in
   */*) SCRIPT_DIR="${_self%/*}";;
   *)   SCRIPT_DIR=".";;
 esac
-SCRIPT_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
+# `cd --` so a dir that begins with '-' isn't read as an option (or, for '-', as $OLDPWD).
+SCRIPT_DIR="$(cd -- "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
 unset _self _rl _n _link
 # Shared with pr-review-relay so the read-only policy exists in exactly one place.
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
