@@ -6,6 +6,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-22
+
 ### Changed
 
 - **Reviewers read the changed files from the local checkout instead of fetching them via `gh`.** The
