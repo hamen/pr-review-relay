@@ -15,17 +15,42 @@
 #   (run from inside the repo, on the branch you want reviewed)
 set -uo pipefail
 
-# SCRIPT_DIR is computed with BUILTINS ONLY (case/cd/pwd). The obvious
-# `$(cd "$(dirname "$0")" && pwd)` resolves `dirname` through PATH — before the PATH
-# guard below has had a chance to run — so a repo-local `dirname` would decide which
-# library this script sources. Sourcing itself takes a path and never consults PATH.
+# SCRIPT_DIR must be the directory of the REAL script, so the sibling library resolves even
+# when the script is invoked through a symlink (e.g. ~/.local/bin/review-local -> the repo
+# checkout). `pwd -P` resolves a symlinked *directory* but NOT a symlinked *script file*, so
+# we first walk the script's own symlink chain to the real file. `dirname`/`$0` are still
+# avoided (they'd resolve through PATH before the PATH guard runs, letting a repo-local tool
+# pick which library we source). A builtin can't read a symlink target, so readlink is used —
+# but at an ABSOLUTE path, never via PATH, which keeps that guarantee. The loop only runs when
+# the script is actually a symlink, and is bounded against a symlink cycle.
 _self="${BASH_SOURCE[0]}"
+_rl=/usr/bin/readlink; [ -x "$_rl" ] || _rl=/bin/readlink
+_n=0
+while [ -h "$_self" ] && [ -x "$_rl" ] && [ "$_n" -lt 40 ]; do
+  _n=$((_n + 1))
+  _link="$("$_rl" "$_self" 2>/dev/null)" || break
+  case "$_link" in
+    /*) _self="$_link";;                # absolute symlink target
+    *)  case "$_self" in
+          */*) _self="${_self%/*}/$_link";;  # relative target → resolve against the link's dir
+          *)   _self="$_link";;              # bare name (no dir) → target is relative to cwd
+        esac;;
+  esac
+done
+# Fail CLOSED: if it's STILL a symlink, we couldn't resolve it (readlink missing, or a
+# cycle). Do NOT fall through to source a lib next to the *link* — that's the very bug this
+# fixes, and a repo-local lib there would defeat the PATH guard. Error clearly instead.
+if [ -h "$_self" ]; then
+  echo "cannot resolve the script's own symlink (readlink unavailable or a symlink cycle): $_self" >&2
+  exit 1
+fi
 case "$_self" in
   */*) SCRIPT_DIR="${_self%/*}";;
   *)   SCRIPT_DIR=".";;
 esac
-SCRIPT_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
-unset _self
+# `cd --` so a dir that begins with '-' isn't read as an option (or, for '-', as $OLDPWD).
+SCRIPT_DIR="$(cd -- "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
+unset _self _rl _n _link
 # Shared with pr-review-relay so the read-only policy exists in exactly one place.
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
