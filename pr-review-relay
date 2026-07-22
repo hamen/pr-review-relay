@@ -7,11 +7,15 @@
 # NB "read-only" is ENFORCED only for opencode; the others are asked, not confined.
 # See the caveats in the README.
 #
-# By default the reviewers are handed the PR *reference* and fetch it themselves
-# (gh pr view/diff) — they get the full PR: title, body, discussion, and every
-# changed file in context, not just a diff snapshot. Pass --diff for the older
-# diff-on-stdin behaviour. Pass --context-file <path> to prepend a document
-# (docs, specs, API references) that every reviewer must read and verify against.
+# When the relay is run from the PR's own checkout (the usual case — the authoring agent
+# is on that worktree), the diff is read from LOCAL git and reviewers read the changed
+# files straight off disk. No `gh` round-trips to read code we already have — which is far
+# faster, especially for agentic reviewers that otherwise spend an LLM call per fetch. If
+# the local tree isn't the PR head (or we're run from elsewhere), it falls back to handing
+# reviewers the PR *reference* to fetch via `gh pr view/diff`. Either way `gh` still POSTS
+# the reviews — the consensus trail on the PR. Pass --diff for the older diff-on-stdin
+# behaviour. Pass --context-file <path> to prepend a document (docs, specs, API references)
+# that every reviewer must read and verify against.
 #
 # Each review is posted COLLAPSED (<details>/<summary>, forum-style hide/show)
 # so the PR page stays clean — expand a comment to read it. After consensus,
@@ -132,9 +136,31 @@ fi
 # would silently skip) or "."/".." — either would reopen a fail-open hole.
 status_key() { printf 'k_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
 
-DIFF=$(gh pr diff "$PR" 2>/dev/null)
+# Source the diff LOCALLY when the current checkout IS this PR's head — the common case,
+# since the authoring agent runs the relay from the PR's own worktree. Reading the branch
+# from disk (and letting reviewers read local files for context) is far faster than making
+# every agent round-trip to GitHub via `gh`: an agentic reviewer spends one LLM call per
+# fetch, which is what makes slow models time out. `gh` is still used to POST the reviews —
+# the consensus trail on the PR — but not to READ code we already have.
+# We only go local when we can PROVE the local tree is the PR head; otherwise fall back to
+# `gh`, so a stale or foreign checkout is never reviewed in place of the actual PR.
+DIFF=""; DIFF_SOURCE="gh"
+BASE_REF=$(gh pr view "$PR" --json baseRefName -q .baseRefName 2>/dev/null || true)
+if [ -n "$HEAD_SHA" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  LOCAL_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
+  if [ "$LOCAL_HEAD" = "$HEAD_SHA" ] && [ -n "$BASE_REF" ]; then
+    # Make sure the base tip is present to diff against; fetch it quietly if missing.
+    git rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null 2>&1 || git fetch -q origin "$BASE_REF" 2>/dev/null || true
+    if git rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null 2>&1; then
+      # Three-dot = changes on HEAD since it diverged from the base, i.e. exactly the PR diff.
+      DIFF=$(git diff "origin/$BASE_REF...HEAD" 2>/dev/null)
+      [ -n "$DIFF" ] && DIFF_SOURCE="local"
+    fi
+  fi
+fi
+[ "$DIFF_SOURCE" = local ] || DIFF=$(gh pr diff "$PR" 2>/dev/null)
 [ -z "$DIFF" ] && { echo "Empty diff or cannot read PR #$PR."; exit 1; }
-echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes"
+echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes (read from: $DIFF_SOURCE)"
 
 # --- Optional context document prepended to every reviewer's prompt ----------
 CONTEXT_BLOCK=""
@@ -237,6 +263,18 @@ You may read files in the current repo for context, but DO NOT modify anything.
 Be concise. Group findings by severity: Blocker / Should-fix / Nit.
 If it looks good, say so in one line.
 P
+elif [ "$DIFF_SOURCE" = local ]; then
+  # LOCAL mode: the branch is checked out right here, so point reviewers at the code on
+  # disk instead of GitHub. No `gh`, no network round-trips — the whole speed win.
+  read -r -d '' BASE <<P || true
+You are reviewing a code change on the LOCAL branch checked out in the current directory
+(it is PR #$PR in $REPO ${PR_URL:+($PR_URL)}). The complete code is already on disk here.
+Read the files the diff touches — and anything they reference — DIRECTLY from this checkout
+for full context, not just the diff hunks. Do NOT run \`gh\` or fetch anything over the
+network, and do NOT modify anything. Then review for correctness bugs, security issues,
+broken edge cases, and clear design/maintainability problems. Be concise. Group findings by
+severity: Blocker / Should-fix / Nit. If it looks good, say so in one line.
+P
 else
   read -r -d '' BASE <<P || true
 You are reviewing an OPEN pull request: PR #$PR in $REPO ${PR_URL:+($PR_URL)}.
@@ -251,23 +289,31 @@ If it looks good, say so in one line.
 P
 fi
 PROMPT="${CONTEXT_BLOCK}${BASE}"
-# Link mode embeds the diff as a FALLBACK so no reviewer comes back empty if its
-# sandbox can't run `gh`. Capable agents still fetch the
-# full PR per the prompt; this is only a safety net.
-# BUT: a huge inline diff blows past some agents' prompt limits and makes them
-# return empty (observed with codex/antigravity on 100KB+ PRs). Above a size
-# threshold, omit the fallback so the prompt stays small and reviewers fetch the
-# PR themselves via `gh` (the whole point of link mode). Tune via env
-# LINK_DIFF_FALLBACK_MAX_BYTES (default 100000; set 0 to always omit).
+# Embed the diff in the prompt. In LOCAL mode it's the change itself (files are on disk for
+# context); in gh mode it's a FALLBACK so a reviewer whose sandbox can't run `gh` never
+# comes back empty. A huge inline diff blows past some agents' prompt limits and makes them
+# return empty (observed with codex/antigravity on 100KB+ PRs), so above a threshold we omit
+# it — and tell reviewers how to see the whole change WITHOUT the network in local mode
+# (`git diff`) or via `gh` otherwise. Tune via env LINK_DIFF_FALLBACK_MAX_BYTES
+# (default 100000; set 0 to always omit).
 LINK_DIFF_FALLBACK_MAX_BYTES="${LINK_DIFF_FALLBACK_MAX_BYTES:-100000}"
 # Validated: a non-numeric value would blow up in the arithmetic below.
 case "$LINK_DIFF_FALLBACK_MAX_BYTES" in ''|*[!0-9]*) echo "invalid LINK_DIFF_FALLBACK_MAX_BYTES: '$LINK_DIFF_FALLBACK_MAX_BYTES' (want bytes)" >&2; exit 2;; esac
 if [ "$MODE" = link ]; then
   _diff_bytes=$(printf '%s' "$DIFF" | wc -c | tr -d ' ')
   if [ "$_diff_bytes" -le "$LINK_DIFF_FALLBACK_MAX_BYTES" ]; then
-    PROMPT=$(printf '%s\n\n---\n## Fallback: the PR diff\nPrefer fetching the full PR with the `gh` commands above — you get the whole changed files, not just these hunks. If your sandbox cannot run `gh`, review this diff instead so you never return empty:\n\n```diff\n%s\n```\n' "$PROMPT" "$DIFF")
+    if [ "$DIFF_SOURCE" = local ]; then
+      PROMPT=$(printf '%s\n\n---\n## The change (diff)\nThe files are on disk in this checkout — read them for full context. The change itself:\n\n```diff\n%s\n```\n' "$PROMPT" "$DIFF")
+    else
+      PROMPT=$(printf '%s\n\n---\n## Fallback: the PR diff\nPrefer fetching the full PR with the `gh` commands above — you get the whole changed files, not just these hunks. If your sandbox cannot run `gh`, review this diff instead so you never return empty:\n\n```diff\n%s\n```\n' "$PROMPT" "$DIFF")
+    fi
   else
-    echo "  (diff ${_diff_bytes}B > ${LINK_DIFF_FALLBACK_MAX_BYTES}B — omitting inline fallback; reviewers fetch the PR via gh)"
+    if [ "$DIFF_SOURCE" = local ]; then
+      echo "  (diff ${_diff_bytes}B > ${LINK_DIFF_FALLBACK_MAX_BYTES}B — omitting inline; reviewers run \`git diff origin/$BASE_REF...HEAD\` locally)"
+      PROMPT=$(printf '%s\n\n---\nThe change is large, so it is not inlined. See it locally (no network) with:\n  git diff origin/%s...HEAD\n' "$PROMPT" "$BASE_REF")
+    else
+      echo "  (diff ${_diff_bytes}B > ${LINK_DIFF_FALLBACK_MAX_BYTES}B — omitting inline fallback; reviewers fetch the PR via gh)"
+    fi
   fi
 fi
 
@@ -448,6 +494,15 @@ fi
 if [ "$HEAD_SHA" != "$NEW_SHA" ]; then
   echo "✖ HEAD moved during the round (${HEAD_SHA:0:7} → ${NEW_SHA:0:7}): reviews are stale. Re-run." >&2
   exit 3
+fi
+# In local mode the reviewers read the working tree, so a local commit or checkout during
+# the round would also make their reviews stale — verify the local HEAD stayed put too.
+if [ "$DIFF_SOURCE" = local ]; then
+  LOCAL_END=$(git rev-parse HEAD 2>/dev/null || true)
+  if [ -z "$LOCAL_END" ] || [ "$LOCAL_END" != "$HEAD_SHA" ]; then
+    echo "✖ Local HEAD moved during the round (${HEAD_SHA:0:7} → ${LOCAL_END:-unknown}): reviews are stale. Re-run." >&2
+    exit 3
+  fi
 fi
 
 if [ "$ran" = 0 ]; then

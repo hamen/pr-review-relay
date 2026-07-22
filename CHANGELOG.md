@@ -6,6 +6,19 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Changed
+
+- **Reviewers read the branch from local disk, not GitHub, when the checkout is the PR head.** The
+  authoring agent almost always runs the relay from the PR's own worktree — the code is already on
+  disk. The relay now detects when the local `HEAD` equals the PR head, reads the diff from
+  `git diff origin/<base>...HEAD`, and tells reviewers to read the changed files directly from the
+  checkout instead of running `gh pr view/diff`. This removes every read-side network round-trip — the
+  big win for **agentic** reviewers, which otherwise spend one LLM call per `gh` fetch (the main cause
+  of slow-model timeouts). `gh` is still used to POST the reviews (the consensus trail on the PR), and
+  the mode falls back to `gh`-fetch automatically when the local tree isn't the PR head (a foreign or
+  stale checkout is never reviewed in place of the PR). The local `HEAD` is re-checked at the end of the
+  round too, so a mid-round commit invalidates the reviews the same way a remote push does.
+
 ### Fixed
 
 - **The `opencode` reviewer never ran** — because the binary was never found. OpenCode installs to
