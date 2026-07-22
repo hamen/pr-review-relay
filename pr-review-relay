@@ -54,7 +54,10 @@ while [ -h "$_self" ] && [ -x "$_rl" ] && [ "$_n" -lt 40 ]; do
   _link="$("$_rl" "$_self" 2>/dev/null)" || break
   case "$_link" in
     /*) _self="$_link";;                # absolute symlink target
-    *)  _self="${_self%/*}/$_link";;    # relative target → resolve against the link's dir
+    *)  case "$_self" in
+          */*) _self="${_self%/*}/$_link";;  # relative target → resolve against the link's dir
+          *)   _self="$_link";;              # bare name (no dir) → target is relative to cwd
+        esac;;
   esac
 done
 case "$_self" in

@@ -848,6 +848,22 @@ if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '
 else
   echo "  FAIL relative symlink did not resolve the lib"; FAIL=$((FAIL+1))
 fi
+# Invoked as a BARE filename from the link's own dir (`bash pr-review-relay`): $_self has no
+# slash, so the relative-target branch must resolve against the cwd, not build a bogus
+# "pr-review-relay/../real/..." path. Regression for the no-slash case.
+if out=$( cd "$LINKD" && bash pr-review-relay --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode\|cannot resolve'; then
+  echo "  ok   [-] bare-filename relative symlink resolves (no-slash \$_self)"; PASS=$((PASS+1))
+else
+  echo "  FAIL bare-filename relative symlink broke (no-slash case): $(printf '%s' "$out" | head -1)"; FAIL=$((FAIL+1))
+fi
+# The same bootstrap lives in review-local; symlink it too so the two can't drift.
+cp "$HERE/../review-local" "$REALD/" 2>/dev/null
+RLINK="$WORK/rlinkbin"; mkdir -p "$RLINK"; ln -s "$REALD/review-local" "$RLINK/review-local"
+if out=$(bash "$RLINK/review-local" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+  echo "  ok   [-] review-local resolves the sibling lib through a symlink"; PASS=$((PASS+1))
+else
+  echo "  FAIL review-local symlink did not resolve the lib"; FAIL=$((FAIL+1))
+fi
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
