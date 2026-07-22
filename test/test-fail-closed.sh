@@ -827,40 +827,47 @@ if [ -f "$RL" ]; then
   qw_assert "review-local: qwen keeps --approval-mode yolo" has "--approval-mode yolo"
 fi
 
-# --- LOCAL diff sourcing: read the branch from disk, not gh -------------------------
-# When the checkout IS the PR head, the relay reads the diff from local git (and points
-# reviewers at local files) instead of round-tripping to GitHub — the speed win, since an
-# agentic reviewer spends an LLM call per `gh` fetch. Build a repo whose HEAD the stubbed
-# gh reports as the PR head; the relay must then read locally and never call `gh pr diff`.
+# --- LOCAL context: reviewers read files off disk, not via gh -----------------------
+# The diff always comes from `gh pr diff` (authoritative). The speed win is that when the
+# checkout provably IS the PR head AND is clean, reviewers are told to read the changed
+# files locally instead of running `gh` — every `gh` an agentic reviewer runs is an LLM
+# round-trip. Build a repo whose HEAD the stubbed gh reports as the PR head and assert the
+# reviewer's prompt tells it to read locally; a dirty or non-matching tree must fall back.
+# grep uses `<<<` not `printf | grep -q`: under pipefail a matched grep -q makes printf take
+# SIGPIPE and the pipeline reports 141, which reads as a failed assertion (see file header).
 LREPO="$WORK/localrepo"; git init -q -b main "$LREPO"
 ( cd "$LREPO" && git config user.email t@t && git config user.name t \
-    && echo base > file.txt && git add file.txt && git commit -qm base )
-LBARE="$WORK/localrepo.git"; git init -q --bare "$LBARE"
-( cd "$LREPO" && git remote add origin "$LBARE" && git push -q origin main \
-    && git checkout -qb feature && echo "LOCAL_ONLY_CHANGE_MARKER" >> file.txt \
-    && git add file.txt && git commit -qm feat )
+    && echo base > file.txt && git add file.txt && git commit -qm base \
+    && git checkout -qb feature && echo change >> file.txt && git add file.txt && git commit -qm feat )
 LHEAD=$(git -C "$LREPO" rev-parse HEAD)
 ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
-# reviewer stub that echoes the prompt it received, so we can see which diff reached it
+# reviewer stub that echoes the prompt it received, so we can see what it was told to do
 printf '#!/usr/bin/env bash\nprintf "%%s" "$*"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
-out=$( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
-    GH_LOCAL_HEAD="$LHEAD" GH_BASE_REF=main \
-    bash "$RELAY" --pr 1 --author codex --reviewers claude 2>&1 )
-rc=$?
-if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q 'read from: local'; then
-  echo "  ok   [0] reads the diff from local git when the checkout is the PR head"; PASS=$((PASS+1))
-else echo "  FAIL [got $rc] did not read locally ($(printf '%s' "$out" | grep -o 'read from: [a-z]*'))"; FAIL=$((FAIL+1)); fi
-# the LOCAL change must have reached the reviewer, and the gh-diff stub sentinel must NOT
-if printf '%s' "$out" | grep -q 'LOCAL_ONLY_CHANGE_MARKER' && ! printf '%s' "$out" | grep -q 'diff --git a/x b/x'; then
-  echo "  ok   [-] the reviewer got the LOCAL diff, not the gh one"; PASS=$((PASS+1))
-else echo "  FAIL reviewer did not receive the local diff"; FAIL=$((FAIL+1)); fi
-# a checkout that does NOT match the PR head must fall back to gh (the stub sentinel diff)
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
-out=$( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
-    GH_LOCAL_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef GH_BASE_REF=main \
-    bash "$RELAY" --pr 1 --author codex --reviewers claude 2>&1 )
-if printf '%s' "$out" | grep -q 'read from: gh'; then
+lc_run() { # sets $out/$rc; args: extra env assignments for the relay
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  out=$( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      "$@" bash "$RELAY" --pr 1 --author codex --reviewers claude 2>&1 ); rc=$?
+}
+# clean checkout whose HEAD == the PR head → local-context reading, exit 0
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if [ "$rc" = 0 ] && grep -q 'reviewers read files locally' <<< "$out"; then
+  echo "  ok   [0] clean checkout at the PR head → reviewers read files locally"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] local-context not engaged ($(grep -o 'reviewers [a-z ]*' <<< "$out" | head -1))"; FAIL=$((FAIL+1)); fi
+# the reviewer's prompt must tell it the code is checked out here (and NOT to run gh itself)
+if grep -q 'CHECKED OUT in the current directory' <<< "$out"; then
+  echo "  ok   [-] the reviewer is told to read the local checkout"; PASS=$((PASS+1))
+else echo "  FAIL reviewer prompt did not point at the local checkout"; FAIL=$((FAIL+1)); fi
+# a DIRTY worktree (matches HEAD but has uncommitted changes) must NOT go local — reviewers
+# would otherwise read files that aren't in the PR
+echo dirty >> "$LREPO/file.txt"
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if grep -q 'reviewers fetch via gh' <<< "$out"; then
+  echo "  ok   [-] a dirty worktree falls back to gh (no local read)"; PASS=$((PASS+1))
+else echo "  FAIL dirty worktree still read locally"; FAIL=$((FAIL+1)); fi
+( cd "$LREPO" && git checkout -q -- file.txt )   # clean it back up
+# a checkout whose HEAD does NOT match the PR head must fall back to gh
+lc_run GH_LOCAL_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+if grep -q 'reviewers fetch via gh' <<< "$out"; then
   echo "  ok   [-] a non-matching checkout falls back to gh"; PASS=$((PASS+1))
 else echo "  FAIL non-matching checkout did not fall back to gh"; FAIL=$((FAIL+1)); fi
 printf '#!/usr/bin/env bash\necho "LGTM"\n' > "$BIN/claude"; chmod +x "$BIN/claude"   # restore

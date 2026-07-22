@@ -8,16 +8,18 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Changed
 
-- **Reviewers read the branch from local disk, not GitHub, when the checkout is the PR head.** The
-  authoring agent almost always runs the relay from the PR's own worktree — the code is already on
-  disk. The relay now detects when the local `HEAD` equals the PR head, reads the diff from
-  `git diff origin/<base>...HEAD`, and tells reviewers to read the changed files directly from the
-  checkout instead of running `gh pr view/diff`. This removes every read-side network round-trip — the
-  big win for **agentic** reviewers, which otherwise spend one LLM call per `gh` fetch (the main cause
-  of slow-model timeouts). `gh` is still used to POST the reviews (the consensus trail on the PR), and
-  the mode falls back to `gh`-fetch automatically when the local tree isn't the PR head (a foreign or
-  stale checkout is never reviewed in place of the PR). The local `HEAD` is re-checked at the end of the
-  round too, so a mid-round commit invalidates the reviews the same way a remote push does.
+- **Reviewers read the changed files from the local checkout instead of fetching them via `gh`.** The
+  authoring agent almost always runs the relay from the PR's own worktree — the code is already on disk.
+  When the current checkout provably IS the PR head **and** is clean, the relay now tells reviewers to
+  read the changed files straight from disk rather than run `gh` themselves. That removes the read-side
+  network round-trips — the big win for **agentic** reviewers, which otherwise spend one LLM call per
+  `gh` fetch (the main cause of slow-model timeouts). The diff itself still comes from `gh pr diff`, so
+  it stays authoritative (matches GitHub, correct for fork PRs, never fooled by a stale/rebased local
+  base) — it's a single cheap subprocess, not an agent tool call. It falls back to telling reviewers to
+  fetch via `gh` whenever the checkout isn't the PR head, is dirty, or the relay is run from outside the
+  repo, so a reviewer never reads files that differ from the PR. The local `HEAD` and clean state are
+  re-checked at the end of the round, so a mid-round commit or edit invalidates the reviews the same way
+  a remote push does. `gh` still POSTS the reviews (the consensus trail on the PR).
 
 ### Fixed
 
