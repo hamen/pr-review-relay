@@ -823,6 +823,59 @@ if [ -f "$RL" ]; then
   qw_assert "review-local: qwen keeps --approval-mode yolo" has "--approval-mode yolo"
 fi
 
+# --- SCRIPT_DIR follows the script's own symlink to find the sibling lib ------------
+# Regression: invoked through a symlink whose directory has NO lib-opencode.sh next to it
+# (exactly how ~/.local/bin/pr-review-relay -> the repo checkout is installed), the relay
+# must still locate the lib from the REAL script directory. `pwd -P` resolves a symlinked
+# *directory* but not a symlinked *file*, so an earlier version aborted with
+# "missing lib-opencode.sh" for every symlinked install — it broke the tool for anyone
+# not running it from the repo. `--help` sources the lib (relay_print_header lives there)
+# and exits 0 without touching gh, so it's a clean probe.
+SLINK_BIN="$WORK/slinkbin"; mkdir -p "$SLINK_BIN"
+ln -s "$RELAY" "$SLINK_BIN/pr-review-relay"
+if out=$(bash "$SLINK_BIN/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+  echo "  ok   [-] absolute symlink invocation resolves the sibling lib"; PASS=$((PASS+1))
+else
+  echo "  FAIL absolute symlink invocation could not find lib-opencode.sh"; FAIL=$((FAIL+1))
+fi
+# A RELATIVE symlink target must resolve against the LINK's directory, not the cwd.
+REALD="$WORK/real"; mkdir -p "$REALD"
+cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
+LINKD="$WORK/linkbin"; mkdir -p "$LINKD"
+( cd "$LINKD" && ln -s "../real/pr-review-relay" pr-review-relay )
+if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+  echo "  ok   [-] relative symlink resolves against the link's own dir"; PASS=$((PASS+1))
+else
+  echo "  FAIL relative symlink did not resolve the lib"; FAIL=$((FAIL+1))
+fi
+# Invoked as a BARE filename from the link's own dir (`bash pr-review-relay`): $_self has no
+# slash, so the relative-target branch must resolve against the cwd, not build a bogus
+# "pr-review-relay/../real/..." path. Regression for the no-slash case.
+if out=$( cd "$LINKD" && bash pr-review-relay --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode\|cannot resolve'; then
+  echo "  ok   [-] bare-filename relative symlink resolves (no-slash \$_self)"; PASS=$((PASS+1))
+else
+  echo "  FAIL bare-filename relative symlink broke (no-slash case): $(printf '%s' "$out" | head -1)"; FAIL=$((FAIL+1))
+fi
+# The same bootstrap lives in review-local; symlink it too so the two can't drift.
+cp "$HERE/../review-local" "$REALD/" 2>/dev/null
+RLINK="$WORK/rlinkbin"; mkdir -p "$RLINK"; ln -s "$REALD/review-local" "$RLINK/review-local"
+if out=$(bash "$RLINK/review-local" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+  echo "  ok   [-] review-local resolves the sibling lib through a symlink"; PASS=$((PASS+1))
+else
+  echo "  FAIL review-local symlink did not resolve the lib"; FAIL=$((FAIL+1))
+fi
+# The other sibling-locating entry points (pr-review-consensus / -collapse-comments) got the
+# same bootstrap; through a symlink they must not die at SCRIPT_DIR resolution. They fail
+# later on missing args/gh — that's fine; we only assert the resolve step itself worked.
+cp "$HERE/../pr-review-consensus" "$HERE/../pr-review-collapse-comments" "$REALD/" 2>/dev/null
+for s in pr-review-consensus pr-review-collapse-comments; do
+  ln -sf "$REALD/$s" "$RLINK/$s"
+  err=$( PATH="$BIN:$PATH" bash "$RLINK/$s" 2>&1 || true )
+  if ! grep -q 'cannot resolve' <<< "$err"; then
+    echo "  ok   [-] $s resolves its own symlink (no SCRIPT_DIR error)"; PASS=$((PASS+1))
+  else echo "  FAIL $s failed to resolve its symlink"; FAIL=$((FAIL+1)); fi
+done
+
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

@@ -8,6 +8,16 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Fixed
 
+- **Symlinked installs aborted with `missing lib-opencode.sh`.** `SCRIPT_DIR` was taken from
+  `${BASH_SOURCE[0]}` + `pwd -P`, which resolves a symlinked *directory* but not a symlinked *script
+  file* — so `~/.local/bin/pr-review-relay -> <repo>` looked for its siblings in `~/.local/bin`, where
+  they aren't. It now walks the script's own symlink chain first (via an absolute-path `readlink`, never
+  through `PATH`, preserving the bootstrap's security goal), handling absolute, relative, and
+  bare-filename link targets, bounded against a cycle, and **failing closed** with a clear error if it
+  can't resolve (rather than sourcing a lib next to the link). The same bootstrap is applied to all four
+  sibling-locating entry points — `pr-review-relay`, `review-local`, `pr-review-consensus`,
+  `pr-review-collapse-comments` — so none of them break under a symlinked install.
+
 - **The `opencode` reviewer never ran** — because the binary was never found. OpenCode installs to
   `~/.opencode/bin/opencode`, which is not on `PATH`, so `command -v opencode` missed and the reviewer
   was skipped before it could be dispatched at all. It is now resolved from the stock path.
