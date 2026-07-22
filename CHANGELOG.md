@@ -6,6 +6,21 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Changed
+
+- **Reviewers read the changed files from the local checkout instead of fetching them via `gh`.** The
+  authoring agent almost always runs the relay from the PR's own worktree — the code is already on disk.
+  When the current checkout provably IS the PR head **and** is clean, the relay now tells reviewers to
+  read the changed files straight from disk rather than run `gh` themselves. That removes the read-side
+  network round-trips — the big win for **agentic** reviewers, which otherwise spend one LLM call per
+  `gh` fetch (the main cause of slow-model timeouts). The diff itself still comes from `gh pr diff`, so
+  it stays authoritative (matches GitHub, correct for fork PRs, never fooled by a stale/rebased local
+  base) — it's a single cheap subprocess, not an agent tool call. It falls back to telling reviewers to
+  fetch via `gh` whenever the checkout isn't the PR head, is dirty, or the relay is run from outside the
+  repo, so a reviewer never reads files that differ from the PR. The local `HEAD` and clean state are
+  re-checked at the end of the round, so a mid-round commit or edit invalidates the reviews the same way
+  a remote push does. `gh` still POSTS the reviews (the consensus trail on the PR).
+
 ### Fixed
 
 - **Symlinked installs aborted with `missing lib-opencode.sh`.** `SCRIPT_DIR` was taken from

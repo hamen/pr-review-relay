@@ -23,6 +23,9 @@ cat > "$BIN/gh" <<'GH'
 case "$1 $2" in
   "pr view")
     if printf '%s\n' "$@" | grep -q headRefOid; then
+      # Local-context tests pin the PR head to the test repo's real HEAD so the
+      # LOCAL_CONTEXT gate (HEAD == PR head, clean tree) passes.
+      if [ -n "${GH_LOCAL_HEAD:-}" ]; then echo "$GH_LOCAL_HEAD"; exit 0; fi
       c=$(cat "$GH_SHA_COUNTER" 2>/dev/null || echo 0); c=$((c+1)); echo "$c" > "$GH_SHA_COUNTER"
       # Simulate a failed SHA read (empty output) at start (call 1) or end (call 2).
       case "${GH_SHA_FAIL:-}" in
@@ -822,6 +825,58 @@ if [ -f "$RL" ]; then
   qw_assert "review-local: qwen keeps --safe-mode"          has "--safe-mode"
   qw_assert "review-local: qwen keeps --approval-mode yolo" has "--approval-mode yolo"
 fi
+
+# --- LOCAL context: reviewers read files off disk, not via gh -----------------------
+# The diff always comes from `gh pr diff` (authoritative). The speed win is that when the
+# checkout provably IS the PR head AND is clean, reviewers are told to read the changed
+# files locally instead of running `gh` — every `gh` an agentic reviewer runs is an LLM
+# round-trip. Build a repo whose HEAD the stubbed gh reports as the PR head and assert the
+# reviewer's prompt tells it to read locally; a dirty or non-matching tree must fall back.
+# grep uses `<<<` not `printf | grep -q`: under pipefail a matched grep -q makes printf take
+# SIGPIPE and the pipeline reports 141, which reads as a failed assertion (see file header).
+LREPO="$WORK/localrepo"; git init -q -b main "$LREPO"
+( cd "$LREPO" && git config user.email t@t && git config user.name t \
+    && echo base > file.txt && git add file.txt && git commit -qm base \
+    && git checkout -qb feature && echo change >> file.txt && git add file.txt && git commit -qm feat )
+LHEAD=$(git -C "$LREPO" rev-parse HEAD)
+ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
+# reviewer stub that echoes the prompt it received, so we can see what it was told to do
+printf '#!/usr/bin/env bash\nprintf "%%s" "$*"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
+lc_run() { # sets $out/$rc; args: extra env assignments for the relay
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  out=$( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      "$@" bash "$RELAY" --pr 1 --author codex --reviewers claude 2>&1 ); rc=$?
+}
+# clean checkout whose HEAD == the PR head → local-context reading, exit 0
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if [ "$rc" = 0 ] && grep -q 'reviewers read files locally' <<< "$out"; then
+  echo "  ok   [0] clean checkout at the PR head → reviewers read files locally"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc] local-context not engaged ($(grep -o 'reviewers [a-z ]*' <<< "$out" | head -1))"; FAIL=$((FAIL+1)); fi
+# the reviewer's prompt must tell it the code is checked out here (and NOT to run gh itself)
+if grep -q 'CHECKED OUT in the current directory' <<< "$out"; then
+  echo "  ok   [-] the reviewer is told to read the local checkout"; PASS=$((PASS+1))
+else echo "  FAIL reviewer prompt did not point at the local checkout"; FAIL=$((FAIL+1)); fi
+# a DIRTY worktree (matches HEAD but has uncommitted changes) must NOT go local — reviewers
+# would otherwise read files that aren't in the PR
+echo dirty >> "$LREPO/file.txt"
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if grep -q 'reviewers fetch via gh' <<< "$out"; then
+  echo "  ok   [-] a dirty worktree falls back to gh (no local read)"; PASS=$((PASS+1))
+else echo "  FAIL dirty worktree still read locally"; FAIL=$((FAIL+1)); fi
+( cd "$LREPO" && git checkout -q -- file.txt )   # clean it back up
+# a checkout whose HEAD does NOT match the PR head must fall back to gh
+lc_run GH_LOCAL_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+if grep -q 'reviewers fetch via gh' <<< "$out"; then
+  echo "  ok   [-] a non-matching checkout falls back to gh"; PASS=$((PASS+1))
+else echo "  FAIL non-matching checkout did not fall back to gh"; FAIL=$((FAIL+1)); fi
+# end-of-round re-check: if a reviewer dirties the working tree DURING the round (local
+# context was enabled on a clean tree), the reviews are stale → exit 3.
+printf '#!/usr/bin/env bash\necho scratch >> file.txt\necho "LGTM"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
+lc_run GH_LOCAL_HEAD="$LHEAD"
+[ "$rc" = 3 ] && { echo "  ok   [3] a mid-round working-tree change fails the round (stale)"; PASS=$((PASS+1)); } \
+             || { echo "  FAIL [got $rc, want 3] mid-round dirty tree not caught"; FAIL=$((FAIL+1)); }
+( cd "$LREPO" && git checkout -q -- file.txt )   # clean up the scratch write
+printf '#!/usr/bin/env bash\necho "LGTM"\n' > "$BIN/claude"; chmod +x "$BIN/claude"   # restore
 
 # --- SCRIPT_DIR follows the script's own symlink to find the sibling lib ------------
 # Regression: invoked through a symlink whose directory has NO lib-opencode.sh next to it
