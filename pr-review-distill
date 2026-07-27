@@ -41,6 +41,48 @@
 # agent produced nothing) · 2 bad argument.
 set -uo pipefail
 
+# SCRIPT_DIR must be the directory of the REAL script so the sibling library resolves even
+# when invoked through a symlink (e.g. ~/.local/bin/pr-review-distill -> the repo checkout).
+# `pwd -P` resolves a symlinked *directory* but NOT a symlinked *script file*, so we first
+# walk the script's own symlink chain to the real file. `dirname`/`$0` are avoided (they'd
+# resolve through PATH before the PATH guard runs). readlink is used at an ABSOLUTE path,
+# never via PATH. The loop only runs when the script is a symlink, bounded against a cycle.
+_self="${BASH_SOURCE[0]}"
+_rl=/usr/bin/readlink; [ -x "$_rl" ] || _rl=/bin/readlink
+_n=0
+while [ -h "$_self" ] && [ -x "$_rl" ] && [ "$_n" -lt 40 ]; do
+  _n=$((_n + 1))
+  _link="$("$_rl" "$_self" 2>/dev/null)" || break
+  case "$_link" in
+    /*) _self="$_link";;
+    *)  case "$_self" in
+          */*) _self="${_self%/*}/$_link";;
+          *)   _self="$_link";;
+        esac;;
+  esac
+done
+if [ -h "$_self" ]; then
+  echo "cannot resolve the script's own symlink (readlink unavailable or a symlink cycle): $_self" >&2
+  exit 1
+fi
+case "$_self" in
+  */*) SCRIPT_DIR="${_self%/*}";;
+  *)   SCRIPT_DIR=".";;
+esac
+SCRIPT_DIR="$(cd -- "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
+unset _self _rl _n _link
+# Shared helpers (PATH/tmpdir guards) live in the same lib the relay uses, so the policy
+# exists in one place.
+OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
+[ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
+. "$OPENCODE_LIB"
+
+# Before ANY external command is trusted (awk in --help, gh, git, timeout, the agent CLIs):
+# a repo-local PATH entry (or "." in PATH) could otherwise shadow them with binaries from an
+# untrusted checkout. Same guards the other agent-running entrypoints use.
+relay_assert_path_outside_repo
+relay_assert_tmpdir_outside_repo_global
+
 AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
@@ -86,14 +128,25 @@ fi
 # rules would compare THAT repo's reviews against THIS repo's rules — so we skip it and
 # ask for --rules-file instead.
 if [ -z "$RULES_FILE" ] && [ "$REPO_EXPLICIT" = 0 ]; then
-  for cand in AGENTS.md CLAUDE.md .cursor/rules AGENT.md; do
-    if [ -f "$cand" ]; then RULES_FILE="$cand"; break; fi
+  # Resolve from the git ROOT, not just cwd, so running from a subdirectory still finds the
+  # project's rules (otherwise existing rules get re-proposed).
+  base=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+  for cand in AGENTS.md CLAUDE.md AGENT.md; do
+    if [ -f "$base/$cand" ]; then RULES_FILE="$base/$cand"; break; fi
   done
+  # .cursor/rules is conventionally a DIRECTORY of rule files (not a single file).
+  [ -z "$RULES_FILE" ] && [ -d "$base/.cursor/rules" ] && RULES_FILE="$base/.cursor/rules"
 fi
-RULES_BLOCK=""
-if [ -n "$RULES_FILE" ] && [ -f "$RULES_FILE" ]; then
-  RULES_BLOCK=$(printf '## Rules that ALREADY exist (%s) — do NOT re-propose these\n\n%s\n' "$RULES_FILE" "$(cat "$RULES_FILE")")
-  echo "  rules file: $RULES_FILE ($(wc -c < "$RULES_FILE") bytes)"
+# Read the rules content, supporting both a single file and a directory (e.g. .cursor/rules).
+RULES_BLOCK=""; rules_content=""
+if [ -n "$RULES_FILE" ] && [ -d "$RULES_FILE" ]; then
+  rules_content=$(cat "$RULES_FILE"/* 2>/dev/null)
+elif [ -n "$RULES_FILE" ] && [ -f "$RULES_FILE" ]; then
+  rules_content=$(cat "$RULES_FILE" 2>/dev/null)
+fi
+if [ -n "$RULES_FILE" ] && [ -e "$RULES_FILE" ]; then
+  RULES_BLOCK=$(printf '## Rules that ALREADY exist (%s) — do NOT re-propose these\n\n%s\n' "$RULES_FILE" "$rules_content")
+  echo "  rules file: $RULES_FILE ($(printf '%s' "$rules_content" | wc -c) bytes)"
 elif [ -n "$RULES_FILE" ]; then
   echo "  ! rules file '$RULES_FILE' not found — proposal will not subtract existing rules" >&2
 elif [ "$REPO_EXPLICIT" = 1 ]; then
@@ -120,7 +173,13 @@ fi
 
 # --- Gather the feedback corpus ----------------------------------------------
 CORPUS="$(mktemp)" || { echo "mktemp failed" >&2; exit 1; }
-trap 'rm -f "$CORPUS"' EXIT
+# The agent is run FROM this empty dir (below), never from the checkout: a checked-out
+# `.claude/settings.json` (e.g. a SessionStart hook) would otherwise run on agent start,
+# regardless of --permission-mode. An empty cwd carries no such project config. It must be
+# outside the repo for the same reason PATH must (a repo-local temp could be shadowed).
+AGENT_CWD="$(mktemp -d)" || { echo "mktemp -d failed" >&2; exit 1; }
+trap 'rm -rf "$CORPUS" "$AGENT_CWD"' EXIT
+relay_assert_tmpdir_outside_repo "$AGENT_CWD"
 n_pr=0; n_fb=0; api_err=0
 # Count a failed GitHub API call rather than silently folding it into "no feedback":
 # a transient outage must NOT masquerade as a clean, complete corpus. `fetch` returns
@@ -206,10 +265,12 @@ PROMPT=$(printf '%s\n\n---\n\n%s\n\n---\n\n## Review feedback from recent PRs\n\
 # the ~128 KiB single-argument limit (E2BIG) if passed on the command line.
 echo "  → $AGENT distilling… (timeout ${AGENT_TIMEOUT}s)"
 out=""; rc=0
+# Each agent runs in the empty $AGENT_CWD (subshell `cd`) so no project config from the
+# checkout is loaded, with the prompt on stdin (avoids the ~128 KiB argv limit).
 case "$AGENT" in
-  claude)      out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan 2>/dev/null); rc=$?;;
-  codex)       out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" codex exec -s read-only 2>/dev/null); rc=$?;;
-  cursor)      out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null); rc=$?;;
+  claude)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan ) 2>/dev/null); rc=$?;;
+  codex)       out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" codex exec -s read-only ) 2>/dev/null); rc=$?;;
+  cursor)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask ) 2>/dev/null); rc=$?;;
 esac
 
 # Fail CLOSED on a non-zero exit even if there IS output: a timeout or crash can leave a

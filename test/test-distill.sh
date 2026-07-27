@@ -54,6 +54,23 @@ exit "${CLAUDE_RC:-0}"
 STUB
 chmod +x "$BIN/claude"
 
+# --- stubs: codex + cursor (record args to assert enforced read-only flags) ---
+cat > "$BIN/codex" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${CODEX_ARGS_FILE:-}" ] && printf '%s\n' "$*" > "$CODEX_ARGS_FILE"
+echo "## Proposed rules from PR review feedback"
+echo "- **A codex rule.** (from #1)"
+STUB
+chmod +x "$BIN/codex"
+
+cat > "$BIN/cursor-agent" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${CURSOR_ARGS_FILE:-}" ] && printf '%s\n' "$*" > "$CURSOR_ARGS_FILE"
+echo "## Proposed rules from PR review feedback"
+echo "- **A cursor rule.** (from #1)"
+STUB
+chmod +x "$BIN/cursor-agent"
+
 export PATH="$BIN:$PATH"
 cd "$WORK"
 
@@ -107,6 +124,22 @@ if grep -q -- '--permission-mode plan' "$WORK/cargs" 2>/dev/null; then
   ok "claude pinned to plan mode (injection-safe default)"
 else
   bad "claude not run with --permission-mode plan"; cat "$WORK/cargs" 2>/dev/null >&2
+fi
+
+echo "test: codex is invoked with the read-only sandbox (-s read-only)"
+rc=$(CODEX_ARGS_FILE="$WORK/xargs" "$DISTILL" --agent codex >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q -- '-s read-only' "$WORK/xargs" 2>/dev/null; then
+  ok "codex pinned to read-only sandbox"
+else
+  bad "codex read-only (rc=$rc)"; cat "$WORK/xargs" 2>/dev/null "$WORK/err" >&2
+fi
+
+echo "test: cursor is invoked in ask (read-only) mode (--mode=ask)"
+rc=$(CURSOR_ARGS_FILE="$WORK/uargs" "$DISTILL" --agent cursor >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q -- '--mode=ask' "$WORK/uargs" 2>/dev/null; then
+  ok "cursor pinned to ask mode"
+else
+  bad "cursor ask mode (rc=$rc)"; cat "$WORK/uargs" 2>/dev/null "$WORK/err" >&2
 fi
 
 echo "test: agent non-zero exit with output still fails → exit 1 (no truncated proposal)"

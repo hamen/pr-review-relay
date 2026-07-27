@@ -38,11 +38,15 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   **stdin** so a large review history can't hit the ~128 KiB argv limit. A **non-zero agent exit fails
   the run** (a truncated proposal is never emitted as complete); a failed `gh pr list` is distinguished
   from an empty repo; per-PR API failures are surfaced as an `INCOMPLETE CORPUS` warning rather than
-  folded into "no feedback"; and a failed `--out` write exits non-zero. With an explicit `--repo`, the
-  rules baseline is not auto-detected from the current directory (wrong repo) — pass `--rules-file`.
+  folded into "no feedback"; and a failed `--out` write exits non-zero. It reuses the toolkit's PATH /
+  tmpdir guards (`relay_assert_path_outside_repo`) before running any external command, and runs the
+  agent from an empty scratch directory so a checked-out `.claude/settings.json` (e.g. a hook) can't
+  execute on agent start. The rules baseline is resolved from the git root — `AGENTS.md`, `CLAUDE.md`,
+  or a `.cursor/rules` directory — so running from a subdirectory still finds it; with an explicit
+  `--repo` it is not auto-detected from the current directory (wrong repo), so pass `--rules-file`.
   Options: `--repo`, `--limit`, `--state` (`merged`/`closed`/`open`/`all`), `--rules-file`, `--out`,
   `--print-comments`, `--dry-run`; budget via `PR_DISTILL_AGENT_TIMEOUT`. Ships with `test/test-distill.sh`
-  (stubbed `gh` + agent, no network, 16 cases) wired into CI. Meant to run monthly (cron or a Claude
+  (stubbed `gh` + agents, no network, 18 cases) wired into CI. Meant to run monthly (cron or a Claude
   skill) so the instructions file self-heals from the review loop instead of drifting.
 
 ## [1.2.0] — 2026-07-22

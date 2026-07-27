@@ -341,8 +341,9 @@ pr-review-distill --out proposed-rules.md  # also write the proposal to a file
 ```
 
 It reads three feedback sources per PR — top-level review bodies, inline review comments, and issue-style
-comments (which include the relay's own automated cross-reviews). Point it at another repo with
-`--repo OWNER/NAME`, or at a specific rules file with `--rules-file CLAUDE.md`.
+comments (which include the relay's own automated cross-reviews). The rules baseline is auto-detected
+from the git root (`AGENTS.md`, `CLAUDE.md`, or a `.cursor/rules` directory); point it at a specific one
+with `--rules-file`.
 
 Point it at another repo with `--repo OWNER/NAME` — but pass `--rules-file` too, since the rules
 baseline is otherwise auto-detected from the current directory (the wrong repo). `--state` takes
