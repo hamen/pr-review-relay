@@ -89,6 +89,14 @@ OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 # Validate here rather than letting `timeout` fail with a bare exit 125.
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
+
+# agy enforces its OWN wait (--print-timeout, default 5m) on top of ours. Left unset it wins whenever
+# AGENT_TIMEOUT is raised above 300, which is how three of four antigravity rounds died on 2026-07-27
+# with "timeout waiting for response" despite PR_RELAY_AGENT_TIMEOUT=900. We hand agy our budget and
+# give the OUTER `timeout` a few seconds more, so agy hits its own limit first and gets to print the
+# diagnosis — an outer kill would only yield a bare rc 124. This is agy-only: the other reviewers'
+# internal waits, if any, have not been checked.
+AGY_GRACE=10
 CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -376,9 +384,9 @@ review_with() {
       fi; rc=$?;;
     antigravity)
       if [ "$MODE" = diff ]; then
-        out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
+        out=$(timeout "$((AGENT_TIMEOUT + AGY_GRACE))" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
       else
-        out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>"$errf")
+        out=$(timeout "$((AGENT_TIMEOUT + AGY_GRACE))" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$PROMPT" 2>"$errf")
       fi; rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
