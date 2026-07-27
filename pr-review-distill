@@ -317,16 +317,24 @@ P
 # This does NOT make the prompt injection-proof: a model can still be talked round by prose
 # inside the fence, which is why the task tells it to report such attempts and why the agents
 # run read-only. It removes the structural forgery, which is the cheap half.
+# `head -c` reads a bounded amount and exits on its own. The obvious `tr -dc < /dev/urandom | dd`
+# does NOT work here: tr is an infinite producer, so it takes SIGPIPE when dd stops and the
+# pipeline returns 141 under `set -o pipefail` — the marker was correct but the status said
+# failure, so every run silently fell through to the weak fallback below. Caught in review.
 fence_marker() {
+  local out=""
   if [ -r /dev/urandom ]; then
-    LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | dd bs=1 count=16 2>/dev/null && return 0
+    out=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+    case "$out" in [0-9a-f][0-9a-f]*) printf '%s' "$out"; return 0;; esac
   fi
-  # No /dev/urandom (or it produced nothing): still unpredictable per run, just less so.
-  printf '%s' "$(date +%s 2>/dev/null)$$"
+  # No usable /dev/urandom: still varies per attempt. $$ alone is constant within a run and
+  # `date +%s` has one-second resolution, so two retries in the same second would produce the
+  # SAME candidate and the retry loop could never escape a collision.
+  printf '%s' "$(date +%s%N 2>/dev/null || date +%s 2>/dev/null)$$${RANDOM:-0}${1:-0}"
 }
 FENCE=""
 for _try in 1 2 3; do
-  candidate="CORPUS-$(fence_marker)"
+  candidate="CORPUS-$(fence_marker "$_try")"
   # A marker that already appears in the corpus would let the corpus close its own fence.
   if ! grep -qF "$candidate" "$CORPUS" 2>/dev/null; then FENCE="$candidate"; break; fi
 done

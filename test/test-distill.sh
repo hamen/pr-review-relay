@@ -275,6 +275,21 @@ else
   bad "fence marker not per-run (f1='${f1:-none}' f2='${f2:-none}')"
 fi
 
+echo "test: the marker comes from /dev/urandom, not the degraded fallback"
+# "Different every run" passes even when generation silently degrades — the fallback varies too.
+# The shapes differ: 16 hex chars from urandom, digits + pid + more from the fallback. On a
+# machine with a readable /dev/urandom, anything but the hex shape means the entropy path broke
+# (it did once already: a SIGPIPE from `tr` made the pipeline return 141 under pipefail).
+if [ -r /dev/urandom ]; then
+  case "${f1#CORPUS-}" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+      ok "marker has the /dev/urandom shape (16 hex)";;
+    *) bad "marker fell back to the low-entropy path: '${f1#CORPUS-}'";;
+  esac
+else
+  ok "no /dev/urandom here — fallback shape accepted"
+fi
+
 echo
 echo "distill tests: $pass passed, $fail failed"
 [ "$fail" = 0 ]
