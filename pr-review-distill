@@ -325,7 +325,14 @@ fence_marker() {
   local out=""
   if [ -r /dev/urandom ]; then
     out=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
-    case "$out" in [0-9a-f][0-9a-f]*) printf '%s' "$out"; return 0;; esac
+    # Exactly 16 hex characters — the shape `head -c 8 | od` produces. Anything shorter,
+    # longer or non-hex means the pipeline changed or degraded, and we fall through to the
+    # documented fallback rather than accept a marker of unknown entropy. A prefix match
+    # (what this used to be) would have accepted a two-character marker.
+    case "$out" in
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+        printf '%s' "$out"; return 0;;
+    esac
   fi
   # No usable /dev/urandom: still varies per attempt. $$ alone is constant within a run and
   # `date +%s` has one-second resolution, so two retries in the same second would produce the
@@ -336,7 +343,15 @@ FENCE=""
 for _try in 1 2 3; do
   candidate="CORPUS-$(fence_marker "$_try")"
   # A marker that already appears in the corpus would let the corpus close its own fence.
-  if ! grep -qF "$candidate" "$CORPUS" 2>/dev/null; then FENCE="$candidate"; break; fi
+  # grep's three statuses are three different answers and must not be collapsed: `! grep`
+  # would treat a READ ERROR (2) as "absent" and accept the candidate — a security check
+  # failing open, which is the one direction it must never fail.
+  grep -qF "$candidate" "$CORPUS" 2>/dev/null; g=$?
+  case "$g" in
+    0) continue;;                          # collision: try another marker
+    1) FENCE="$candidate"; break;;         # absent: safe to use
+    *) echo "could not read the corpus to check the fence marker (grep exit $g)" >&2; exit 1;;
+  esac
 done
 [ -n "$FENCE" ] || { echo "could not generate a fence marker absent from the corpus" >&2; exit 1; }
 
