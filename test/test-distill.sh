@@ -29,7 +29,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
 fi
 if [ "$1" = "api" ]; then
   case "$*" in
-    *reviews*) echo "[review/alice] Please add a test for this change.";;
+    *reviews*) [ -n "${DISTILL_API_FAIL:-}" ] && exit 1; echo "[review/alice] Please add a test for this change.";;
     *pulls/*/comments*) echo "[inline/bob src/x.rb] Use snake_case here.";;
     *issues/*/comments*) echo "[comment/carol] Add a test for this change too.";;
   esac
@@ -64,6 +64,12 @@ echo "test: bad argument → exit 2"
 
 echo "test: invalid --agent → exit 2"
 [ "$(run --agent gpt)" = 2 ] && ok "invalid agent exits 2" || bad "invalid agent"
+
+echo "test: --agent antigravity is unsupported → exit 2"
+[ "$(run --agent antigravity)" = 2 ] && ok "antigravity rejected (untrusted-input safety)" || bad "antigravity should be rejected"
+
+echo "test: value option with no argument → clean exit 2 (not set -u crash)"
+[ "$(run --repo)" = 2 ] && ok "--repo without value exits 2" || bad "--repo missing value"
 
 echo "test: invalid --limit → exit 2"
 [ "$(run --limit 0)" = 2 ] && ok "invalid limit exits 2" || bad "invalid limit"
@@ -103,6 +109,18 @@ fi
 echo "test: no PRs in repo → exit 1"
 rc=$(DISTILL_NO_PRS=1 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
 [ "$rc" = 1 ] && ok "no PRs exits 1" || { bad "no PRs (rc=$rc)"; cat "$WORK/err" >&2; }
+
+echo "test: an unwritable --out fails loudly → exit 1"
+rc=$(run --out "$WORK/nope/deep/proposal.md")
+[ "$rc" = 1 ] && grep -q 'could not write' "$WORK/err" && ok "--out write failure exits 1" || { bad "--out failure (rc=$rc)"; cat "$WORK/err" >&2; }
+
+echo "test: a failed GitHub API call is reported as INCOMPLETE (not hidden)"
+rc=$(DISTILL_API_FAIL=1 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q 'INCOMPLETE CORPUS' "$WORK/err"; then
+  ok "partial fetch surfaces an INCOMPLETE warning"
+else
+  bad "incomplete-corpus warning (rc=$rc)"; cat "$WORK/err" >&2
+fi
 
 echo
 echo "distill tests: $pass passed, $fail failed"

@@ -19,10 +19,15 @@
 #
 # Usage:
 #   pr-review-distill [--repo OWNER/NAME] [--limit N] [--state merged|closed|all]
-#                     [--agent claude|codex|cursor|antigravity]
+#                     [--agent claude|codex|cursor]
 #                     [--rules-file PATH] [--out PATH]
 #                     [--print-comments] [--dry-run]
 #   (no --repo → uses the repo of the current directory)
+#
+# The agent sees UNTRUSTED PR comments, so only agents with a read-only / sandboxed
+# headless mode are offered (codex `-s read-only`, cursor `--mode=ask`, claude `-p`).
+# antigravity is intentionally not supported (its headless CLI needs
+# `--dangerously-skip-permissions`, unsafe on injectable input).
 #
 # Examples:
 #   pr-review-distill                         # last 20 merged PRs of the current repo, propose via claude
@@ -40,25 +45,31 @@ AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
 REPO=""; LIMIT=20; STATE="merged"; AGENT="claude"; RULES_FILE=""; OUT=""; PRINT_ONLY=0; DRY=0
+# A value-taking option with no argument must fail with a clean usage error (exit 2),
+# not crash on an unbound $2 under `set -u` (matches review-local's guard).
+need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --repo)           REPO="$2"; shift 2;;
-    --limit)          LIMIT="$2"; shift 2;;
-    --state)          STATE="$2"; shift 2;;
-    --agent)          AGENT="$2"; shift 2;;
-    --rules-file)     RULES_FILE="$2"; shift 2;;
-    --out)            OUT="$2"; shift 2;;
+    --repo)           need_value "$@"; REPO="$2"; shift 2;;
+    --limit)          need_value "$@"; LIMIT="$2"; shift 2;;
+    --state)          need_value "$@"; STATE="$2"; shift 2;;
+    --agent)          need_value "$@"; AGENT="$2"; shift 2;;
+    --rules-file)     need_value "$@"; RULES_FILE="$2"; shift 2;;
+    --out)            need_value "$@"; OUT="$2"; shift 2;;
     --print-comments) PRINT_ONLY=1; shift;;
     --dry-run)        DRY=1; shift;;
-    -h|--help)        sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help)        awk 'NR>1 && /^[^#]/{exit} NR>1{sub(/^# ?/,"");print}' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
 
 case "$LIMIT" in ''|*[!0-9]*|0) echo "invalid --limit: '$LIMIT' (want a positive integer)" >&2; exit 2;; esac
 case "$STATE" in merged|closed|all|open) ;; *) echo "invalid --state: '$STATE' (want merged|closed|all|open)" >&2; exit 2;; esac
-case "$AGENT" in agy) AGENT=antigravity;; esac
-case "$AGENT" in claude|codex|cursor|antigravity) ;; *) echo "invalid --agent: '$AGENT' (want claude|codex|cursor|antigravity)" >&2; exit 2;; esac
+# Only agents with a proven read-only / sandboxed headless mode are offered, because this
+# tool feeds UNTRUSTED PR comments to the agent (prompt-injection surface). antigravity is
+# deliberately NOT supported: its only headless invocation in this toolkit needs
+# `--dangerously-skip-permissions`, which would let an injected comment run commands.
+case "$AGENT" in claude|codex|cursor) ;; *) echo "invalid --agent: '$AGENT' (want claude|codex|cursor — antigravity is unsupported here, see note in the script)" >&2; exit 2;; esac
 
 command -v gh >/dev/null || { echo "gh not found" >&2; exit 1; }
 
@@ -88,20 +99,33 @@ echo "▶ Distilling review feedback from $REPO — last $LIMIT $STATE PR(s), ag
 PR_NUMBERS=$(gh pr list --repo "$REPO" --state "$STATE" --limit "$LIMIT" --json number -q '.[].number' 2>/dev/null || true)
 [ -z "$PR_NUMBERS" ] && { echo "No $STATE PRs found in $REPO." >&2; exit 1; }
 
+# --dry-run stops here — before the (heavier) per-PR corpus fetch — and just shows
+# which PRs would be mined. Use --print-comments to actually gather and dump the corpus.
+if [ "$DRY" = 1 ]; then
+  echo "  dry run: would gather feedback from these PR(s) and ask $AGENT to propose rules:"
+  printf '%s\n' "$PR_NUMBERS" | sed 's/^/    #/'
+  exit 0
+fi
+
 # --- Gather the feedback corpus ----------------------------------------------
 CORPUS="$(mktemp)" || { echo "mktemp failed" >&2; exit 1; }
 trap 'rm -f "$CORPUS"' EXIT
-n_pr=0; n_fb=0
+n_pr=0; n_fb=0; api_err=0
+# Count a failed GitHub API call rather than silently folding it into "no feedback":
+# a transient outage must NOT masquerade as a clean, complete corpus. `fetch` returns
+# gh's exit status; the increment happens in the PARENT (a command substitution runs in a
+# subshell, so incrementing api_err inside fetch would be lost).
+fetch() { gh api --paginate "$1" --jq "$2" 2>/dev/null; }
 for PR in $PR_NUMBERS; do
   title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "")
   # Reviews (top-level review bodies), inline review comments, and issue comments
   # (which include the relay's automated cross-reviews). Each prefixed by author.
-  reviews=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
-    --jq '.[] | select((.body // "") | length > 0) | "[review/" + .user.login + "] " + .body' 2>/dev/null || true)
-  inline=$(gh api --paginate "repos/$REPO/pulls/$PR/comments" \
-    --jq '.[] | "[inline/" + .user.login + " " + (.path // "") + "] " + (.body // "")' 2>/dev/null || true)
-  issuec=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-    --jq '.[] | "[comment/" + .user.login + "] " + (.body // "")' 2>/dev/null || true)
+  reviews=$(fetch "repos/$REPO/pulls/$PR/reviews" \
+    '.[] | select((.body // "") | length > 0) | "[review/" + .user.login + "] " + .body'); [ $? -eq 0 ] || api_err=$((api_err + 1))
+  inline=$(fetch "repos/$REPO/pulls/$PR/comments" \
+    '.[] | "[inline/" + .user.login + " " + (.path // "") + "] " + (.body // "")'); [ $? -eq 0 ] || api_err=$((api_err + 1))
+  issuec=$(fetch "repos/$REPO/issues/$PR/comments" \
+    '.[] | "[comment/" + .user.login + "] " + (.body // "")'); [ $? -eq 0 ] || api_err=$((api_err + 1))
   block=$(printf '%s\n%s\n%s' "$reviews" "$inline" "$issuec")
   # Skip PRs with no feedback at all so the corpus stays signal.
   [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ] && continue
@@ -111,16 +135,19 @@ for PR in $PR_NUMBERS; do
   { printf '\n===== PR #%s: %s =====\n' "$PR" "$title"; printf '%s\n' "$block"; } >> "$CORPUS"
 done
 
+# A partial fetch is reported LOUDLY, never hidden: the proposal would otherwise look
+# complete while resting on a corpus with holes.
+INCOMPLETE_NOTE=""
+if [ "$api_err" -gt 0 ]; then
+  INCOMPLETE_NOTE="⚠ INCOMPLETE CORPUS: $api_err GitHub API call(s) failed — some review feedback is missing, so this proposal may be partial."
+  echo "  $INCOMPLETE_NOTE" >&2
+fi
+
 [ "$n_pr" = 0 ] && { echo "No review feedback found on the last $LIMIT $STATE PR(s)." >&2; exit 1; }
 echo "  gathered feedback from $n_pr PR(s) (~$n_fb comment/review blocks, $(wc -c < "$CORPUS") bytes)"
 
 if [ "$PRINT_ONLY" = 1 ]; then
   cat "$CORPUS"; exit 0
-fi
-if [ "$DRY" = 1 ]; then
-  echo "  dry run: would ask $AGENT to propose rules from the corpus above. PRs mined:"
-  printf '%s\n' "$PR_NUMBERS" | sed 's/^/    #/'
-  exit 0
 fi
 
 # --- Build the distiller prompt ----------------------------------------------
@@ -137,9 +164,9 @@ Do this:
 - Identify RECURRING or clearly-general conventions the reviews enforce: style, naming,
   architecture, testing, security, process — anything a reviewer had to point out that a
   written rule would have prevented.
-- KEEP only rules that are (a) already covered by the existing rules file, or trivially
-  one-off/subjective — DROP those. Prefer rules seen in 2+ places, or a single but clearly
-  general/important one.
+- DROP any rule that is already covered by the existing rules file, or that is trivially
+  one-off or subjective. KEEP a rule only when it recurs (seen in 2+ places) or is a single
+  but clearly general/important convention.
 - For each proposed rule, cite the PR number(s) it came from and give a one-line rationale.
 
 Output GitHub-flavored markdown, ready to paste into the rules file, in this shape:
@@ -154,14 +181,17 @@ Be concrete and terse. Do not restate rules that already exist. Do not edit any 
 P
 PROMPT=$(printf '%s\n\n---\n\n%s\n\n---\n\n## Review feedback from recent PRs\n\n%s\n' "$TASK" "$RULES_BLOCK" "$(cat "$CORPUS")")
 
-# --- Run the chosen agent (read-only where the CLI supports it) ---------------
+# --- Run the chosen agent in its read-only / sandboxed headless mode ----------
+# The prompt embeds UNTRUSTED PR comments, so each agent is invoked in the most locked-down
+# non-interactive mode its CLI offers: codex in the `read-only` sandbox, cursor in `ask`
+# (read-only) mode, claude headless (`-p`) with no permission escalation. No agent here is
+# ever given auto-approved tool/command access (that is why antigravity is not offered).
 echo "  → $AGENT distilling… (timeout ${AGENT_TIMEOUT}s)"
 out=""; rc=0
 case "$AGENT" in
   claude)      out=$(timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null); rc=$?;;
   codex)       out=$(timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null); rc=$?;;
   cursor)      out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null); rc=$?;;
-  antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>/dev/null); rc=$?;;
 esac
 
 if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
@@ -173,10 +203,19 @@ if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
   exit 1
 fi
 
-printf '\n========== proposed rules (%s, from %s PRs of %s) ==========\n%s\n' "$AGENT" "$n_pr" "$REPO" "$out"
+printf '\n========== proposed rules (%s, from %s PRs of %s) ==========\n' "$AGENT" "$n_pr" "$REPO"
+[ -n "$INCOMPLETE_NOTE" ] && printf '%s\n\n' "$INCOMPLETE_NOTE"
+printf '%s\n' "$out"
 if [ -n "$OUT" ]; then
-  { printf '<!-- pr-review-distill: %s, last %s %s PRs of %s -->\n\n' "$AGENT" "$LIMIT" "$STATE" "$REPO"; printf '%s\n' "$out"; } > "$OUT" \
-    && echo "  written to $OUT" || echo "  ! could not write $OUT" >&2
+  # A failed write must NOT pass silently as success: the caller would believe the
+  # artifact exists. Report it and exit non-zero.
+  if { printf '<!-- pr-review-distill: %s, last %s %s PRs of %s -->\n' "$AGENT" "$LIMIT" "$STATE" "$REPO"; \
+       [ -n "$INCOMPLETE_NOTE" ] && printf '<!-- %s -->\n' "$INCOMPLETE_NOTE"; \
+       printf '\n%s\n' "$out"; } > "$OUT"; then
+    echo "  written to $OUT"
+  else
+    echo "✖ could not write $OUT" >&2; exit 1
+  fi
 fi
 echo "  Review the proposal and paste the rules you agree with into ${RULES_FILE:-your rules file}. Nothing was edited."
 exit 0

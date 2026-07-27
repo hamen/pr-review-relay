@@ -345,8 +345,11 @@ comments (which include the relay's own automated cross-reviews). Point it at an
 `--repo OWNER/NAME`, or at a specific rules file with `--rules-file CLAUDE.md`.
 
 Run it **monthly** (a cron job or a Claude skill) so the instructions file self-heals from the review
-loop instead of drifting. `--agent` takes `claude` (default), `codex`, `cursor`, or `antigravity`;
-raise the per-agent budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300s).
+loop instead of drifting. `--agent` takes `claude` (default), `codex`, or `cursor` — each invoked in its
+read-only / sandboxed headless mode, because the tool feeds **untrusted** PR comments to the agent
+(prompt-injection surface). `antigravity` is deliberately not offered here: its headless CLI needs
+`--dangerously-skip-permissions`, which would let an injected comment run commands. Raise the per-agent
+budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300s).
 
 ## 🛡️ Loop safety (no runaway iteration)
 

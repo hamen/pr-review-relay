@@ -30,11 +30,15 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   automated cross-reviews), subtracts what the project's `AGENTS.md` / `CLAUDE.md` already says, and asks
   an agent to **propose** the unwritten rules worth adding, each citing the PRs it came from. It is
   **read-only and propose-only** — it never edits the rules file; you review the ready-to-paste proposal
-  and keep what you agree with. Options: `--repo`, `--limit`, `--state`, `--agent`
-  (`claude`/`codex`/`cursor`/`antigravity`), `--rules-file`, `--out`, `--print-comments`, `--dry-run`;
-  budget via `PR_DISTILL_AGENT_TIMEOUT`. Ships with `test/test-distill.sh` (stubbed `gh` + agent, no
-  network) wired into CI. Meant to run monthly (cron or a Claude skill) so the instructions file
-  self-heals from the review loop instead of drifting.
+  and keep what you agree with. Because the corpus is **untrusted** input (a review comment could try
+  to prompt-inject the agent), each agent runs in its read-only / sandboxed headless mode — `--agent`
+  is `claude` (default), `codex` (`-s read-only`), or `cursor` (`--mode=ask`); antigravity is not
+  offered, as its headless CLI would require `--dangerously-skip-permissions`. A failed GitHub API call
+  is surfaced as an `INCOMPLETE CORPUS` warning rather than folded into "no feedback", and a failed
+  `--out` write exits non-zero. Options: `--repo`, `--limit`, `--state`, `--rules-file`, `--out`,
+  `--print-comments`, `--dry-run`; budget via `PR_DISTILL_AGENT_TIMEOUT`. Ships with `test/test-distill.sh`
+  (stubbed `gh` + agent, no network) wired into CI. Meant to run monthly (cron or a Claude skill) so the
+  instructions file self-heals from the review loop instead of drifting.
 
 ## [1.2.0] — 2026-07-22
 
