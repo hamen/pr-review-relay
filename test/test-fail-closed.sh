@@ -844,6 +844,19 @@ if [ -f "$RL" ]; then
   else echo "  FAIL [got $rc] review-local qwen argv contract not met (argv empty=$([ -s "$QW_ARGV" ] || echo yes))"; FAIL=$((FAIL+1)); fi
   qw_assert "review-local: qwen keeps --safe-mode"          has "--safe-mode"
   qw_assert "review-local: qwen keeps --approval-mode yolo" has "--approval-mode yolo"
+
+  # review-local duplicates the antigravity invocation in its own review_with, so it needs its
+  # own argv assertion: without one the two call sites drift silently, which is exactly how
+  # review-local kept the defective command line while pr-review-relay was being fixed.
+  rm -f "$WORK/argv.log"
+  ( cd "$RLREPO" && env PATH="$BIN:/usr/bin:/bin" ARGV_LOG="$WORK/argv.log" \
+      PR_RELAY_AGENT_TIMEOUT=900 bash "$RL" --base mainline --reviewers antigravity >/dev/null 2>&1 )
+  rl_agy_argv="$(grep '^agy ' "$WORK/argv.log" 2>/dev/null || true)"
+  if grep -q -- '--print-timeout 900s' <<< "$rl_agy_argv"; then
+    echo "  ok   [-] review-local gives agy the same --print-timeout"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local agy argv lacks '--print-timeout 900s': ${rl_agy_argv:-<no agy invocation recorded>}"; FAIL=$((FAIL+1))
+  fi
 fi
 
 # --- LOCAL context: reviewers read files off disk, not via gh -----------------------

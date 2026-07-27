@@ -241,7 +241,7 @@ instructions file (these are global, so they apply in every repo):
 > After you open a Pull Request, run `pr-review-relay --author antigravity` (or `--author agy`).
 > Use `agy -p` from a normal shell — not from inside the interactive agy chat.
 
-> **Note:** the relay invokes Antigravity as `agy --dangerously-skip-permissions -p`. That is headless, but it is **not** sandboxed — see the caveat under [Notes & caveats](#-notes--caveats).
+> **Note:** the relay invokes Antigravity as `agy --dangerously-skip-permissions --print-timeout <PR_RELAY_AGENT_TIMEOUT>s -p`. That is headless, but it is **not** sandboxed — see the caveat under [Notes & caveats](#-notes--caveats).
 
 **⚪ OpenCode** — `~/.opencode/AGENTS.md`:
 > After you open a Pull Request, run `pr-review-relay --author opencode`.
