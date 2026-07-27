@@ -97,6 +97,10 @@ case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$
 # diagnosis — an outer kill would only yield a bare rc 124. This is agy-only: the other reviewers'
 # internal waits, if any, have not been checked.
 AGY_GRACE=10
+# One computed value, used both to launch agy and to report an outer kill. Two copies of the
+# same arithmetic is how review-local's rc-124 message went stale one commit after the relay's
+# was fixed — the reviewers caught it, twice.
+AGY_OUTER_TIMEOUT=$((10#$AGENT_TIMEOUT + AGY_GRACE))
 CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -384,9 +388,9 @@ review_with() {
       fi; rc=$?;;
     antigravity)
       if [ "$MODE" = diff ]; then
-        out=$(timeout "$((10#$AGENT_TIMEOUT + AGY_GRACE))" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
+        out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
       else
-        out=$(timeout "$((10#$AGENT_TIMEOUT + AGY_GRACE))" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$PROMPT" 2>"$errf")
+        out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$PROMPT" 2>"$errf")
       fi; rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
@@ -400,7 +404,7 @@ review_with() {
     local why="exited with code $rc"
     case "$rc" in
       0)   why="ran fine but returned an empty review";;
-      124) why="timed out after $([ "$name" = antigravity ] && echo "$((10#$AGENT_TIMEOUT + AGY_GRACE))" || echo "$AGENT_TIMEOUT")s (raise PR_RELAY_AGENT_TIMEOUT)";;
+      124) why="timed out after $([ "$name" = antigravity ] && echo "$AGY_OUTER_TIMEOUT" || echo "$AGENT_TIMEOUT")s (raise PR_RELAY_AGENT_TIMEOUT)";;
       126) why="found but could not be executed (exit 126)";;
       127) why="command not found";;
     esac
