@@ -58,8 +58,16 @@ OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 
 AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; REVIEWERS_EXPLICIT=0
 AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+# agy enforces its own --print-timeout (default 5m) on top of ours; unset, it wins whenever
+# AGENT_TIMEOUT is raised. Same handling as pr-review-relay: give agy our budget and keep a few
+# seconds of outer grace so its own diagnosis survives instead of a bare rc 124.
+AGY_GRACE=10
 # Validate here rather than letting `timeout` fail with a bare exit 125.
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
+# One computed value, used both to launch agy and to report an outer kill. Two copies of the
+# same arithmetic is how review-local's rc-124 message went stale one commit after the relay's
+# was fixed — the reviewers caught it, twice.
+AGY_OUTER_TIMEOUT=$((10#$AGENT_TIMEOUT + AGY_GRACE))
 need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -140,7 +148,7 @@ review_with() {
     codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>"$errf"); rc=$?;;
     qwen)        out=$(printf '%s' "$DIFF" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
-    antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
+    antigravity) out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "" \
               "the in-progress local branch '$BRANCH_LABEL', diffed against '$BASE'" \
@@ -154,7 +162,7 @@ review_with() {
     local why="exited with code $rc"
     case "$rc" in
       0)   why="ran fine but returned an empty review";;
-      124) why="timed out after ${AGENT_TIMEOUT}s (raise PR_RELAY_AGENT_TIMEOUT)";;
+      124) why="timed out after $([ "$name" = antigravity ] && echo "$AGY_OUTER_TIMEOUT" || echo "$AGENT_TIMEOUT")s (raise PR_RELAY_AGENT_TIMEOUT)";;
       126) why="found but could not be executed (exit 126)";;
       127) why="command not found";;
     esac

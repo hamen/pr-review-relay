@@ -6,6 +6,18 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Fixed
+
+- **`agy` is now told how long it actually has.** It enforces its own `--print-timeout` (default 5m) on
+  top of the relay's, so raising `PR_RELAY_AGENT_TIMEOUT` above 300 changed nothing: the outer `timeout`
+  waited while agy gave up at five minutes and returned `timeout waiting for response`. That killed three
+  of four antigravity rounds on 2026-07-27 — and because a missing reviewer correctly invalidates a round,
+  each failure cost a full round for everyone else and forced a `--reset`. The relay and `review-local`
+  now pass `--print-timeout "${AGENT_TIMEOUT}s"` and give the outer `timeout` a few seconds of grace, so
+  agy hits its own limit first and its diagnosis survives instead of a bare exit 124. A test asserts the
+  flag reaches agy, since a silently missing flag is invisible to any output-shape assertion. This
+  alignment is **agy-only**: whether the other reviewers enforce internal waits has not been checked.
+
 ## [1.2.0] — 2026-07-22
 
 ### Changed

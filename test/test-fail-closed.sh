@@ -60,6 +60,10 @@ case ",\${SLEEP_KEYS:-}," in *",\$key,"*) sleep 5;; esac        # outlast a shor
 case ",\${FAIL_EMPTY:-}," in *",\$key,"*) exit 0;; esac      # empty output, rc 0 → "no review"
 case ",\${WS_ONLY:-}," in *",\$key,"*) printf '\t\n  \n';  exit 0;; esac  # whitespace-only "review"
 case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output but rc!=0
+# Record our argv when asked, so a test can assert the command line the relay builds.
+# The bug this guards against is a flag silently going missing or being renamed, which
+# no output-shape assertion would ever notice.
+[ -n "\${ARGV_LOG:-}" ] && printf '%s %s\n' "\$self" "\$*" >> "\$ARGV_LOG"
 echo "LGTM from \$key."
 exit 0
 AG
@@ -122,6 +126,22 @@ rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
 env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
   bash "$RELAY" --pr 1 --author claude --reviewers claude --dry-run >/dev/null 2>&1
 rc=$?; if [ "$rc" = 3 ]; then echo "  ok   [3] dry-run + zero runnable reviewers → fail"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 3] dry-run zero runnable"; FAIL=$((FAIL+1)); fi
+# --- agy gets our timeout budget, not its own 5-minute default ---------------
+# agy enforces --print-timeout (default 5m) on top of ours: left unset it wins whenever
+# PR_RELAY_AGENT_TIMEOUT is raised above 300, which is how three of four antigravity rounds
+# died on 2026-07-27 with "timeout waiting for response" despite a 900s budget. The failure
+# mode is a missing flag, which no output assertion would catch — so assert the argv.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$WORK/argv.log"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  ARGV_LOG="$WORK/argv.log" PR_RELAY_AGENT_TIMEOUT=900 \
+  bash "$RELAY" --pr 1 --author claude --reviewers antigravity --parallel >/dev/null 2>&1
+agy_argv="$(grep '^agy ' "$WORK/argv.log" 2>/dev/null || true)"
+if grep -q -- '--print-timeout 900s' <<< "$agy_argv"; then
+  echo "  ok   [-] agy is given the relay's timeout as --print-timeout"; PASS=$((PASS+1))
+else
+  echo "  FAIL agy argv lacks '--print-timeout 900s': ${agy_argv:-<no agy invocation recorded>}"; FAIL=$((FAIL+1))
+fi
+
 # the traversal attempt must NOT create a file outside the temp status dir
 if [ -e "$WORK/PWNED" ] || [ -e "$HOME/PWNED" ] || [ -e ./PWNED ]; then
   echo "  FAIL path traversal escaped STATUS_DIR"; FAIL=$((FAIL+1))
@@ -824,6 +844,19 @@ if [ -f "$RL" ]; then
   else echo "  FAIL [got $rc] review-local qwen argv contract not met (argv empty=$([ -s "$QW_ARGV" ] || echo yes))"; FAIL=$((FAIL+1)); fi
   qw_assert "review-local: qwen keeps --safe-mode"          has "--safe-mode"
   qw_assert "review-local: qwen keeps --approval-mode yolo" has "--approval-mode yolo"
+
+  # review-local duplicates the antigravity invocation in its own review_with, so it needs its
+  # own argv assertion: without one the two call sites drift silently, which is exactly how
+  # review-local kept the defective command line while pr-review-relay was being fixed.
+  rm -f "$WORK/argv.log"
+  ( cd "$RLREPO" && env PATH="$BIN:/usr/bin:/bin" ARGV_LOG="$WORK/argv.log" \
+      PR_RELAY_AGENT_TIMEOUT=900 bash "$RL" --base mainline --reviewers antigravity >/dev/null 2>&1 )
+  rl_agy_argv="$(grep '^agy ' "$WORK/argv.log" 2>/dev/null || true)"
+  if grep -q -- '--print-timeout 900s' <<< "$rl_agy_argv"; then
+    echo "  ok   [-] review-local gives agy the same --print-timeout"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local agy argv lacks '--print-timeout 900s': ${rl_agy_argv:-<no agy invocation recorded>}"; FAIL=$((FAIL+1))
+  fi
 fi
 
 # --- LOCAL context: reviewers read files off disk, not via gh -----------------------
