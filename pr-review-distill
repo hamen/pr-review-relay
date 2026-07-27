@@ -24,10 +24,15 @@
 #                     [--print-comments] [--dry-run]
 #   (no --repo → uses the repo of the current directory)
 #
-# The agent sees UNTRUSTED PR comments, so only agents with a read-only / sandboxed
-# headless mode are offered (codex `-s read-only`, cursor `--mode=ask`, claude `-p`).
-# antigravity is intentionally not supported (its headless CLI needs
-# `--dangerously-skip-permissions`, unsafe on injectable input).
+# SECURITY — the agent sees UNTRUSTED PR comments (a comment can attempt prompt injection).
+# Mitigations here REDUCE, not eliminate, that risk: each agent runs in its read-only /
+# sandboxed mode (codex `-s read-only`, cursor `--mode=ask`, claude `--permission-mode plan`)
+# from an empty scratch dir, so an injected instruction cannot WRITE files or RUN commands,
+# and no checkout-local config/hooks load. It does NOT sandbox reads or your AMBIENT user
+# config: a read-only agent can still read files it can reach and use any MCP tools / network
+# your global setup grants. Treat this like the rest of the toolkit — run it on repos whose
+# review history you don't consider actively hostile. antigravity is not offered at all (its
+# headless CLI needs `--dangerously-skip-permissions`).
 #
 # Examples:
 #   pr-review-distill                         # last 20 merged PRs of the current repo, propose via claude
@@ -70,6 +75,7 @@ case "$_self" in
   *)   SCRIPT_DIR=".";;
 esac
 SCRIPT_DIR="$(cd -- "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
+DISTILL_SELF="$_self"   # the resolved real file — used by --help (which "$0" can't reach on a PATH install)
 unset _self _rl _n _link
 # Shared helpers (PATH/tmpdir guards) live in the same lib the relay uses, so the policy
 # exists in one place.
@@ -100,7 +106,9 @@ while [ $# -gt 0 ]; do
     --out)            need_value "$@"; OUT="$2"; shift 2;;
     --print-comments) PRINT_ONLY=1; shift;;
     --dry-run)        DRY=1; shift;;
-    -h|--help)        awk 'NR>1 && /^[^#]/{exit} NR>1{sub(/^# ?/,"");print}' "$0"; exit 0;;
+    -h|--help)        _h=$(awk 'NR>1 && /^[^#]/{exit} NR>1{sub(/^# ?/,"");print}' "$DISTILL_SELF" 2>/dev/null)
+                      [ -n "$_h" ] && printf '%s\n' "$_h" || { echo "could not read help from $DISTILL_SELF" >&2; exit 1; }
+                      exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -140,7 +148,16 @@ fi
 # Read the rules content, supporting both a single file and a directory (e.g. .cursor/rules).
 RULES_BLOCK=""; rules_content=""
 if [ -n "$RULES_FILE" ] && [ -d "$RULES_FILE" ]; then
-  rules_content=$(cat "$RULES_FILE"/* 2>/dev/null)
+  # Iterate readable files explicitly rather than `cat dir/*` (which hides read errors);
+  # warn if an existing rules dir yields nothing, so we don't silently over-propose.
+  _any=0
+  for _rf in "$RULES_FILE"/*; do
+    [ -f "$_rf" ] && [ -r "$_rf" ] || continue
+    rules_content="${rules_content}$(cat "$_rf")
+"
+    _any=1
+  done
+  [ "$_any" = 0 ] && echo "  ! rules dir '$RULES_FILE' has no readable files — not subtracting existing rules" >&2
 elif [ -n "$RULES_FILE" ] && [ -f "$RULES_FILE" ]; then
   rules_content=$(cat "$RULES_FILE" 2>/dev/null)
 fi
@@ -153,6 +170,23 @@ elif [ "$REPO_EXPLICIT" = 1 ]; then
   echo "  rules file: none (with --repo, pass --rules-file to subtract that repo's existing rules)"
 else
   echo "  rules file: none found (proposal will not subtract existing rules)"
+fi
+
+# This tool NEVER edits the rules file, so --out must not point AT it (`--out AGENTS.md`
+# would truncate it). Compare canonical paths so a relative alias or symlink can't slip past.
+if [ -n "$OUT" ] && [ -n "$RULES_FILE" ]; then
+  canon() {
+    local p="$1" d b
+    if readlink -f -- "$p" >/dev/null 2>&1; then readlink -f -- "$p"; return 0; fi   # GNU
+    d=$(dirname -- "$p"); b=$(basename -- "$p")
+    d=$(cd -- "$d" 2>/dev/null && pwd -P) || return 1
+    printf '%s/%s\n' "$d" "$b"
+  }
+  _oc=$(canon "$OUT" 2>/dev/null); _rc=$(canon "$RULES_FILE" 2>/dev/null)
+  if [ -n "$_oc" ] && [ "$_oc" = "$_rc" ]; then
+    echo "✖ --out '$OUT' resolves to the rules file '$RULES_FILE' — refusing (this tool never edits it)." >&2
+    exit 2
+  fi
 fi
 
 # --- List the PRs to mine ----------------------------------------------------
@@ -180,6 +214,11 @@ CORPUS="$(mktemp)" || { echo "mktemp failed" >&2; exit 1; }
 AGENT_CWD="$(mktemp -d)" || { echo "mktemp -d failed" >&2; exit 1; }
 trap 'rm -rf "$CORPUS" "$AGENT_CWD"' EXIT
 relay_assert_tmpdir_outside_repo "$AGENT_CWD"
+# Cap the corpus so a huge (or deliberately flooded) PR history can't exhaust memory or blow
+# the agent's context. Once the cap is hit we stop adding PRs and report the truncation.
+MAX_CORPUS_BYTES="${PR_DISTILL_MAX_CORPUS_BYTES:-300000}"
+case "$MAX_CORPUS_BYTES" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_MAX_CORPUS_BYTES: '$MAX_CORPUS_BYTES' (want a positive number of bytes)" >&2; exit 2;; esac
+CORPUS_TRUNCATED=""
 n_pr=0; n_fb=0; api_err=0
 # Count a failed GitHub API call rather than silently folding it into "no feedback":
 # a transient outage must NOT masquerade as a clean, complete corpus. `fetch` returns
@@ -203,6 +242,11 @@ for PR in $PR_NUMBERS; do
   lines=$(printf '%s\n' "$block" | grep -c '^\[' || true)
   n_fb=$((n_fb + lines))
   { printf '\n===== PR #%s: %s =====\n' "$PR" "$title"; printf '%s\n' "$block"; } >> "$CORPUS"
+  if [ "$(wc -c < "$CORPUS")" -ge "$MAX_CORPUS_BYTES" ]; then
+    CORPUS_TRUNCATED="⚠ CORPUS TRUNCATED: hit the ${MAX_CORPUS_BYTES}-byte cap after $n_pr PR(s); older PRs were skipped (raise PR_DISTILL_MAX_CORPUS_BYTES)."
+    echo "  $CORPUS_TRUNCATED" >&2
+    break
+  fi
 done
 
 # A partial fetch is reported LOUDLY, never hidden: the proposal would otherwise look
@@ -211,6 +255,11 @@ INCOMPLETE_NOTE=""
 if [ "$api_err" -gt 0 ]; then
   INCOMPLETE_NOTE="⚠ INCOMPLETE CORPUS: $api_err GitHub API call(s) failed — some review feedback is missing, so this proposal may be partial."
   echo "  $INCOMPLETE_NOTE" >&2
+fi
+# Carry any truncation note into the same channel shown in the output and the --out file.
+if [ -n "$CORPUS_TRUNCATED" ]; then
+  INCOMPLETE_NOTE="${INCOMPLETE_NOTE:+$INCOMPLETE_NOTE
+}$CORPUS_TRUNCATED"
 fi
 
 [ "$n_pr" = 0 ] && { echo "No review feedback found on the last $LIMIT $STATE PR(s)." >&2; exit 1; }
@@ -251,15 +300,17 @@ Be concrete and terse. Do not restate rules that already exist. Do not edit any 
 P
 PROMPT=$(printf '%s\n\n---\n\n%s\n\n---\n\n## Review feedback from recent PRs\n\n%s\n' "$TASK" "$RULES_BLOCK" "$(cat "$CORPUS")")
 
-# --- Run the chosen agent in its ENFORCED read-only / sandboxed headless mode --
+# --- Run the chosen agent in its read-only / sandboxed headless mode ----------
 # The prompt embeds UNTRUSTED PR comments (a comment could try to prompt-inject the agent),
 # so each agent is pinned to the most locked-down non-interactive mode its CLI enforces on
 # the command line — never relying on ambient settings a checkout could carry:
 #   codex   — `-s read-only` sandbox
 #   cursor  — `--mode=ask` (read-only)
-#   claude  — `--permission-mode plan`: plan mode cannot edit files or run commands, so an
-#             injected instruction can't act. (`-p` alone is NOT read-only — it honours
-#             settings.json, which a PR-controlled `.claude/settings.json` could widen.)
+#   claude  — `--permission-mode plan`: plan mode cannot edit files or run commands. (`-p`
+#             alone is NOT read-only — it honours settings.json, which a PR-controlled
+#             `.claude/settings.json` could widen.)
+# This blocks WRITES and command execution; it does NOT sandbox reads or your ambient user
+# config (MCP/network) — see the SECURITY note in the header for the residual risk.
 # antigravity is not offered: its headless CLI needs `--dangerously-skip-permissions`.
 # The prompt goes in via STDIN, not as an argv string — a large review history can exceed
 # the ~128 KiB single-argument limit (E2BIG) if passed on the command line.

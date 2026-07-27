@@ -352,13 +352,21 @@ baseline is otherwise auto-detected from the current directory (the wrong repo).
 Run it **monthly** (a cron job or a Claude skill) so the instructions file self-heals from the review
 loop instead of drifting.
 
-**Untrusted input, enforced read-only.** The corpus is PR comments — a comment could try to prompt-inject
-the agent. So `--agent` only offers agents pinned to an **enforced** read-only mode on the command line
+**Untrusted input — read-only, but not a sandbox.** The corpus is PR comments, and a comment can try to
+prompt-inject the agent. `--agent` only offers agents pinned to a read-only mode on the command line
 (never relying on ambient settings a checkout could carry): `claude` (default, `--permission-mode plan` —
-plan mode can't edit or run commands), `codex` (`-s read-only`), `cursor` (`--mode=ask`). The prompt is
-fed via **stdin**, so a large review history can't blow the ~128 KiB argv limit. `antigravity` is not
-offered — its headless CLI would need `--dangerously-skip-permissions`. A non-zero agent exit fails the
-run (a truncated proposal is never emitted as if complete), and a failed GitHub fetch is surfaced as an
+plan mode can't edit or run commands), `codex` (`-s read-only`), `cursor` (`--mode=ask`). Each runs from
+an empty scratch directory so no checkout-local config or hooks load, and the prompt is fed via **stdin**
+(so a large review history can't blow the ~128 KiB argv limit). `antigravity` is not offered — its
+headless CLI would need `--dangerously-skip-permissions`.
+
+This blocks **writes and command execution**, but it is **not full isolation**: a read-only agent can
+still read files it can reach and use whatever MCP tools / network your ambient config grants, so a
+crafted comment could in principle steer those. Same threat model as the rest of this toolkit (see
+[Notes & caveats](#-notes--caveats)) — run it on repos whose review history you don't consider actively
+hostile. The corpus is capped (`PR_DISTILL_MAX_CORPUS_BYTES`, default 300 KB) so a flooded history can't
+exhaust memory or the agent's context; truncation is reported. A non-zero agent exit fails the run (a
+truncated proposal is never emitted as complete), and a failed GitHub fetch is surfaced as an
 `INCOMPLETE CORPUS` warning. Raise the per-agent budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300s).
 
 ## 🛡️ Loop safety (no runaway iteration)

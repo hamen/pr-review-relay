@@ -121,7 +121,7 @@ fi
 
 echo "test: claude is invoked in ENFORCED read-only (--permission-mode plan)"
 if grep -q -- '--permission-mode plan' "$WORK/cargs" 2>/dev/null; then
-  ok "claude pinned to plan mode (injection-safe default)"
+  ok "claude pinned to plan mode (read-only default)"
 else
   bad "claude not run with --permission-mode plan"; cat "$WORK/cargs" 2>/dev/null >&2
 fi
@@ -161,6 +161,32 @@ fi
 echo "test: no PRs in repo → exit 1"
 rc=$(DISTILL_NO_PRS=1 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
 [ "$rc" = 1 ] && ok "no PRs exits 1" || { bad "no PRs (rc=$rc)"; cat "$WORK/err" >&2; }
+
+echo "test: --help renders non-empty (reads the resolved script, not \$0)"
+rc=$(run --help)
+if [ "$rc" = 0 ] && grep -q 'pr-review-distill' "$WORK/out"; then
+  ok "help renders"
+else
+  bad "help (rc=$rc)"; cat "$WORK/err" >&2
+fi
+
+echo "test: invalid PR_DISTILL_MAX_CORPUS_BYTES → exit 2"
+rc=$(PR_DISTILL_MAX_CORPUS_BYTES=abc "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
+[ "$rc" = 2 ] && ok "invalid corpus cap exits 2" || { bad "corpus cap validation (rc=$rc)"; cat "$WORK/err" >&2; }
+
+echo "test: a tiny corpus cap truncates and reports it → exit 0"
+rc=$(PR_DISTILL_MAX_CORPUS_BYTES=10 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q 'CORPUS TRUNCATED' "$WORK/err"; then
+  ok "corpus cap truncates and warns"
+else
+  bad "corpus truncation (rc=$rc)"; cat "$WORK/err" >&2
+fi
+
+echo "test: --out pointing AT the rules file is refused → exit 2 (never edits rules)"
+printf 'rule\n' > "$WORK/RULES.md"
+rc=$(run --rules-file "$WORK/RULES.md" --out "$WORK/RULES.md")
+[ "$rc" = 2 ] && grep -q 'refusing' "$WORK/err" && ok "--out == rules file refused" || { bad "--out==rules guard (rc=$rc)"; cat "$WORK/err" >&2; }
+rm -f "$WORK/RULES.md"
 
 echo "test: an unwritable --out fails loudly → exit 1"
 rc=$(run --out "$WORK/nope/deep/proposal.md")

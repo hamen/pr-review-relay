@@ -44,10 +44,16 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   execute on agent start. The rules baseline is resolved from the git root — `AGENTS.md`, `CLAUDE.md`,
   or a `.cursor/rules` directory — so running from a subdirectory still finds it; with an explicit
   `--repo` it is not auto-detected from the current directory (wrong repo), so pass `--rules-file`.
-  Options: `--repo`, `--limit`, `--state` (`merged`/`closed`/`open`/`all`), `--rules-file`, `--out`,
-  `--print-comments`, `--dry-run`; budget via `PR_DISTILL_AGENT_TIMEOUT`. Ships with `test/test-distill.sh`
-  (stubbed `gh` + agents, no network, 18 cases) wired into CI. Meant to run monthly (cron or a Claude
-  skill) so the instructions file self-heals from the review loop instead of drifting.
+  The corpus is capped (`PR_DISTILL_MAX_CORPUS_BYTES`, default 300 KB) so a flooded PR history can't
+  exhaust memory or the agent's context, with truncation reported; and `--out` is refused if it resolves
+  to the rules file (it never edits it). The read-only posture blocks writes and command execution but is
+  not full isolation — a read-only agent can still read reachable files and use ambient MCP/network — so
+  the docs frame it as the toolkit's existing "not actively hostile input" threat model rather than
+  claiming injection-immunity. Options: `--repo`, `--limit`, `--state` (`merged`/`closed`/`open`/`all`),
+  `--rules-file`, `--out`, `--print-comments`, `--dry-run`; budget via `PR_DISTILL_AGENT_TIMEOUT`. Ships
+  with `test/test-distill.sh` (stubbed `gh` + agents, no network, 22 cases) wired into CI. Meant to run
+  monthly (cron or a Claude skill) so the instructions file self-heals from the review loop instead of
+  drifting.
 
 ## [1.2.0] — 2026-07-22
 
