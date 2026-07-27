@@ -22,8 +22,12 @@ jobs:
           bash -n review-local
           bash -n lib-opencode.sh
           bash -n pr-review-fetch
+          bash -n pr-review-distill
           bash -n pr-review-collapse-comments
           bash -n pr-review-consensus
           bash -n test/test-fail-closed.sh
+          bash -n test/test-distill.sh
       - name: fail-closed exit-code tests
         run: bash test/test-fail-closed.sh
+      - name: distill tests
+        run: bash test/test-distill.sh

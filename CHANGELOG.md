@@ -18,6 +18,43 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   flag reaches agy, since a silently missing flag is invisible to any output-shape assertion. This
   alignment is **agy-only**: whether the other reviewers enforce internal waits has not been checked.
 
+## [1.3.0] — 2026-07-27
+
+### Added
+
+- **`pr-review-distill` — turn recent PR review feedback into proposed `AGENTS.md` rules.** Inspired by
+  Marco Gomiero's [*Code review comments are the rules you forgot to write down*](https://www.marcogomiero.com/posts/2026/code-review-agents-update/):
+  the relay makes reviewers repeat the same corrections across PRs, and each repeat is a project
+  convention that isn't written down yet. The new sibling mines the review feedback from recent PRs
+  (top-level review bodies, inline review comments, and issue-style comments — including the relay's own
+  automated cross-reviews), subtracts what the project's `AGENTS.md` / `CLAUDE.md` already says, and asks
+  an agent to **propose** the unwritten rules worth adding, each citing the PRs it came from. It is
+  **read-only and propose-only** — it never edits the rules file; you review the ready-to-paste proposal
+  and keep what you agree with. Because the corpus is **untrusted** input (a review comment could try
+  to prompt-inject the agent), each agent runs in an **enforced** read-only mode pinned on the command
+  line (not ambient settings a checkout could widen): `--agent` is `claude` (default,
+  `--permission-mode plan`), `codex` (`-s read-only`), or `cursor` (`--mode=ask`); antigravity is not
+  offered, as its headless CLI would require `--dangerously-skip-permissions`. The prompt is passed via
+  **stdin** so a large review history can't hit the ~128 KiB argv limit. A **non-zero agent exit fails
+  the run** (a truncated proposal is never emitted as complete); a failed `gh pr list` is distinguished
+  from an empty repo; per-PR API failures are surfaced as an `INCOMPLETE CORPUS` warning rather than
+  folded into "no feedback"; and a failed `--out` write exits non-zero. It reuses the toolkit's PATH /
+  tmpdir guards (`relay_assert_path_outside_repo`) before running any external command, and runs the
+  agent from an empty scratch directory so a checked-out `.claude/settings.json` (e.g. a hook) can't
+  execute on agent start. The rules baseline is resolved from the git root — `AGENTS.md`, `CLAUDE.md`,
+  or a `.cursor/rules` directory — so running from a subdirectory still finds it; with an explicit
+  `--repo` it is not auto-detected from the current directory (wrong repo), so pass `--rules-file`.
+  The corpus is capped (`PR_DISTILL_MAX_CORPUS_BYTES`, default 300 KB) so a flooded PR history can't
+  exhaust memory or the agent's context, with truncation reported; and `--out` is refused if it resolves
+  to the rules file (it never edits it). The read-only posture blocks writes and command execution but is
+  not full isolation — a read-only agent can still read reachable files and use ambient MCP/network — so
+  the docs frame it as the toolkit's existing "not actively hostile input" threat model rather than
+  claiming injection-immunity. Options: `--repo`, `--limit`, `--state` (`merged`/`closed`/`open`/`all`),
+  `--rules-file`, `--out`, `--print-comments`, `--dry-run`; budget via `PR_DISTILL_AGENT_TIMEOUT`. Ships
+  with `test/test-distill.sh` (stubbed `gh` + agents, no network, 22 cases) wired into CI. Meant to run
+  monthly (cron or a Claude skill) so the instructions file self-heals from the review loop instead of
+  drifting.
+
 ## [1.2.0] — 2026-07-22
 
 ### Changed

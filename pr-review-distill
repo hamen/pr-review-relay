@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# pr-review-distill — turn recent PR review feedback into proposed AGENTS.md rules.
+#
+# "Code review comments are the rules you forgot to write down." The relay produces
+# cross-reviews (and humans leave reviews too); over time the same convention gets
+# flagged again and again. This reads the review feedback from recent PRs, compares
+# it against the project's existing rules file (AGENTS.md / CLAUDE.md), and asks an
+# agent to PROPOSE the unwritten rules worth adding — so the instructions file
+# self-heals from the feedback loop instead of drifting.
+#
+# It is READ-ONLY and PROPOSE-ONLY: it never edits the rules file. It prints a
+# ready-to-paste proposal (and optionally writes it to --out). You review and apply.
+#
+# Sources of feedback it mines, per PR:
+#   - PR reviews with a body        (gh api repos/OWNER/REPO/pulls/N/reviews)
+#   - inline review comments        (gh api repos/OWNER/REPO/pulls/N/comments)
+#   - issue-style PR comments,       (gh api repos/OWNER/REPO/issues/N/comments)
+#     which include the relay's own automated cross-review comments.
+#
+# Usage:
+#   pr-review-distill [--repo OWNER/NAME] [--limit N] [--state merged|closed|open|all]
+#                     [--agent claude|codex|cursor]
+#                     [--rules-file PATH] [--out PATH]
+#                     [--print-comments] [--dry-run]
+#   (no --repo → uses the repo of the current directory)
+#
+# SECURITY — the agent sees UNTRUSTED PR comments (a comment can attempt prompt injection).
+# Mitigations here REDUCE, not eliminate, that risk: each agent runs in its read-only /
+# sandboxed mode (codex `-s read-only`, cursor `--mode=ask`, claude `--permission-mode plan`)
+# from an empty scratch dir, so an injected instruction cannot WRITE files or RUN commands,
+# and no checkout-local config/hooks load. It does NOT sandbox reads or your AMBIENT user
+# config: a read-only agent can still read files it can reach and use any MCP tools / network
+# your global setup grants. Treat this like the rest of the toolkit — run it on repos whose
+# review history you don't consider actively hostile. antigravity is not offered at all (its
+# headless CLI needs `--dangerously-skip-permissions`).
+#
+# Examples:
+#   pr-review-distill                         # last 20 merged PRs of the current repo, propose via claude
+#   pr-review-distill --limit 40 --agent codex
+#   pr-review-distill --rules-file CLAUDE.md --out /tmp/proposed-rules.md
+#   pr-review-distill --dry-run               # show which PRs + rules file, don't call an agent
+#
+# Recurring use: run it monthly (cron or a Claude skill) to keep AGENTS.md current.
+#
+# Exit codes: 0 ok · 1 usage / precondition (no gh, no repo, no PRs, no feedback,
+# agent produced nothing) · 2 bad argument.
+set -uo pipefail
+
+# SCRIPT_DIR must be the directory of the REAL script so the sibling library resolves even
+# when invoked through a symlink (e.g. ~/.local/bin/pr-review-distill -> the repo checkout).
+# `pwd -P` resolves a symlinked *directory* but NOT a symlinked *script file*, so we first
+# walk the script's own symlink chain to the real file. `dirname`/`$0` are avoided (they'd
+# resolve through PATH before the PATH guard runs). readlink is used at an ABSOLUTE path,
+# never via PATH. The loop only runs when the script is a symlink, bounded against a cycle.
+_self="${BASH_SOURCE[0]}"
+_rl=/usr/bin/readlink; [ -x "$_rl" ] || _rl=/bin/readlink
+_n=0
+while [ -h "$_self" ] && [ -x "$_rl" ] && [ "$_n" -lt 40 ]; do
+  _n=$((_n + 1))
+  _link="$("$_rl" "$_self" 2>/dev/null)" || break
+  case "$_link" in
+    /*) _self="$_link";;
+    *)  case "$_self" in
+          */*) _self="${_self%/*}/$_link";;
+          *)   _self="$_link";;
+        esac;;
+  esac
+done
+if [ -h "$_self" ]; then
+  echo "cannot resolve the script's own symlink (readlink unavailable or a symlink cycle): $_self" >&2
+  exit 1
+fi
+case "$_self" in
+  */*) SCRIPT_DIR="${_self%/*}";;
+  *)   SCRIPT_DIR=".";;
+esac
+SCRIPT_DIR="$(cd -- "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
+DISTILL_SELF="$_self"   # the resolved real file — used by --help (which "$0" can't reach on a PATH install)
+unset _self _rl _n _link
+# Shared helpers (PATH/tmpdir guards) live in the same lib the relay uses, so the policy
+# exists in one place.
+OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
+[ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
+. "$OPENCODE_LIB"
+
+# Before ANY external command is trusted (awk in --help, gh, git, timeout, the agent CLIs):
+# a repo-local PATH entry (or "." in PATH) could otherwise shadow them with binaries from an
+# untrusted checkout. Same guards the other agent-running entrypoints use.
+relay_assert_path_outside_repo
+relay_assert_tmpdir_outside_repo_global
+
+AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
+case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
+
+REPO=""; REPO_EXPLICIT=0; LIMIT=20; STATE="merged"; AGENT="claude"; RULES_FILE=""; OUT=""; PRINT_ONLY=0; DRY=0
+# A value-taking option with no argument must fail with a clean usage error (exit 2),
+# not crash on an unbound $2 under `set -u` (matches review-local's guard).
+need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)           need_value "$@"; REPO="$2"; REPO_EXPLICIT=1; shift 2;;
+    --limit)          need_value "$@"; LIMIT="$2"; shift 2;;
+    --state)          need_value "$@"; STATE="$2"; shift 2;;
+    --agent)          need_value "$@"; AGENT="$2"; shift 2;;
+    --rules-file)     need_value "$@"; RULES_FILE="$2"; shift 2;;
+    --out)            need_value "$@"; OUT="$2"; shift 2;;
+    --print-comments) PRINT_ONLY=1; shift;;
+    --dry-run)        DRY=1; shift;;
+    -h|--help)        _h=$(awk 'NR>1 && /^[^#]/{exit} NR>1{sub(/^# ?/,"");print}' "$DISTILL_SELF" 2>/dev/null)
+                      [ -n "$_h" ] && printf '%s\n' "$_h" || { echo "could not read help from $DISTILL_SELF" >&2; exit 1; }
+                      exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+case "$LIMIT" in ''|*[!0-9]*|0) echo "invalid --limit: '$LIMIT' (want a positive integer)" >&2; exit 2;; esac
+case "$STATE" in merged|closed|all|open) ;; *) echo "invalid --state: '$STATE' (want merged|closed|all|open)" >&2; exit 2;; esac
+# Only agents with a proven read-only / sandboxed headless mode are offered, because this
+# tool feeds UNTRUSTED PR comments to the agent (prompt-injection surface). antigravity is
+# deliberately NOT supported: its only headless invocation in this toolkit needs
+# `--dangerously-skip-permissions`, which would let an injected comment run commands.
+case "$AGENT" in claude|codex|cursor) ;; *) echo "invalid --agent: '$AGENT' (want claude|codex|cursor — antigravity is unsupported here, see note in the script)" >&2; exit 2;; esac
+
+command -v gh >/dev/null || { echo "gh not found" >&2; exit 1; }
+
+if [ -z "$REPO" ]; then
+  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+fi
+[ -z "$REPO" ] && { echo "No repo. Run from inside a repo or pass --repo OWNER/NAME." >&2; exit 1; }
+
+# --- Resolve the rules file to compare against -------------------------------
+# Only used to tell the agent what is ALREADY written (so it proposes the gaps).
+# If none is found the run still works — the agent just has no baseline to subtract.
+# Auto-detection reads the CURRENT directory, so it is only valid when we are actually
+# in the target repo. With an explicit --repo (a different repo), auto-detecting cwd's
+# rules would compare THAT repo's reviews against THIS repo's rules — so we skip it and
+# ask for --rules-file instead.
+if [ -z "$RULES_FILE" ] && [ "$REPO_EXPLICIT" = 0 ]; then
+  # Resolve from the git ROOT, not just cwd, so running from a subdirectory still finds the
+  # project's rules (otherwise existing rules get re-proposed).
+  base=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+  for cand in AGENTS.md CLAUDE.md AGENT.md; do
+    if [ -f "$base/$cand" ]; then RULES_FILE="$base/$cand"; break; fi
+  done
+  # .cursor/rules is conventionally a DIRECTORY of rule files (not a single file).
+  [ -z "$RULES_FILE" ] && [ -d "$base/.cursor/rules" ] && RULES_FILE="$base/.cursor/rules"
+fi
+# Read the rules content, supporting both a single file and a directory (e.g. .cursor/rules).
+RULES_BLOCK=""; rules_content=""
+if [ -n "$RULES_FILE" ] && [ -d "$RULES_FILE" ]; then
+  # Iterate readable files explicitly rather than `cat dir/*` (which hides read errors);
+  # warn if an existing rules dir yields nothing, so we don't silently over-propose.
+  _any=0
+  for _rf in "$RULES_FILE"/*; do
+    [ -f "$_rf" ] && [ -r "$_rf" ] || continue
+    rules_content="${rules_content}$(cat "$_rf")
+"
+    _any=1
+  done
+  [ "$_any" = 0 ] && echo "  ! rules dir '$RULES_FILE' has no readable files — not subtracting existing rules" >&2
+elif [ -n "$RULES_FILE" ] && [ -f "$RULES_FILE" ]; then
+  rules_content=$(cat "$RULES_FILE" 2>/dev/null)
+fi
+if [ -n "$RULES_FILE" ] && [ -e "$RULES_FILE" ]; then
+  RULES_BLOCK=$(printf '## Rules that ALREADY exist (%s) — do NOT re-propose these\n\n%s\n' "$RULES_FILE" "$rules_content")
+  echo "  rules file: $RULES_FILE ($(printf '%s' "$rules_content" | wc -c) bytes)"
+elif [ -n "$RULES_FILE" ]; then
+  echo "  ! rules file '$RULES_FILE' not found — proposal will not subtract existing rules" >&2
+elif [ "$REPO_EXPLICIT" = 1 ]; then
+  echo "  rules file: none (with --repo, pass --rules-file to subtract that repo's existing rules)"
+else
+  echo "  rules file: none found (proposal will not subtract existing rules)"
+fi
+
+# This tool NEVER edits the rules file, so --out must not point AT it (`--out AGENTS.md`
+# would truncate it). Compare canonical paths so a relative alias or symlink can't slip past.
+if [ -n "$OUT" ] && [ -n "$RULES_FILE" ]; then
+  canon() {
+    local p="$1" d b
+    if readlink -f -- "$p" >/dev/null 2>&1; then readlink -f -- "$p"; return 0; fi   # GNU
+    d=$(dirname -- "$p"); b=$(basename -- "$p")
+    d=$(cd -- "$d" 2>/dev/null && pwd -P) || return 1
+    printf '%s/%s\n' "$d" "$b"
+  }
+  _oc=$(canon "$OUT" 2>/dev/null); _rc=$(canon "$RULES_FILE" 2>/dev/null)
+  if [ -n "$_oc" ] && [ "$_oc" = "$_rc" ]; then
+    echo "✖ --out '$OUT' resolves to the rules file '$RULES_FILE' — refusing (this tool never edits it)." >&2
+    exit 2
+  fi
+fi
+
+# --- List the PRs to mine ----------------------------------------------------
+echo "▶ Distilling review feedback from $REPO — last $LIMIT $STATE PR(s), agent: $AGENT"
+# Keep gh's exit status: an auth/network/API failure must be distinguishable from a repo
+# that simply has no matching PRs (both otherwise yield empty output).
+PR_NUMBERS=$(gh pr list --repo "$REPO" --state "$STATE" --limit "$LIMIT" --json number -q '.[].number' 2>/dev/null); list_rc=$?
+[ "$list_rc" -ne 0 ] && { echo "✖ could not list PRs for $REPO (gh exit $list_rc — check auth, network, or --repo)." >&2; exit 1; }
+[ -z "$PR_NUMBERS" ] && { echo "No $STATE PRs found in $REPO." >&2; exit 1; }
+
+# --dry-run stops here — before the (heavier) per-PR corpus fetch — and just shows
+# which PRs would be mined. Use --print-comments to actually gather and dump the corpus.
+if [ "$DRY" = 1 ]; then
+  echo "  dry run: would gather feedback from these PR(s) and ask $AGENT to propose rules:"
+  printf '%s\n' "$PR_NUMBERS" | sed 's/^/    #/'
+  exit 0
+fi
+
+# --- Gather the feedback corpus ----------------------------------------------
+CORPUS="$(mktemp)" || { echo "mktemp failed" >&2; exit 1; }
+# The agent is run FROM this empty dir (below), never from the checkout: a checked-out
+# `.claude/settings.json` (e.g. a SessionStart hook) would otherwise run on agent start,
+# regardless of --permission-mode. An empty cwd carries no such project config. It must be
+# outside the repo for the same reason PATH must (a repo-local temp could be shadowed).
+AGENT_CWD="$(mktemp -d)" || { echo "mktemp -d failed" >&2; exit 1; }
+trap 'rm -rf "$CORPUS" "$AGENT_CWD"' EXIT
+relay_assert_tmpdir_outside_repo "$AGENT_CWD"
+# Cap the corpus so a huge (or deliberately flooded) PR history can't exhaust memory or blow
+# the agent's context. Once the cap is hit we stop adding PRs and report the truncation.
+MAX_CORPUS_BYTES="${PR_DISTILL_MAX_CORPUS_BYTES:-300000}"
+case "$MAX_CORPUS_BYTES" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_MAX_CORPUS_BYTES: '$MAX_CORPUS_BYTES' (want a positive number of bytes)" >&2; exit 2;; esac
+CORPUS_TRUNCATED=""
+n_pr=0; n_fb=0; api_err=0
+# Count a failed GitHub API call rather than silently folding it into "no feedback":
+# a transient outage must NOT masquerade as a clean, complete corpus. `fetch` returns
+# gh's exit status; the increment happens in the PARENT (a command substitution runs in a
+# subshell, so incrementing api_err inside fetch would be lost).
+fetch() { gh api --paginate "$1" --jq "$2" 2>/dev/null; }
+for PR in $PR_NUMBERS; do
+  title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "")
+  # Reviews (top-level review bodies), inline review comments, and issue comments
+  # (which include the relay's automated cross-reviews). Each prefixed by author.
+  reviews=$(fetch "repos/$REPO/pulls/$PR/reviews" \
+    '.[] | select((.body // "") | length > 0) | "[review/" + .user.login + "] " + .body'); [ $? -eq 0 ] || api_err=$((api_err + 1))
+  inline=$(fetch "repos/$REPO/pulls/$PR/comments" \
+    '.[] | "[inline/" + .user.login + " " + (.path // "") + "] " + (.body // "")'); [ $? -eq 0 ] || api_err=$((api_err + 1))
+  issuec=$(fetch "repos/$REPO/issues/$PR/comments" \
+    '.[] | "[comment/" + .user.login + "] " + (.body // "")'); [ $? -eq 0 ] || api_err=$((api_err + 1))
+  block=$(printf '%s\n%s\n%s' "$reviews" "$inline" "$issuec")
+  # Skip PRs with no feedback at all so the corpus stays signal.
+  [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ] && continue
+  n_pr=$((n_pr + 1))
+  lines=$(printf '%s\n' "$block" | grep -c '^\[' || true)
+  n_fb=$((n_fb + lines))
+  { printf '\n===== PR #%s: %s =====\n' "$PR" "$title"; printf '%s\n' "$block"; } >> "$CORPUS"
+  if [ "$(wc -c < "$CORPUS")" -ge "$MAX_CORPUS_BYTES" ]; then
+    CORPUS_TRUNCATED="⚠ CORPUS TRUNCATED: hit the ${MAX_CORPUS_BYTES}-byte cap after $n_pr PR(s); older PRs were skipped (raise PR_DISTILL_MAX_CORPUS_BYTES)."
+    echo "  $CORPUS_TRUNCATED" >&2
+    break
+  fi
+done
+
+# A partial fetch is reported LOUDLY, never hidden: the proposal would otherwise look
+# complete while resting on a corpus with holes.
+INCOMPLETE_NOTE=""
+if [ "$api_err" -gt 0 ]; then
+  INCOMPLETE_NOTE="⚠ INCOMPLETE CORPUS: $api_err GitHub API call(s) failed — some review feedback is missing, so this proposal may be partial."
+  echo "  $INCOMPLETE_NOTE" >&2
+fi
+# Carry any truncation note into the same channel shown in the output and the --out file.
+if [ -n "$CORPUS_TRUNCATED" ]; then
+  INCOMPLETE_NOTE="${INCOMPLETE_NOTE:+$INCOMPLETE_NOTE
+}$CORPUS_TRUNCATED"
+fi
+
+[ "$n_pr" = 0 ] && { echo "No review feedback found on the last $LIMIT $STATE PR(s)." >&2; exit 1; }
+echo "  gathered feedback from $n_pr PR(s) (~$n_fb comment/review blocks, $(wc -c < "$CORPUS") bytes)"
+
+if [ "$PRINT_ONLY" = 1 ]; then
+  cat "$CORPUS"; exit 0
+fi
+
+# --- Build the distiller prompt ----------------------------------------------
+read -r -d '' TASK <<'P' || true
+You are auditing a project's PULL-REQUEST REVIEW FEEDBACK to find the unwritten rules.
+The premise: "code review comments are the rules you forgot to write down." When the
+same kind of correction shows up across multiple PRs, it is a project convention that
+belongs in the instructions file (AGENTS.md / CLAUDE.md) so future contributors — human
+and agent — get it right the first time and reviewers stop repeating themselves.
+
+Below you get (1) the rules that ALREADY exist, and (2) review feedback from recent PRs.
+
+Do this:
+- Identify RECURRING or clearly-general conventions the reviews enforce: style, naming,
+  architecture, testing, security, process — anything a reviewer had to point out that a
+  written rule would have prevented.
+- DROP any rule that is already covered by the existing rules file, or that is trivially
+  one-off or subjective. KEEP a rule only when it recurs (seen in 2+ places) or is a single
+  but clearly general/important convention.
+- For each proposed rule, cite the PR number(s) it came from and give a one-line rationale.
+
+Output GitHub-flavored markdown, ready to paste into the rules file, in this shape:
+
+## Proposed rules from PR review feedback
+
+### <short section title>
+- **<the rule, imperative>** — why it matters. (from #12, #18)
+
+If nothing new is worth adding, say exactly: "No new rules to propose." and stop.
+Be concrete and terse. Do not restate rules that already exist. Do not edit any file.
+P
+PROMPT=$(printf '%s\n\n---\n\n%s\n\n---\n\n## Review feedback from recent PRs\n\n%s\n' "$TASK" "$RULES_BLOCK" "$(cat "$CORPUS")")
+
+# --- Run the chosen agent in its read-only / sandboxed headless mode ----------
+# The prompt embeds UNTRUSTED PR comments (a comment could try to prompt-inject the agent),
+# so each agent is pinned to the most locked-down non-interactive mode its CLI enforces on
+# the command line — never relying on ambient settings a checkout could carry:
+#   codex   — `-s read-only` sandbox
+#   cursor  — `--mode=ask` (read-only)
+#   claude  — `--permission-mode plan`: plan mode cannot edit files or run commands. (`-p`
+#             alone is NOT read-only — it honours settings.json, which a PR-controlled
+#             `.claude/settings.json` could widen.)
+# This blocks WRITES and command execution; it does NOT sandbox reads or your ambient user
+# config (MCP/network) — see the SECURITY note in the header for the residual risk.
+# antigravity is not offered: its headless CLI needs `--dangerously-skip-permissions`.
+# The prompt goes in via STDIN, not as an argv string — a large review history can exceed
+# the ~128 KiB single-argument limit (E2BIG) if passed on the command line.
+echo "  → $AGENT distilling… (timeout ${AGENT_TIMEOUT}s)"
+out=""; rc=0
+# Each agent runs in the empty $AGENT_CWD (subshell `cd`) so no project config from the
+# checkout is loaded, with the prompt on stdin (avoids the ~128 KiB argv limit).
+case "$AGENT" in
+  claude)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan ) 2>/dev/null); rc=$?;;
+  codex)       out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" codex exec -s read-only ) 2>/dev/null); rc=$?;;
+  cursor)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask ) 2>/dev/null); rc=$?;;
+esac
+
+# Fail CLOSED on a non-zero exit even if there IS output: a timeout or crash can leave a
+# TRUNCATED proposal, and emitting it as if complete is worse than failing.
+if [ "$rc" -ne 0 ]; then
+  case "$rc" in
+    124) echo "✖ $AGENT timed out after ${AGENT_TIMEOUT}s (raise PR_DISTILL_AGENT_TIMEOUT)." >&2;;
+    127) echo "✖ $AGENT: command not found." >&2;;
+    *)   echo "✖ $AGENT exited $rc — proposal may be truncated, not trusting it." >&2;;
+  esac
+  if [ -n "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+    echo "  --- partial output (exit $rc), for debugging only ---" >&2
+    printf '%s\n' "$out" >&2
+  fi
+  exit 1
+fi
+if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+  echo "✖ $AGENT produced no proposal (exit 0 but empty output)." >&2
+  exit 1
+fi
+
+printf '\n========== proposed rules (%s, from %s PRs of %s) ==========\n' "$AGENT" "$n_pr" "$REPO"
+[ -n "$INCOMPLETE_NOTE" ] && printf '%s\n\n' "$INCOMPLETE_NOTE"
+printf '%s\n' "$out"
+if [ -n "$OUT" ]; then
+  # A failed write must NOT pass silently as success: the caller would believe the
+  # artifact exists. Report it and exit non-zero.
+  if { printf '<!-- pr-review-distill: %s, last %s %s PRs of %s -->\n' "$AGENT" "$LIMIT" "$STATE" "$REPO"; \
+       [ -n "$INCOMPLETE_NOTE" ] && printf '<!-- %s -->\n' "$INCOMPLETE_NOTE"; \
+       printf '\n%s\n' "$out"; } > "$OUT"; then
+    echo "  written to $OUT"
+  else
+    echo "✖ could not write $OUT" >&2; exit 1
+  fi
+fi
+echo "  Review the proposal and paste the rules you agree with into ${RULES_FILE:-your rules file}. Nothing was edited."
+exit 0
