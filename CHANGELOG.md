@@ -6,6 +6,19 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Security
+
+- **`pr-review-distill` fences the untrusted corpus.** PR comments were spliced into the prompt
+  unfenced, between the very markers the prompt uses to separate its own sections (`---`, `## …`). A
+  comment could therefore forge a boundary: end the feedback early, open a fake "rules that already
+  exist" block, or emit the exact `No new rules to propose.` sentinel — the agent would then report
+  nothing, and the run would look clean. The corpus now sits inside a fence whose marker is generated
+  per run (a fixed one is readable in this source, therefore forgeable) and checked for absence from
+  the corpus before use, and the task tells the model that anything inside is data and that
+  instructions found there are to be reported rather than obeyed. This closes the **structural**
+  forgery only: prose that argues with the model is still prose it may believe, which is why the
+  agents remain pinned to read-only modes.
+
 ### Fixed
 
 - **`agy` is now told how long it actually has.** It enforces its own `--print-timeout` (default 5m) on

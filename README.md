@@ -353,7 +353,11 @@ Run it **monthly** (a cron job or a Claude skill) so the instructions file self-
 loop instead of drifting.
 
 **Untrusted input — read-only, but not a sandbox.** The corpus is PR comments, and a comment can try to
-prompt-inject the agent. `--agent` only offers agents pinned to a read-only mode on the command line
+prompt-inject the agent. The corpus is passed inside a **fence** whose marker is generated per run and
+checked against the corpus before use, and the task states that anything within it is data — so a
+comment cannot forge a section boundary using the prompt's own `---` / `## …` markers (ending the
+feedback early, faking the existing-rules block, or emitting the empty-result sentinel). That closes the
+structural forgery only; prose that argues with the model is still prose it may believe. `--agent` only offers agents pinned to a read-only mode on the command line
 (never relying on ambient settings a checkout could carry): `claude` (default, `--permission-mode plan` —
 plan mode can't edit or run commands), `codex` (`-s read-only`), `cursor` (`--mode=ask`). Each runs from
 an empty scratch directory so no checkout-local config or hooks load, and the prompt is fed via **stdin**
