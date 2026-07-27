@@ -31,14 +31,19 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   an agent to **propose** the unwritten rules worth adding, each citing the PRs it came from. It is
   **read-only and propose-only** — it never edits the rules file; you review the ready-to-paste proposal
   and keep what you agree with. Because the corpus is **untrusted** input (a review comment could try
-  to prompt-inject the agent), each agent runs in its read-only / sandboxed headless mode — `--agent`
-  is `claude` (default), `codex` (`-s read-only`), or `cursor` (`--mode=ask`); antigravity is not
-  offered, as its headless CLI would require `--dangerously-skip-permissions`. A failed GitHub API call
-  is surfaced as an `INCOMPLETE CORPUS` warning rather than folded into "no feedback", and a failed
-  `--out` write exits non-zero. Options: `--repo`, `--limit`, `--state`, `--rules-file`, `--out`,
+  to prompt-inject the agent), each agent runs in an **enforced** read-only mode pinned on the command
+  line (not ambient settings a checkout could widen): `--agent` is `claude` (default,
+  `--permission-mode plan`), `codex` (`-s read-only`), or `cursor` (`--mode=ask`); antigravity is not
+  offered, as its headless CLI would require `--dangerously-skip-permissions`. The prompt is passed via
+  **stdin** so a large review history can't hit the ~128 KiB argv limit. A **non-zero agent exit fails
+  the run** (a truncated proposal is never emitted as complete); a failed `gh pr list` is distinguished
+  from an empty repo; per-PR API failures are surfaced as an `INCOMPLETE CORPUS` warning rather than
+  folded into "no feedback"; and a failed `--out` write exits non-zero. With an explicit `--repo`, the
+  rules baseline is not auto-detected from the current directory (wrong repo) — pass `--rules-file`.
+  Options: `--repo`, `--limit`, `--state` (`merged`/`closed`/`open`/`all`), `--rules-file`, `--out`,
   `--print-comments`, `--dry-run`; budget via `PR_DISTILL_AGENT_TIMEOUT`. Ships with `test/test-distill.sh`
-  (stubbed `gh` + agent, no network) wired into CI. Meant to run monthly (cron or a Claude skill) so the
-  instructions file self-heals from the review loop instead of drifting.
+  (stubbed `gh` + agent, no network, 16 cases) wired into CI. Meant to run monthly (cron or a Claude
+  skill) so the instructions file self-heals from the review loop instead of drifting.
 
 ## [1.2.0] — 2026-07-22
 

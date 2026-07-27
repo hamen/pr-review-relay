@@ -344,12 +344,21 @@ It reads three feedback sources per PR — top-level review bodies, inline revie
 comments (which include the relay's own automated cross-reviews). Point it at another repo with
 `--repo OWNER/NAME`, or at a specific rules file with `--rules-file CLAUDE.md`.
 
+Point it at another repo with `--repo OWNER/NAME` — but pass `--rules-file` too, since the rules
+baseline is otherwise auto-detected from the current directory (the wrong repo). `--state` takes
+`merged` (default), `closed`, `open`, or `all`.
+
 Run it **monthly** (a cron job or a Claude skill) so the instructions file self-heals from the review
-loop instead of drifting. `--agent` takes `claude` (default), `codex`, or `cursor` — each invoked in its
-read-only / sandboxed headless mode, because the tool feeds **untrusted** PR comments to the agent
-(prompt-injection surface). `antigravity` is deliberately not offered here: its headless CLI needs
-`--dangerously-skip-permissions`, which would let an injected comment run commands. Raise the per-agent
-budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300s).
+loop instead of drifting.
+
+**Untrusted input, enforced read-only.** The corpus is PR comments — a comment could try to prompt-inject
+the agent. So `--agent` only offers agents pinned to an **enforced** read-only mode on the command line
+(never relying on ambient settings a checkout could carry): `claude` (default, `--permission-mode plan` —
+plan mode can't edit or run commands), `codex` (`-s read-only`), `cursor` (`--mode=ask`). The prompt is
+fed via **stdin**, so a large review history can't blow the ~128 KiB argv limit. `antigravity` is not
+offered — its headless CLI would need `--dangerously-skip-permissions`. A non-zero agent exit fails the
+run (a truncated proposal is never emitted as if complete), and a failed GitHub fetch is surfaced as an
+`INCOMPLETE CORPUS` warning. Raise the per-agent budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300s).
 
 ## 🛡️ Loop safety (no runaway iteration)
 

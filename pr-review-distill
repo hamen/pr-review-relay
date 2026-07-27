@@ -18,7 +18,7 @@
 #     which include the relay's own automated cross-review comments.
 #
 # Usage:
-#   pr-review-distill [--repo OWNER/NAME] [--limit N] [--state merged|closed|all]
+#   pr-review-distill [--repo OWNER/NAME] [--limit N] [--state merged|closed|open|all]
 #                     [--agent claude|codex|cursor]
 #                     [--rules-file PATH] [--out PATH]
 #                     [--print-comments] [--dry-run]
@@ -44,13 +44,13 @@ set -uo pipefail
 AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
-REPO=""; LIMIT=20; STATE="merged"; AGENT="claude"; RULES_FILE=""; OUT=""; PRINT_ONLY=0; DRY=0
+REPO=""; REPO_EXPLICIT=0; LIMIT=20; STATE="merged"; AGENT="claude"; RULES_FILE=""; OUT=""; PRINT_ONLY=0; DRY=0
 # A value-taking option with no argument must fail with a clean usage error (exit 2),
 # not crash on an unbound $2 under `set -u` (matches review-local's guard).
 need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --repo)           need_value "$@"; REPO="$2"; shift 2;;
+    --repo)           need_value "$@"; REPO="$2"; REPO_EXPLICIT=1; shift 2;;
     --limit)          need_value "$@"; LIMIT="$2"; shift 2;;
     --state)          need_value "$@"; STATE="$2"; shift 2;;
     --agent)          need_value "$@"; AGENT="$2"; shift 2;;
@@ -81,7 +81,11 @@ fi
 # --- Resolve the rules file to compare against -------------------------------
 # Only used to tell the agent what is ALREADY written (so it proposes the gaps).
 # If none is found the run still works — the agent just has no baseline to subtract.
-if [ -z "$RULES_FILE" ]; then
+# Auto-detection reads the CURRENT directory, so it is only valid when we are actually
+# in the target repo. With an explicit --repo (a different repo), auto-detecting cwd's
+# rules would compare THAT repo's reviews against THIS repo's rules — so we skip it and
+# ask for --rules-file instead.
+if [ -z "$RULES_FILE" ] && [ "$REPO_EXPLICIT" = 0 ]; then
   for cand in AGENTS.md CLAUDE.md .cursor/rules AGENT.md; do
     if [ -f "$cand" ]; then RULES_FILE="$cand"; break; fi
   done
@@ -90,13 +94,20 @@ RULES_BLOCK=""
 if [ -n "$RULES_FILE" ] && [ -f "$RULES_FILE" ]; then
   RULES_BLOCK=$(printf '## Rules that ALREADY exist (%s) — do NOT re-propose these\n\n%s\n' "$RULES_FILE" "$(cat "$RULES_FILE")")
   echo "  rules file: $RULES_FILE ($(wc -c < "$RULES_FILE") bytes)"
+elif [ -n "$RULES_FILE" ]; then
+  echo "  ! rules file '$RULES_FILE' not found — proposal will not subtract existing rules" >&2
+elif [ "$REPO_EXPLICIT" = 1 ]; then
+  echo "  rules file: none (with --repo, pass --rules-file to subtract that repo's existing rules)"
 else
   echo "  rules file: none found (proposal will not subtract existing rules)"
 fi
 
 # --- List the PRs to mine ----------------------------------------------------
 echo "▶ Distilling review feedback from $REPO — last $LIMIT $STATE PR(s), agent: $AGENT"
-PR_NUMBERS=$(gh pr list --repo "$REPO" --state "$STATE" --limit "$LIMIT" --json number -q '.[].number' 2>/dev/null || true)
+# Keep gh's exit status: an auth/network/API failure must be distinguishable from a repo
+# that simply has no matching PRs (both otherwise yield empty output).
+PR_NUMBERS=$(gh pr list --repo "$REPO" --state "$STATE" --limit "$LIMIT" --json number -q '.[].number' 2>/dev/null); list_rc=$?
+[ "$list_rc" -ne 0 ] && { echo "✖ could not list PRs for $REPO (gh exit $list_rc — check auth, network, or --repo)." >&2; exit 1; }
 [ -z "$PR_NUMBERS" ] && { echo "No $STATE PRs found in $REPO." >&2; exit 1; }
 
 # --dry-run stops here — before the (heavier) per-PR corpus fetch — and just shows
@@ -181,25 +192,42 @@ Be concrete and terse. Do not restate rules that already exist. Do not edit any 
 P
 PROMPT=$(printf '%s\n\n---\n\n%s\n\n---\n\n## Review feedback from recent PRs\n\n%s\n' "$TASK" "$RULES_BLOCK" "$(cat "$CORPUS")")
 
-# --- Run the chosen agent in its read-only / sandboxed headless mode ----------
-# The prompt embeds UNTRUSTED PR comments, so each agent is invoked in the most locked-down
-# non-interactive mode its CLI offers: codex in the `read-only` sandbox, cursor in `ask`
-# (read-only) mode, claude headless (`-p`) with no permission escalation. No agent here is
-# ever given auto-approved tool/command access (that is why antigravity is not offered).
+# --- Run the chosen agent in its ENFORCED read-only / sandboxed headless mode --
+# The prompt embeds UNTRUSTED PR comments (a comment could try to prompt-inject the agent),
+# so each agent is pinned to the most locked-down non-interactive mode its CLI enforces on
+# the command line — never relying on ambient settings a checkout could carry:
+#   codex   — `-s read-only` sandbox
+#   cursor  — `--mode=ask` (read-only)
+#   claude  — `--permission-mode plan`: plan mode cannot edit files or run commands, so an
+#             injected instruction can't act. (`-p` alone is NOT read-only — it honours
+#             settings.json, which a PR-controlled `.claude/settings.json` could widen.)
+# antigravity is not offered: its headless CLI needs `--dangerously-skip-permissions`.
+# The prompt goes in via STDIN, not as an argv string — a large review history can exceed
+# the ~128 KiB single-argument limit (E2BIG) if passed on the command line.
 echo "  → $AGENT distilling… (timeout ${AGENT_TIMEOUT}s)"
 out=""; rc=0
 case "$AGENT" in
-  claude)      out=$(timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null); rc=$?;;
-  codex)       out=$(timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null); rc=$?;;
+  claude)      out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan 2>/dev/null); rc=$?;;
+  codex)       out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" codex exec -s read-only 2>/dev/null); rc=$?;;
   cursor)      out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null); rc=$?;;
 esac
 
-if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+# Fail CLOSED on a non-zero exit even if there IS output: a timeout or crash can leave a
+# TRUNCATED proposal, and emitting it as if complete is worse than failing.
+if [ "$rc" -ne 0 ]; then
   case "$rc" in
     124) echo "✖ $AGENT timed out after ${AGENT_TIMEOUT}s (raise PR_DISTILL_AGENT_TIMEOUT)." >&2;;
     127) echo "✖ $AGENT: command not found." >&2;;
-    *)   echo "✖ $AGENT produced no proposal (exit $rc)." >&2;;
+    *)   echo "✖ $AGENT exited $rc — proposal may be truncated, not trusting it." >&2;;
   esac
+  if [ -n "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+    echo "  --- partial output (exit $rc), for debugging only ---" >&2
+    printf '%s\n' "$out" >&2
+  fi
+  exit 1
+fi
+if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+  echo "✖ $AGENT produced no proposal (exit 0 but empty output)." >&2
   exit 1
 fi
 

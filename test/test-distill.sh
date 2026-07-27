@@ -21,7 +21,8 @@ case "$1 $2" in
   "repo view") echo "acme/widgets"; exit 0;;
 esac
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  [ -n "${DISTILL_NO_PRS:-}" ] && exit 0   # simulate an empty repo
+  [ -n "${DISTILL_LIST_FAIL:-}" ] && exit 1  # simulate auth/network failure
+  [ -n "${DISTILL_NO_PRS:-}" ] && exit 0     # simulate an empty repo
   printf '1\n2\n'; exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
@@ -40,13 +41,16 @@ STUB
 chmod +x "$BIN/gh"
 
 # --- stub: claude (the default agent) ----------------------------------------
+# Records the flags it was called with (so we can assert enforced read-only mode) and
+# honours CLAUDE_RC to simulate a non-zero exit with output.
 cat > "$BIN/claude" <<'STUB'
 #!/usr/bin/env bash
-# ignore -p and the prompt; emit a canned proposal
+[ -n "${CLAUDE_ARGS_FILE:-}" ] && printf '%s\n' "$*" > "$CLAUDE_ARGS_FILE"
 echo "## Proposed rules from PR review feedback"
 echo ""
 echo "### Testing"
 echo "- **Ship a test with every change.** Reviewers keep asking. (from #1, #2)"
+exit "${CLAUDE_RC:-0}"
 STUB
 chmod +x "$BIN/claude"
 
@@ -91,11 +95,26 @@ else
 fi
 
 echo "test: full run asks the agent and prints the proposal → exit 0"
-rc=$(run)
+rc=$(CLAUDE_ARGS_FILE="$WORK/cargs" "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
 if [ "$rc" = 0 ] && grep -q 'Proposed rules from PR review feedback' "$WORK/out"; then
   ok "propose path returns the agent's proposal"
 else
   bad "propose path (rc=$rc)"; cat "$WORK/out" "$WORK/err" >&2
+fi
+
+echo "test: claude is invoked in ENFORCED read-only (--permission-mode plan)"
+if grep -q -- '--permission-mode plan' "$WORK/cargs" 2>/dev/null; then
+  ok "claude pinned to plan mode (injection-safe default)"
+else
+  bad "claude not run with --permission-mode plan"; cat "$WORK/cargs" 2>/dev/null >&2
+fi
+
+echo "test: agent non-zero exit with output still fails → exit 1 (no truncated proposal)"
+rc=$(CLAUDE_RC=42 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 1 ] && ! grep -q '========== proposed rules' "$WORK/out"; then
+  ok "rc!=0 fails closed even with output"
+else
+  bad "rc!=0 handling (rc=$rc)"; cat "$WORK/out" "$WORK/err" >&2
 fi
 
 echo "test: --out writes the proposal to a file"
@@ -113,6 +132,24 @@ rc=$(DISTILL_NO_PRS=1 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
 echo "test: an unwritable --out fails loudly → exit 1"
 rc=$(run --out "$WORK/nope/deep/proposal.md")
 [ "$rc" = 1 ] && grep -q 'could not write' "$WORK/err" && ok "--out write failure exits 1" || { bad "--out failure (rc=$rc)"; cat "$WORK/err" >&2; }
+
+echo "test: gh pr list failure is distinct from empty → exit 1 with a clear message"
+rc=$(DISTILL_LIST_FAIL=1 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 1 ] && grep -q 'could not list PRs' "$WORK/err"; then
+  ok "list failure distinguished from no-PRs"
+else
+  bad "list failure (rc=$rc)"; cat "$WORK/err" >&2
+fi
+
+echo "test: --repo (explicit) does NOT borrow the current dir's rules file"
+: > "$WORK/AGENTS.md"   # a rules file in cwd that must be ignored for another repo
+rc=$(run --repo other/project)
+if [ "$rc" = 0 ] && grep -q 'pass --rules-file' "$WORK/out" && ! grep -q 'rules file: AGENTS.md' "$WORK/out"; then
+  ok "explicit --repo skips cwd rules auto-detection"
+else
+  bad "explicit --repo rules handling (rc=$rc)"; cat "$WORK/out" >&2
+fi
+rm -f "$WORK/AGENTS.md"
 
 echo "test: a failed GitHub API call is reported as INCOMPLETE (not hidden)"
 rc=$(DISTILL_API_FAIL=1 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
