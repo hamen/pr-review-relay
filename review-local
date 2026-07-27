@@ -62,12 +62,12 @@ AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 # AGENT_TIMEOUT is raised. Same handling as pr-review-relay: give agy our budget and keep a few
 # seconds of outer grace so its own diagnosis survives instead of a bare rc 124.
 AGY_GRACE=10
+# Validate here rather than letting `timeout` fail with a bare exit 125.
+case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 # One computed value, used both to launch agy and to report an outer kill. Two copies of the
 # same arithmetic is how review-local's rc-124 message went stale one commit after the relay's
 # was fixed — the reviewers caught it, twice.
 AGY_OUTER_TIMEOUT=$((10#$AGENT_TIMEOUT + AGY_GRACE))
-# Validate here rather than letting `timeout` fail with a bare exit 125.
-case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 need_value() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
