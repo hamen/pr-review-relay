@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# pr-review-distill — turn recent PR review feedback into proposed AGENTS.md rules.
+#
+# "Code review comments are the rules you forgot to write down." The relay produces
+# cross-reviews (and humans leave reviews too); over time the same convention gets
+# flagged again and again. This reads the review feedback from recent PRs, compares
+# it against the project's existing rules file (AGENTS.md / CLAUDE.md), and asks an
+# agent to PROPOSE the unwritten rules worth adding — so the instructions file
+# self-heals from the feedback loop instead of drifting.
+#
+# It is READ-ONLY and PROPOSE-ONLY: it never edits the rules file. It prints a
+# ready-to-paste proposal (and optionally writes it to --out). You review and apply.
+#
+# Sources of feedback it mines, per PR:
+#   - PR reviews with a body        (gh api repos/OWNER/REPO/pulls/N/reviews)
+#   - inline review comments        (gh api repos/OWNER/REPO/pulls/N/comments)
+#   - issue-style PR comments,       (gh api repos/OWNER/REPO/issues/N/comments)
+#     which include the relay's own automated cross-review comments.
+#
+# Usage:
+#   pr-review-distill [--repo OWNER/NAME] [--limit N] [--state merged|closed|all]
+#                     [--agent claude|codex|cursor|antigravity]
+#                     [--rules-file PATH] [--out PATH]
+#                     [--print-comments] [--dry-run]
+#   (no --repo → uses the repo of the current directory)
+#
+# Examples:
+#   pr-review-distill                         # last 20 merged PRs of the current repo, propose via claude
+#   pr-review-distill --limit 40 --agent codex
+#   pr-review-distill --rules-file CLAUDE.md --out /tmp/proposed-rules.md
+#   pr-review-distill --dry-run               # show which PRs + rules file, don't call an agent
+#
+# Recurring use: run it monthly (cron or a Claude skill) to keep AGENTS.md current.
+#
+# Exit codes: 0 ok · 1 usage / precondition (no gh, no repo, no PRs, no feedback,
+# agent produced nothing) · 2 bad argument.
+set -uo pipefail
+
+AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
+case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
+
+REPO=""; LIMIT=20; STATE="merged"; AGENT="claude"; RULES_FILE=""; OUT=""; PRINT_ONLY=0; DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)           REPO="$2"; shift 2;;
+    --limit)          LIMIT="$2"; shift 2;;
+    --state)          STATE="$2"; shift 2;;
+    --agent)          AGENT="$2"; shift 2;;
+    --rules-file)     RULES_FILE="$2"; shift 2;;
+    --out)            OUT="$2"; shift 2;;
+    --print-comments) PRINT_ONLY=1; shift;;
+    --dry-run)        DRY=1; shift;;
+    -h|--help)        sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+case "$LIMIT" in ''|*[!0-9]*|0) echo "invalid --limit: '$LIMIT' (want a positive integer)" >&2; exit 2;; esac
+case "$STATE" in merged|closed|all|open) ;; *) echo "invalid --state: '$STATE' (want merged|closed|all|open)" >&2; exit 2;; esac
+case "$AGENT" in agy) AGENT=antigravity;; esac
+case "$AGENT" in claude|codex|cursor|antigravity) ;; *) echo "invalid --agent: '$AGENT' (want claude|codex|cursor|antigravity)" >&2; exit 2;; esac
+
+command -v gh >/dev/null || { echo "gh not found" >&2; exit 1; }
+
+if [ -z "$REPO" ]; then
+  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+fi
+[ -z "$REPO" ] && { echo "No repo. Run from inside a repo or pass --repo OWNER/NAME." >&2; exit 1; }
+
+# --- Resolve the rules file to compare against -------------------------------
+# Only used to tell the agent what is ALREADY written (so it proposes the gaps).
+# If none is found the run still works — the agent just has no baseline to subtract.
+if [ -z "$RULES_FILE" ]; then
+  for cand in AGENTS.md CLAUDE.md .cursor/rules AGENT.md; do
+    if [ -f "$cand" ]; then RULES_FILE="$cand"; break; fi
+  done
+fi
+RULES_BLOCK=""
+if [ -n "$RULES_FILE" ] && [ -f "$RULES_FILE" ]; then
+  RULES_BLOCK=$(printf '## Rules that ALREADY exist (%s) — do NOT re-propose these\n\n%s\n' "$RULES_FILE" "$(cat "$RULES_FILE")")
+  echo "  rules file: $RULES_FILE ($(wc -c < "$RULES_FILE") bytes)"
+else
+  echo "  rules file: none found (proposal will not subtract existing rules)"
+fi
+
+# --- List the PRs to mine ----------------------------------------------------
+echo "▶ Distilling review feedback from $REPO — last $LIMIT $STATE PR(s), agent: $AGENT"
+PR_NUMBERS=$(gh pr list --repo "$REPO" --state "$STATE" --limit "$LIMIT" --json number -q '.[].number' 2>/dev/null || true)
+[ -z "$PR_NUMBERS" ] && { echo "No $STATE PRs found in $REPO." >&2; exit 1; }
+
+# --- Gather the feedback corpus ----------------------------------------------
+CORPUS="$(mktemp)" || { echo "mktemp failed" >&2; exit 1; }
+trap 'rm -f "$CORPUS"' EXIT
+n_pr=0; n_fb=0
+for PR in $PR_NUMBERS; do
+  title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "")
+  # Reviews (top-level review bodies), inline review comments, and issue comments
+  # (which include the relay's automated cross-reviews). Each prefixed by author.
+  reviews=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
+    --jq '.[] | select((.body // "") | length > 0) | "[review/" + .user.login + "] " + .body' 2>/dev/null || true)
+  inline=$(gh api --paginate "repos/$REPO/pulls/$PR/comments" \
+    --jq '.[] | "[inline/" + .user.login + " " + (.path // "") + "] " + (.body // "")' 2>/dev/null || true)
+  issuec=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+    --jq '.[] | "[comment/" + .user.login + "] " + (.body // "")' 2>/dev/null || true)
+  block=$(printf '%s\n%s\n%s' "$reviews" "$inline" "$issuec")
+  # Skip PRs with no feedback at all so the corpus stays signal.
+  [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ] && continue
+  n_pr=$((n_pr + 1))
+  lines=$(printf '%s\n' "$block" | grep -c '^\[' || true)
+  n_fb=$((n_fb + lines))
+  { printf '\n===== PR #%s: %s =====\n' "$PR" "$title"; printf '%s\n' "$block"; } >> "$CORPUS"
+done
+
+[ "$n_pr" = 0 ] && { echo "No review feedback found on the last $LIMIT $STATE PR(s)." >&2; exit 1; }
+echo "  gathered feedback from $n_pr PR(s) (~$n_fb comment/review blocks, $(wc -c < "$CORPUS") bytes)"
+
+if [ "$PRINT_ONLY" = 1 ]; then
+  cat "$CORPUS"; exit 0
+fi
+if [ "$DRY" = 1 ]; then
+  echo "  dry run: would ask $AGENT to propose rules from the corpus above. PRs mined:"
+  printf '%s\n' "$PR_NUMBERS" | sed 's/^/    #/'
+  exit 0
+fi
+
+# --- Build the distiller prompt ----------------------------------------------
+read -r -d '' TASK <<'P' || true
+You are auditing a project's PULL-REQUEST REVIEW FEEDBACK to find the unwritten rules.
+The premise: "code review comments are the rules you forgot to write down." When the
+same kind of correction shows up across multiple PRs, it is a project convention that
+belongs in the instructions file (AGENTS.md / CLAUDE.md) so future contributors — human
+and agent — get it right the first time and reviewers stop repeating themselves.
+
+Below you get (1) the rules that ALREADY exist, and (2) review feedback from recent PRs.
+
+Do this:
+- Identify RECURRING or clearly-general conventions the reviews enforce: style, naming,
+  architecture, testing, security, process — anything a reviewer had to point out that a
+  written rule would have prevented.
+- KEEP only rules that are (a) already covered by the existing rules file, or trivially
+  one-off/subjective — DROP those. Prefer rules seen in 2+ places, or a single but clearly
+  general/important one.
+- For each proposed rule, cite the PR number(s) it came from and give a one-line rationale.
+
+Output GitHub-flavored markdown, ready to paste into the rules file, in this shape:
+
+## Proposed rules from PR review feedback
+
+### <short section title>
+- **<the rule, imperative>** — why it matters. (from #12, #18)
+
+If nothing new is worth adding, say exactly: "No new rules to propose." and stop.
+Be concrete and terse. Do not restate rules that already exist. Do not edit any file.
+P
+PROMPT=$(printf '%s\n\n---\n\n%s\n\n---\n\n## Review feedback from recent PRs\n\n%s\n' "$TASK" "$RULES_BLOCK" "$(cat "$CORPUS")")
+
+# --- Run the chosen agent (read-only where the CLI supports it) ---------------
+echo "  → $AGENT distilling… (timeout ${AGENT_TIMEOUT}s)"
+out=""; rc=0
+case "$AGENT" in
+  claude)      out=$(timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>/dev/null); rc=$?;;
+  codex)       out=$(timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>/dev/null); rc=$?;;
+  cursor)      out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>/dev/null); rc=$?;;
+  antigravity) out=$(timeout "$AGENT_TIMEOUT" agy --dangerously-skip-permissions -p "$PROMPT" 2>/dev/null); rc=$?;;
+esac
+
+if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+  case "$rc" in
+    124) echo "✖ $AGENT timed out after ${AGENT_TIMEOUT}s (raise PR_DISTILL_AGENT_TIMEOUT)." >&2;;
+    127) echo "✖ $AGENT: command not found." >&2;;
+    *)   echo "✖ $AGENT produced no proposal (exit $rc)." >&2;;
+  esac
+  exit 1
+fi
+
+printf '\n========== proposed rules (%s, from %s PRs of %s) ==========\n%s\n' "$AGENT" "$n_pr" "$REPO" "$out"
+if [ -n "$OUT" ]; then
+  { printf '<!-- pr-review-distill: %s, last %s %s PRs of %s -->\n\n' "$AGENT" "$LIMIT" "$STATE" "$REPO"; printf '%s\n' "$out"; } > "$OUT" \
+    && echo "  written to $OUT" || echo "  ! could not write $OUT" >&2
+fi
+echo "  Review the proposal and paste the rules you agree with into ${RULES_FILE:-your rules file}. Nothing was edited."
+exit 0

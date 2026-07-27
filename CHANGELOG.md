@@ -18,6 +18,24 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   flag reaches agy, since a silently missing flag is invisible to any output-shape assertion. This
   alignment is **agy-only**: whether the other reviewers enforce internal waits has not been checked.
 
+## [1.3.0] — 2026-07-27
+
+### Added
+
+- **`pr-review-distill` — turn recent PR review feedback into proposed `AGENTS.md` rules.** Inspired by
+  Marco Gomiero's [*Code review comments are the rules you forgot to write down*](https://www.marcogomiero.com/posts/2026/code-review-agents-update/):
+  the relay makes reviewers repeat the same corrections across PRs, and each repeat is a project
+  convention that isn't written down yet. The new sibling mines the review feedback from recent PRs
+  (top-level review bodies, inline review comments, and issue-style comments — including the relay's own
+  automated cross-reviews), subtracts what the project's `AGENTS.md` / `CLAUDE.md` already says, and asks
+  an agent to **propose** the unwritten rules worth adding, each citing the PRs it came from. It is
+  **read-only and propose-only** — it never edits the rules file; you review the ready-to-paste proposal
+  and keep what you agree with. Options: `--repo`, `--limit`, `--state`, `--agent`
+  (`claude`/`codex`/`cursor`/`antigravity`), `--rules-file`, `--out`, `--print-comments`, `--dry-run`;
+  budget via `PR_DISTILL_AGENT_TIMEOUT`. Ships with `test/test-distill.sh` (stubbed `gh` + agent, no
+  network) wired into CI. Meant to run monthly (cron or a Claude skill) so the instructions file
+  self-heals from the review loop instead of drifting.
+
 ## [1.2.0] — 2026-07-22
 
 ### Changed

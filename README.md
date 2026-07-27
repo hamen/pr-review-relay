@@ -40,6 +40,12 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 
 ## 🆕 What's new
 
+**v1.3.0** — **`pr-review-distill`: turn review feedback into written rules.** Code review comments are the
+rules you forgot to write down. The new sibling reads the review feedback from recent PRs, compares it to
+your `AGENTS.md` / `CLAUDE.md`, and asks an agent to **propose** the unwritten conventions worth adding —
+read-only, propose-only, never edits your rules file. See
+[Distill unwritten rules](#-distill-unwritten-rules-from-reviews-pr-review-distill).
+
 **v1.1.0** — **fail-closed exit codes.** `✔ Relay done.` used to print and exit `0` even if every reviewer
 timed out, so a caller couldn't tell *"all reviewed"* from *"everything broke"*. The relay now signals its
 outcome through the exit code — `0` clean, `3` not-clean (failure / stale SHA / no reviewers), `4` cap
@@ -85,11 +91,12 @@ REPO=https://raw.githubusercontent.com/hamen/pr-review-relay/main
 curl -fsSL "$REPO/pr-review-relay" -o "$BIN/pr-review-relay"
 curl -fsSL "$REPO/review-local" -o "$BIN/review-local"
 curl -fsSL "$REPO/pr-review-fetch" -o "$BIN/pr-review-fetch"
+curl -fsSL "$REPO/pr-review-distill" -o "$BIN/pr-review-distill"
 curl -fsSL "$REPO/pr-review-collapse-comments" -o "$BIN/pr-review-collapse-comments"
 curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
 curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
 curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
-chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
+chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-distill" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
 # lib-opencode.sh is sourced, not executed — it needs no +x
 # make sure ~/.local/bin is on your PATH
 ```
@@ -312,6 +319,34 @@ pr-review-collapse-comments 47
 ```
 
 Consensus file format: same idea as dac-audit-skill issue bodies — summary table, **Blockers (consensus)**, **Should-fix (consensus)**, optional Consider. The file becomes the PR description (plus a PR link header).
+
+## 🧭 Distill unwritten rules from reviews (`pr-review-distill`)
+
+> Inspired by [Marco Gomiero — *Code review comments are the rules you forgot to write down*](https://www.marcogomiero.com/posts/2026/code-review-agents-update/).
+
+The relay makes reviewers repeat themselves — the same "add a test", "use snake_case", "don't do X"
+lands on PR after PR. Each repeat is a project convention that isn't yet written in your instructions file.
+`pr-review-distill` closes that loop: it mines the review feedback from recent PRs, subtracts what your
+`AGENTS.md` / `CLAUDE.md` already says, and asks an agent to **propose** the rules worth adding.
+
+It is **read-only and propose-only** — it never edits your rules file. You get a ready-to-paste markdown
+proposal (each rule cites the PRs it came from); you decide what to keep.
+
+```bash
+pr-review-distill                          # last 20 merged PRs of the current repo, propose via claude
+pr-review-distill --limit 40 --agent codex # more history, a different agent
+pr-review-distill --dry-run                # show which PRs + rules file, don't call an agent
+pr-review-distill --print-comments         # just dump the gathered feedback corpus
+pr-review-distill --out proposed-rules.md  # also write the proposal to a file
+```
+
+It reads three feedback sources per PR — top-level review bodies, inline review comments, and issue-style
+comments (which include the relay's own automated cross-reviews). Point it at another repo with
+`--repo OWNER/NAME`, or at a specific rules file with `--rules-file CLAUDE.md`.
+
+Run it **monthly** (a cron job or a Claude skill) so the instructions file self-heals from the review
+loop instead of drifting. `--agent` takes `claude` (default), `codex`, `cursor`, or `antigravity`;
+raise the per-agent budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300s).
 
 ## 🛡️ Loop safety (no runaway iteration)
 
