@@ -369,9 +369,11 @@ still read files it can reach and use whatever MCP tools / network your ambient 
 crafted comment could in principle steer those. Same threat model as the rest of this toolkit (see
 [Notes & caveats](#-notes--caveats)) — run it on repos whose review history you don't consider actively
 hostile. The corpus is capped (`PR_DISTILL_MAX_CORPUS_BYTES`, default 300 KB) so a flooded history can't
-exhaust memory or the agent's context; truncation is reported. A non-zero agent exit fails the run (a
-truncated proposal is never emitted as complete), and a failed GitHub fetch is surfaced as an
-`INCOMPLETE CORPUS` warning. Raise the per-agent budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300s).
+exhaust memory or blow the agent's context. The cap applies **while reading**, not after: records
+arrive NUL-separated and are cut at a record boundary, so a single PR carrying more than the cap
+is bounded and no comment is delivered half-written. Truncation says which kind it was — whole PRs
+skipped, or one PR's feedback cut short. A cap too small for even one comment is a config error,
+not an empty result.
 
 ## 🛡️ Loop safety (no runaway iteration)
 

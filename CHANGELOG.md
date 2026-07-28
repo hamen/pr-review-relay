@@ -6,6 +6,19 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pr-review-distill` applies the corpus cap while reading, not after.** Every page of every endpoint
+  was captured into a shell variable and the cap was measured only once a whole PR had been appended, so
+  one flooded PR peaked in memory before the cap could fire — while the README claimed the cap prevented
+  exactly that. Records now arrive NUL-separated (`jq --raw-output0`) and are cut at a **record**
+  boundary: a comment body is routinely multi-line, so a line-wise cut hands the agent half a comment as
+  if it were whole. The expected `SIGPIPE` from closing the stream early is no longer counted as a failed
+  GitHub call, and the truncation message distinguishes whole PRs skipped from one PR cut short. A cap too
+  small for a single comment now fails with that message instead of reporting "no review feedback", which
+  blamed the repository for an operator setting. Measured: 20 MB of comments on one PR, 50 KB cap, 37 KB
+  delivered, no partial record.
+
 ### Security
 
 - **`pr-review-distill` fences the untrusted corpus.** PR comments were spliced into the prompt

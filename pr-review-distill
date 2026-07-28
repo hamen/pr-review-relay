@@ -216,42 +216,115 @@ CORPUS="$(mktemp)" || { echo "mktemp failed" >&2; exit 1; }
 # regardless of --permission-mode. An empty cwd carries no such project config. It must be
 # outside the repo for the same reason PATH must (a repo-local temp could be shadowed).
 AGENT_CWD="$(mktemp -d)" || { echo "mktemp -d failed" >&2; exit 1; }
-trap 'rm -rf "$CORPUS" "$AGENT_CWD"' EXIT
+PARTS="$(mktemp -d)" || { echo "mktemp -d failed" >&2; exit 1; }
+trap 'rm -rf "$CORPUS" "$AGENT_CWD" "$PARTS"' EXIT
 relay_assert_tmpdir_outside_repo "$AGENT_CWD"
 # Cap the corpus so a huge (or deliberately flooded) PR history can't exhaust memory or blow
-# the agent's context. Once the cap is hit we stop adding PRs and report the truncation.
+# the agent's context. The cap is applied WHILE READING, not after: the previous version
+# captured every page of every endpoint into a shell variable and measured the corpus only
+# once a whole PR had been appended, so a single flooded PR peaked in memory before the cap
+# could fire — while the README claimed the cap prevented exactly that. Found in review.
 MAX_CORPUS_BYTES="${PR_DISTILL_MAX_CORPUS_BYTES:-300000}"
 case "$MAX_CORPUS_BYTES" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_MAX_CORPUS_BYTES: '$MAX_CORPUS_BYTES' (want a positive number of bytes)" >&2; exit 2;; esac
 CORPUS_TRUNCATED=""
 n_pr=0; n_fb=0; api_err=0
-# Count a failed GitHub API call rather than silently folding it into "no feedback":
-# a transient outage must NOT masquerade as a clean, complete corpus. `fetch` returns
-# gh's exit status; the increment happens in the PARENT (a command substitution runs in a
-# subshell, so incrementing api_err inside fetch would be lost).
-fetch() { gh api --paginate "$1" --jq "$2" 2>/dev/null; }
+part_trunc=0   # feedback cut off INSIDE a PR (as opposed to whole PRs never fetched)
+
+# Records are NUL-separated (`jq --raw-output0`), not newline-separated: a comment body is
+# routinely multi-line, so cutting at a line boundary hands the agent half a comment as if it
+# were whole. With NUL we can drop everything after the last separator and know what remains
+# is complete records. gh's own --jq cannot emit NUL, so the JSON goes through a real jq;
+# --paginate concatenates one JSON array per page, which jq streams happily.
+#
+# `head -c` closing the pipe kills the upstream stages with SIGPIPE (141) — measured as
+# PIPESTATUS "0 141 0". That is the EXPECTED shape of a truncation and must not be counted as
+# an API failure, or a flooded PR would be reported as a broken GitHub call. Only a non-zero,
+# non-141 status from gh itself is a real error.
+#
+# budget+1 bytes are requested on purpose: receiving exactly `budget` proves nothing about
+# whether more existed, budget+1 does.
+fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api error, 2 truncated
+  local dest="$1" endpoint="$2" filter="$3" budget="$4" st last
+  : > "$dest"
+  [ "$budget" -le 0 ] && return 2
+  gh api --paginate "$endpoint" 2>/dev/null | jq --raw-output0 "$filter" 2>/dev/null \
+    | head -c "$((budget + 1))" > "$dest.raw"
+  st="${PIPESTATUS[0]}"
+  case "$st" in
+    0|141) ;;
+    *) rm -f "$dest.raw"; return 1;;
+  esac
+  if [ "$(wc -c < "$dest.raw")" -le "$budget" ]; then
+    mv "$dest.raw" "$dest"; return 0
+  fi
+  # Over budget: keep whole records only. If the last byte is already a separator every
+  # record is complete; otherwise drop the trailing partial one.
+  last=$(tail -c 1 "$dest.raw" | od -An -tx1 | tr -d ' \n')
+  if [ "$last" = "00" ]; then
+    mv "$dest.raw" "$dest"
+  else
+    awk 'BEGIN{RS="\0"; ORS="\0"} NR>1{print prev} {prev=$0}' "$dest.raw" > "$dest"
+    rm -f "$dest.raw"
+  fi
+  return 2
+}
+
 for PR in $PR_NUMBERS; do
-  title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "")
-  # Reviews (top-level review bodies), inline review comments, and issue comments
-  # (which include the relay's automated cross-reviews). Each prefixed by author.
-  reviews=$(fetch "repos/$REPO/pulls/$PR/reviews" \
-    '.[] | select((.body // "") | length > 0) | "[review/" + .user.login + "] " + .body'); [ $? -eq 0 ] || api_err=$((api_err + 1))
-  inline=$(fetch "repos/$REPO/pulls/$PR/comments" \
-    '.[] | "[inline/" + .user.login + " " + (.path // "") + "] " + (.body // "")'); [ $? -eq 0 ] || api_err=$((api_err + 1))
-  issuec=$(fetch "repos/$REPO/issues/$PR/comments" \
-    '.[] | "[comment/" + .user.login + "] " + (.body // "")'); [ $? -eq 0 ] || api_err=$((api_err + 1))
-  block=$(printf '%s\n%s\n%s' "$reviews" "$inline" "$issuec")
-  # Skip PRs with no feedback at all so the corpus stays signal.
-  [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ] && continue
-  n_pr=$((n_pr + 1))
-  lines=$(printf '%s\n' "$block" | grep -c '^\[' || true)
-  n_fb=$((n_fb + lines))
-  { printf '\n===== PR #%s: %s =====\n' "$PR" "$title"; printf '%s\n' "$block"; } >> "$CORPUS"
-  if [ "$(wc -c < "$CORPUS")" -ge "$MAX_CORPUS_BYTES" ]; then
+  remaining=$((MAX_CORPUS_BYTES - $(wc -c < "$CORPUS")))
+  if [ "$remaining" -le 0 ]; then
     CORPUS_TRUNCATED="⚠ CORPUS TRUNCATED: hit the ${MAX_CORPUS_BYTES}-byte cap after $n_pr PR(s); older PRs were skipped (raise PR_DISTILL_MAX_CORPUS_BYTES)."
     echo "  $CORPUS_TRUNCATED" >&2
     break
   fi
+  title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "")
+  : > "$PARTS/acc"
+  # Reviews (top-level review bodies), inline review comments, and issue comments (which
+  # include the relay's automated cross-reviews). Each prefixed by author. The budget is
+  # shared across the three, so one endpoint flooding cannot starve the corpus of the others
+  # any more than it already has.
+  pr_trunc=0
+  for spec in \
+    "reviews|repos/$REPO/pulls/$PR/reviews|.[] | select((.body // \"\") | length > 0) | \"[review/\" + (.user.login // \"unknown\") + \"] \" + .body" \
+    "inline|repos/$REPO/pulls/$PR/comments|.[] | \"[inline/\" + (.user.login // \"unknown\") + \" \" + (.path // \"\") + \"] \" + (.body // \"\")" \
+    "issuec|repos/$REPO/issues/$PR/comments|.[] | \"[comment/\" + (.user.login // \"unknown\") + \"] \" + (.body // \"\")"
+  do
+    name="${spec%%|*}"; rest="${spec#*|}"; endpoint="${rest%%|*}"; filter="${rest#*|}"
+    budget=$((MAX_CORPUS_BYTES - $(wc -c < "$CORPUS") - $(wc -c < "$PARTS/acc" 2>/dev/null || echo 0)))
+    fetch_into "$PARTS/$name" "$endpoint" "$filter" "$budget"
+    case $? in
+      1) api_err=$((api_err + 1));;
+      2) pr_trunc=1;;
+    esac
+    tr '\0' '\n' < "$PARTS/$name" >> "$PARTS/acc"
+  done
+  # Counted BEFORE the skip below: when the cap is so tight that nothing survives, the PR
+  # looks feedback-less and `continue` would drop the fact that it was truncated — which is
+  # exactly the case that must not be reported as "no review feedback".
+  [ "$pr_trunc" = 1 ] && part_trunc=$((part_trunc + 1))
+  # Skip PRs with no feedback at all so the corpus stays signal.
+  if [ -z "$(tr -d '[:space:]' < "$PARTS/acc")" ]; then : > "$PARTS/acc"; continue; fi
+  n_pr=$((n_pr + 1))
+  n_fb=$((n_fb + $(grep -c '^\[' "$PARTS/acc" || true)))
+  { printf '\n===== PR #%s: %s =====\n' "$PR" "$title"; cat "$PARTS/acc"; } >> "$CORPUS"
+  : > "$PARTS/acc"
 done
+
+# A cap so small that not one complete record fits leaves an empty corpus. Reporting "no
+# review feedback" there would blame the repository for what is an operator setting, and the
+# run would look like a clean result. Say what actually happened.
+if [ "$n_pr" = 0 ] && [ "$part_trunc" -gt 0 ]; then
+  echo "PR_DISTILL_MAX_CORPUS_BYTES=$MAX_CORPUS_BYTES is smaller than a single comment record: nothing could be kept. Raise it." >&2
+  exit 2
+fi
+
+# Two different truncations, two different sentences: "older PRs were skipped" reads as though
+# everything fetched was complete, which is false when a PR was cut off mid-history.
+if [ "$part_trunc" -gt 0 ] && [ -z "$CORPUS_TRUNCATED" ]; then
+  CORPUS_TRUNCATED="⚠ CORPUS TRUNCATED: the ${MAX_CORPUS_BYTES}-byte cap cut the feedback of $part_trunc PR(s) short (raise PR_DISTILL_MAX_CORPUS_BYTES)."
+  echo "  $CORPUS_TRUNCATED" >&2
+elif [ "$part_trunc" -gt 0 ]; then
+  CORPUS_TRUNCATED="$CORPUS_TRUNCATED Feedback for $part_trunc of them was also cut short."
+fi
 
 # A partial fetch is reported LOUDLY, never hidden: the proposal would otherwise look
 # complete while resting on a corpus with holes.
