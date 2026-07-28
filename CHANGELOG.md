@@ -17,7 +17,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   GitHub call, and the truncation message distinguishes whole PRs skipped from one PR cut short. A cap too
   small for a single comment now fails with that message instead of reporting "no review feedback", which
   blamed the repository for an operator setting. Measured: 20 MB of comments on one PR, 50 KB cap, 37 KB
-  delivered, no partial record.
+  delivered, no partial record. Note: this makes **`jq` a hard requirement** for `pr-review-distill`
+  (the previous code used `gh --jq`, i.e. gh's embedded gojq) — checked at startup and documented.
 
 ### Security
 

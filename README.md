@@ -64,6 +64,8 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
 ## 📦 Requirements
 
 - [`gh`](https://cli.github.com/) (GitHub CLI), authenticated (`gh auth login`).
+- [`jq`](https://jqlang.github.io/jq/) — `pr-review-distill` pipes the GitHub JSON through it, because
+  `gh --jq` cannot emit the NUL-separated records its corpus cap needs. The other commands don't need it.
 - Any subset of these agent CLIs, logged in:
   - 🟣 [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code) — uses `claude -p`
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`

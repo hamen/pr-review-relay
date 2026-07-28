@@ -126,6 +126,7 @@ case "$STATE" in merged|closed|all|open) ;; *) echo "invalid --state: '$STATE' (
 case "$AGENT" in claude|codex|cursor) ;; *) echo "invalid --agent: '$AGENT' (want claude|codex|cursor — antigravity is unsupported here, see note in the script)" >&2; exit 2;; esac
 
 command -v gh >/dev/null || { echo "gh not found" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "jq not found: pr-review-distill pipes the GitHub JSON through it (gh --jq cannot emit NUL-separated records)." >&2; exit 1; }
 
 if [ -z "$REPO" ]; then
   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
@@ -244,29 +245,39 @@ part_trunc=0   # feedback cut off INSIDE a PR (as opposed to whole PRs never fet
 # budget+1 bytes are requested on purpose: receiving exactly `budget` proves nothing about
 # whether more existed, budget+1 does.
 fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api error, 2 truncated
-  local dest="$1" endpoint="$2" filter="$3" budget="$4" st last
+  local dest="$1" endpoint="$2" filter="$3" budget="$4" st_gh st_loop ps
   : > "$dest"
   [ "$budget" -le 0 ] && return 2
-  gh api --paginate "$endpoint" 2>/dev/null | jq --raw-output0 "$filter" 2>/dev/null \
-    | head -c "$((budget + 1))" > "$dest.raw"
-  st="${PIPESTATUS[0]}"
-  case "$st" in
+  # Read NUL-delimited records with bash's own `read -d ''` and stop at the budget. This keeps
+  # only ONE record in memory at a time, and — unlike the obvious `head -c` plus an awk pass to
+  # drop the trailing partial record — needs neither. That awk relied on RS="\0", which is a GNU
+  # extension: on BSD/macOS awk the literal becomes an empty string, silently turning it into
+  # paragraph mode. Caught in review.
+  # LC_ALL=C so ${#rec} counts BYTES; under a UTF-8 locale it counts characters and the budget
+  # would be wrong for any non-ASCII comment, which is most of them.
+  gh api --paginate "$endpoint" 2>/dev/null | jq --raw-output0 "$filter" 2>/dev/null | {
+    LC_ALL=C
+    used=0
+    while IFS= read -r -d '' rec; do
+      len=${#rec}
+      [ $((used + len + 1)) -gt "$budget" ] && exit 3   # 3: budget reached, records dropped
+      printf '%s\n' "$rec" >> "$dest"
+      used=$((used + len + 1))
+    done
+    exit 0
+  }
+  # Copy the whole array in ONE command: any command — including an assignment — resets
+  # PIPESTATUS, so reading [0] and then [2] would read the second from the wrong pipeline.
+  local ps=("${PIPESTATUS[@]}")
+  st_gh="${ps[0]}"; st_loop="${ps[2]:-0}"
+  # 141: we closed the pipe early, which is what truncation looks like from gh's side — not an
+  # API failure. Anything else non-zero from gh is.
+  case "$st_gh" in
     0|141) ;;
-    *) rm -f "$dest.raw"; return 1;;
+    *) return 1;;
   esac
-  if [ "$(wc -c < "$dest.raw")" -le "$budget" ]; then
-    mv "$dest.raw" "$dest"; return 0
-  fi
-  # Over budget: keep whole records only. If the last byte is already a separator every
-  # record is complete; otherwise drop the trailing partial one.
-  last=$(tail -c 1 "$dest.raw" | od -An -tx1 | tr -d ' \n')
-  if [ "$last" = "00" ]; then
-    mv "$dest.raw" "$dest"
-  else
-    awk 'BEGIN{RS="\0"; ORS="\0"} NR>1{print prev} {prev=$0}' "$dest.raw" > "$dest"
-    rm -f "$dest.raw"
-  fi
-  return 2
+  [ "$st_loop" = 3 ] && return 2
+  return 0
 }
 
 for PR in $PR_NUMBERS; do
