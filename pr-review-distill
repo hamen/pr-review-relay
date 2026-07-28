@@ -233,6 +233,7 @@ CORPUS_TRUNCATED=""
 n_pr=0; n_fb=0; api_err=0
 part_trunc=0   # PRs kept in the corpus whose feedback was cut short
 cut_to_empty=0 # PRs whose feedback the cap reduced to nothing (so they were skipped entirely)
+hdr_too_big=0  # PRs skipped because the cap could not hold even their header
 
 # Records are NUL-separated (`jq --raw-output0`), not newline-separated: a comment body is
 # routinely multi-line, so cutting at a line boundary hands the agent half a comment as if it
@@ -246,7 +247,7 @@ cut_to_empty=0 # PRs whose feedback the cap reduced to nothing (so they were ski
 # non-141 status from gh itself is a real error.
 #
 fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api error, 2 truncated
-  local dest="$1" endpoint="$2" filter="$3" budget="$4" st_gh ps
+  local dest="$1" endpoint="$2" filter="$3" budget="$4" st_gh
   : > "$dest"
   [ "$budget" -le 0 ] && return 2
   # Read NUL-delimited records with bash's own `read -d ''` and stop at the budget. This keeps
@@ -260,8 +261,11 @@ fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api err
   # of the pipeline — and with `shopt -s lastpipe` that stage runs in the current shell, so the
   # exit would terminate pr-review-distill itself instead of signalling truncation. Caught in
   # review; a marker file works the same under either setting.
+  # A subshell, not a `{ }` group: under `shopt -s lastpipe` the last stage runs in the current
+  # shell, and `LC_ALL=C` would leak into the rest of the run — silently changing how every later
+  # ${#var} counts. `( )` is immune either way. Latent today (the script doesn't set lastpipe).
   rm -f "$dest.trunc"
-  gh api --paginate "$endpoint" 2>/dev/null | jq --raw-output0 "$filter" 2>/dev/null | {
+  gh api --paginate "$endpoint" 2>/dev/null | jq --raw-output0 "$filter" 2>/dev/null | (
     LC_ALL=C
     used=0
     while IFS= read -r -d '' rec; do
@@ -270,7 +274,7 @@ fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api err
       printf '%s\n' "$rec" >> "$dest"
       used=$((used + len + 1))
     done
-  }
+  )
   # Copy the whole array in ONE command: any command — including an assignment — resets
   # PIPESTATUS, so reading [0] and then [2] would read the second from the wrong pipeline.
   local ps=("${PIPESTATUS[@]}")
@@ -302,7 +306,17 @@ for PR in $PR_NUMBERS; do
   # Stop when not even the header fits, not merely when the budget is exactly spent: with
   # 0 < remaining <= hdr_len every later PR would get a zero budget, be marked "cut short" and
   # the run would report N PRs truncated instead of the truth, which is that they were skipped.
+  # Stopping is only correct once the corpus has content, because `remaining` shrinks from then
+  # on and no later PR can fit. With an EMPTY corpus `remaining` is the whole cap and does not
+  # move, so this PR failing to fit says nothing about the next one: hdr_len varies with the
+  # title, and a PR with a shorter title may well fit. Breaking there would discard PRs that had
+  # room, and blame the cap for "a single PR's feedback" when a long title was the problem.
+  # Caught in review.
   if [ "$remaining" -le "$hdr_len" ]; then
+    if [ "$n_pr" = 0 ]; then
+      hdr_too_big=$((hdr_too_big + 1))
+      continue
+    fi
     CORPUS_TRUNCATED="⚠ CORPUS TRUNCATED: hit the ${MAX_CORPUS_BYTES}-byte cap after $n_pr PR(s); older PRs were skipped (raise PR_DISTILL_MAX_CORPUS_BYTES)."
     echo "  $CORPUS_TRUNCATED" >&2
     break
@@ -344,14 +358,11 @@ for PR in $PR_NUMBERS; do
   : > "$PARTS/acc"
 done
 
-# A cap so small that not one complete record fits leaves an empty corpus. Reporting "no
-# review feedback" there would blame the repository for what is an operator setting, and the
-# run would look like a clean result. Say what actually happened.
-# Nothing kept AND the cap is why: either a record was too big to fit (part_trunc) or the cap
-# could not even hold a PR header (CORPUS_TRUNCATED with no PRs). Both are the operator's
-# setting, not an empty repository — reporting "no review feedback" would blame the wrong thing
-# and look like a clean result.
-if [ "$n_pr" = 0 ] && { [ "$cut_to_empty" -gt 0 ] || [ -n "$CORPUS_TRUNCATED" ]; }; then
+# Nothing kept AND the cap is why: no complete record fitted (cut_to_empty), or the cap could
+# not hold even a PR header (hdr_too_big, or CORPUS_TRUNCATED with no PRs). All of those are the
+# operator's setting, not an empty repository — reporting "no review feedback" would blame the
+# wrong thing and look like a clean result.
+if [ "$n_pr" = 0 ] && { [ "$cut_to_empty" -gt 0 ] || [ "$hdr_too_big" -gt 0 ] || [ -n "$CORPUS_TRUNCATED" ]; }; then
   echo "PR_DISTILL_MAX_CORPUS_BYTES=$MAX_CORPUS_BYTES is smaller than a single PR's feedback: nothing could be kept. Raise it." >&2
   exit 2
 fi
@@ -367,6 +378,21 @@ elif [ "$part_trunc" -gt 0 ]; then
   # or the operator sees a shorter warning than the one recorded.
   CORPUS_TRUNCATED="$CORPUS_TRUNCATED Feedback for $part_trunc of the PR(s) that were included was also cut short."
   echo "  Feedback for $part_trunc of the included PR(s) was also cut short." >&2
+fi
+
+# PRs the cap dropped ENTIRELY while others were kept. Both counters were previously read only
+# on the n_pr = 0 path, so with even one PR in the corpus a dropped PR left no trace at all: the
+# run reported a clean, complete corpus with that feedback simply absent. Caught in review, by
+# two reviewers independently — the exact failure this change exists to prevent.
+skipped_by_cap=$((cut_to_empty + hdr_too_big))
+if [ "$skipped_by_cap" -gt 0 ]; then
+  skipped_msg="$skipped_by_cap PR(s) were skipped entirely: the ${MAX_CORPUS_BYTES}-byte cap left no room for their feedback (raise PR_DISTILL_MAX_CORPUS_BYTES)."
+  if [ -n "$CORPUS_TRUNCATED" ]; then
+    CORPUS_TRUNCATED="$CORPUS_TRUNCATED $skipped_msg"
+  else
+    CORPUS_TRUNCATED="⚠ CORPUS TRUNCATED: $skipped_msg"
+  fi
+  echo "  $skipped_msg" >&2
 fi
 
 # A partial fetch is reported LOUDLY, never hidden: the proposal would otherwise look

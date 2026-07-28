@@ -282,7 +282,8 @@ rm -f "$WORK/flood.txt"
 rc=$(PR_DISTILL_MAX_CORPUS_BYTES=20000 CLAUDE_PROMPT_FILE="$WORK/flood.txt" "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
 size=$(wc -c < "$WORK/flood.txt" 2>/dev/null || echo 999999999)
 # The prompt carries the task and rules too, so allow headroom over the cap itself; what
-# matters is that it is bounded rather than proportional to the flood (which was ~1.5 MB).
+# matters is that it is bounded rather than proportional to the flood (200 records of ~750 B,
+# so ~150 KB — an earlier version of this comment said 1.5 MB, which was off by 10x).
 if [ "$rc" = 0 ] && [ "$size" -lt 60000 ] && grep -q 'cut the feedback of' "$WORK/err"; then
   ok "a flooded PR is bounded, and reported as cut short (not as skipped PRs)"
 else
@@ -355,6 +356,72 @@ if [ -r /dev/urandom ]; then
   esac
 else
   ok "no /dev/urandom here — fallback shape accepted"
+fi
+
+echo "test: a PR the cap drops entirely is reported, even when other PRs were kept"
+# The gap two reviewers found independently: both "skipped" counters were read only when the
+# corpus ended up empty, so with one PR kept and another dropped the run reported a clean,
+# complete corpus and the dropped feedback left no trace. Sizes here are exact, not approximate:
+# one 500-byte record per PR (515 with the author prefix, 516 with the newline) and a 22-byte
+# header, so the cap can be set to fit PR #1 and leave PR #2 room for its header but not its
+# record — the one arrangement that reaches this branch.
+cat > "$BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+case "$1 $2" in "repo view") echo "acme/widgets"; exit 0;; esac
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then printf '1\n2\n'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then echo "T"; exit 0; fi
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *reviews*) jq -nc '[{user:{login:"alice"}, body:("x" * 500)}]';;
+    *) echo '[]';;
+  esac
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "$BIN/gh"
+rm -f "$WORK/skip.txt"
+rc=$(PR_DISTILL_MAX_CORPUS_BYTES=638 CLAUDE_PROMPT_FILE="$WORK/skip.txt" "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q 'skipped entirely' "$WORK/err" && grep -q 'xxxxx' "$WORK/skip.txt"; then
+  ok "a dropped PR is reported even though another PR was kept"
+else
+  bad "silent skip (rc=$rc)"; head -3 "$WORK/err" >&2
+fi
+
+echo "test: an oversized header on the first PR does not abort the run"
+# The header check may only stop the loop once the corpus has content, because from then on the
+# remaining budget shrinks. On an EMPTY corpus it does not move, so a PR failing to fit says
+# nothing about the next one — hdr_len varies with the title. Here PR #1 has a 300-char title
+# (header 322 B > the 300 B cap) and no feedback, PR #2 has a one-char title and a short comment
+# that fits. Before this fix the run aborted with "smaller than a single PR's feedback".
+cat > "$BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+case "$1 $2" in "repo view") echo "acme/widgets"; exit 0;; esac
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then printf '1\n2\n'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  # $3 is the PR number: a very long title on #1, a one-char title on #2.
+  if [ "$3" = "1" ]; then printf 'L%.0s' $(seq 300); echo; else echo "T"; fi
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *pulls/1/*|*issues/1/*) echo '[]';;
+    *reviews*) echo '[{"user":{"login":"alice"},"body":"short"}]';;
+    *) echo '[]';;
+  esac
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "$BIN/gh"
+rm -f "$WORK/hdr.txt"
+rc=$(PR_DISTILL_MAX_CORPUS_BYTES=300 CLAUDE_PROMPT_FILE="$WORK/hdr.txt" "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q 'short' "$WORK/hdr.txt" && grep -q 'skipped entirely' "$WORK/err"; then
+  ok "a PR whose header alone exceeds the cap is skipped and reported, not fatal"
+else
+  bad "oversized header aborted the run (rc=$rc)"; head -3 "$WORK/err" >&2
 fi
 
 echo
