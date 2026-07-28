@@ -27,6 +27,17 @@ jobs:
           bash -n pr-review-consensus
           bash -n test/test-fail-closed.sh
           bash -n test/test-distill.sh
+      - name: assert jq can emit NUL-separated records
+        run: |
+          # pr-review-distill needs `jq --raw-output0` (jq 1.7+) and refuses to run without it.
+          # Nothing here pins that: the job takes whatever jq ubuntu-latest happens to ship, so a
+          # runner-image rollback would turn every distill test red with no local reproduction.
+          # Feature-detect exactly as the script does, and fail with the reason instead.
+          if ! jq --raw-output0 -n '""' >/dev/null 2>&1; then
+            echo "this jq ($(jq --version)) lacks --raw-output0; pr-review-distill needs jq 1.7+" >&2
+            exit 1
+          fi
+          jq --version
       - name: fail-closed exit-code tests
         run: bash test/test-fail-closed.sh
       - name: distill tests
