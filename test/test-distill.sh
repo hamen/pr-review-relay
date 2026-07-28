@@ -235,6 +235,26 @@ else
   bad "incomplete-corpus warning (rc=$rc)"; cat "$WORK/err" >&2
 fi
 
+echo "test: a jq failure is an API error, not a silently empty corpus"
+# gh succeeds, jq gets JSON it cannot filter. Before checking jq's status this returned
+# "complete" with an empty file, so the feedback vanished and the run looked clean.
+cat > "$BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+case "$1 $2" in "repo view") echo "acme/widgets"; exit 0;; esac
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then printf '1\n'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then echo "Some PR title"; exit 0; fi
+if [ "$1" = "api" ]; then echo 'this is not json at all'; exit 0; fi
+exit 0
+STUB
+chmod +x "$BIN/gh"
+rc=$("$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
+if grep -q 'INCOMPLETE CORPUS' "$WORK/err"; then
+  ok "a jq failure surfaces as an incomplete corpus"
+else
+  bad "jq failure went unreported (rc=$rc)"; head -3 "$WORK/err" >&2
+fi
+
 echo "test: one flooded PR cannot blow past the cap (the case the old code could not stop)"
 # The point of the change: the cap now bites WHILE reading. A single PR carrying far more
 # than the cap must still yield a bounded corpus, with whole records only — a body is

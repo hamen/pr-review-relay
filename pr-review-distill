@@ -242,8 +242,6 @@ part_trunc=0   # feedback cut off INSIDE a PR (as opposed to whole PRs never fet
 # an API failure, or a flooded PR would be reported as a broken GitHub call. Only a non-zero,
 # non-141 status from gh itself is a real error.
 #
-# budget+1 bytes are requested on purpose: receiving exactly `budget` proves nothing about
-# whether more existed, budget+1 does.
 fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api error, 2 truncated
   local dest="$1" endpoint="$2" filter="$3" budget="$4" st_gh st_loop ps
   : > "$dest"
@@ -276,6 +274,13 @@ fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api err
     0|141) ;;
     *) return 1;;
   esac
+  # jq's status matters just as much: malformed JSON or a filter error would otherwise leave an
+  # empty file and be reported as "complete", losing the feedback silently. 141 here is the same
+  # expected SIGPIPE as gh's — the read loop closed the pipe when the budget ran out.
+  case "${ps[1]}" in
+    0|141) ;;
+    *) return 1;;
+  esac
   [ "$st_loop" = 3 ] && return 2
   return 0
 }
@@ -300,13 +305,16 @@ for PR in $PR_NUMBERS; do
     "issuec|repos/$REPO/issues/$PR/comments|.[] | \"[comment/\" + (.user.login // \"unknown\") + \"] \" + (.body // \"\")"
   do
     name="${spec%%|*}"; rest="${spec#*|}"; endpoint="${rest%%|*}"; filter="${rest#*|}"
-    budget=$((MAX_CORPUS_BYTES - $(wc -c < "$CORPUS") - $(wc -c < "$PARTS/acc" 2>/dev/null || echo 0)))
+    # The PR header is appended to the corpus too, so it has to come out of the budget here —
+    # otherwise the final corpus exceeds the cap by one header per PR.
+    hdr_len=${#PR}; hdr_len=$((hdr_len + ${#title} + 16))
+    budget=$((MAX_CORPUS_BYTES - $(wc -c < "$CORPUS") - $(wc -c < "$PARTS/acc" 2>/dev/null || echo 0) - hdr_len))
     fetch_into "$PARTS/$name" "$endpoint" "$filter" "$budget"
     case $? in
       1) api_err=$((api_err + 1));;
       2) pr_trunc=1;;
     esac
-    tr '\0' '\n' < "$PARTS/$name" >> "$PARTS/acc"
+    cat "$PARTS/$name" >> "$PARTS/acc"
   done
   # Counted BEFORE the skip below: when the cap is so tight that nothing survives, the PR
   # looks feedback-less and `continue` would drop the fact that it was truncated — which is
