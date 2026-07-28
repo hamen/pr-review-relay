@@ -126,7 +126,9 @@ case "$STATE" in merged|closed|all|open) ;; *) echo "invalid --state: '$STATE' (
 case "$AGENT" in claude|codex|cursor) ;; *) echo "invalid --agent: '$AGENT' (want claude|codex|cursor — antigravity is unsupported here, see note in the script)" >&2; exit 2;; esac
 
 command -v gh >/dev/null || { echo "gh not found" >&2; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "jq not found: pr-review-distill pipes the GitHub JSON through it (gh --jq cannot emit NUL-separated records)." >&2; exit 1; }
+# Feature-detect rather than parse a version: --raw-output0 landed in jq 1.7, and a 1.6 that
+# merely EXISTS would pass an existence check and then fail on every fetch.
+jq --raw-output0 -n '""' >/dev/null 2>&1 || { echo "pr-review-distill needs jq with --raw-output0 (jq 1.7+): it pipes the GitHub JSON through jq because gh --jq cannot emit NUL-separated records." >&2; exit 1; }
 
 if [ -z "$REPO" ]; then
   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
@@ -286,13 +288,20 @@ fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api err
 }
 
 for PR in $PR_NUMBERS; do
+  title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "")
+  # Measure the header instead of counting it by hand: the format string's fixed bytes are easy
+  # to miscount (they are 20, not the 16 a first version assumed) and ${#title} counts CHARACTERS
+  # outside LC_ALL=C, so any title with an emoji or an accent would undercount. wc -c is bytes.
+  hdr_len=$(printf '\n===== PR #%s: %s =====\n' "$PR" "$title" | wc -c)
   remaining=$((MAX_CORPUS_BYTES - $(wc -c < "$CORPUS")))
-  if [ "$remaining" -le 0 ]; then
+  # Stop when not even the header fits, not merely when the budget is exactly spent: with
+  # 0 < remaining <= hdr_len every later PR would get a zero budget, be marked "cut short" and
+  # the run would report N PRs truncated instead of the truth, which is that they were skipped.
+  if [ "$remaining" -le "$hdr_len" ]; then
     CORPUS_TRUNCATED="⚠ CORPUS TRUNCATED: hit the ${MAX_CORPUS_BYTES}-byte cap after $n_pr PR(s); older PRs were skipped (raise PR_DISTILL_MAX_CORPUS_BYTES)."
     echo "  $CORPUS_TRUNCATED" >&2
     break
   fi
-  title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "")
   : > "$PARTS/acc"
   # Reviews (top-level review bodies), inline review comments, and issue comments (which
   # include the relay's automated cross-reviews). Each prefixed by author. The budget is
@@ -305,9 +314,8 @@ for PR in $PR_NUMBERS; do
     "issuec|repos/$REPO/issues/$PR/comments|.[] | \"[comment/\" + (.user.login // \"unknown\") + \"] \" + (.body // \"\")"
   do
     name="${spec%%|*}"; rest="${spec#*|}"; endpoint="${rest%%|*}"; filter="${rest#*|}"
-    # The PR header is appended to the corpus too, so it has to come out of the budget here —
+    # The PR header is appended to the corpus too, so it comes out of the budget here —
     # otherwise the final corpus exceeds the cap by one header per PR.
-    hdr_len=${#PR}; hdr_len=$((hdr_len + ${#title} + 16))
     budget=$((MAX_CORPUS_BYTES - $(wc -c < "$CORPUS") - $(wc -c < "$PARTS/acc" 2>/dev/null || echo 0) - hdr_len))
     fetch_into "$PARTS/$name" "$endpoint" "$filter" "$budget"
     case $? in
@@ -331,8 +339,12 @@ done
 # A cap so small that not one complete record fits leaves an empty corpus. Reporting "no
 # review feedback" there would blame the repository for what is an operator setting, and the
 # run would look like a clean result. Say what actually happened.
-if [ "$n_pr" = 0 ] && [ "$part_trunc" -gt 0 ]; then
-  echo "PR_DISTILL_MAX_CORPUS_BYTES=$MAX_CORPUS_BYTES is smaller than a single comment record: nothing could be kept. Raise it." >&2
+# Nothing kept AND the cap is why: either a record was too big to fit (part_trunc) or the cap
+# could not even hold a PR header (CORPUS_TRUNCATED with no PRs). Both are the operator's
+# setting, not an empty repository — reporting "no review feedback" would blame the wrong thing
+# and look like a clean result.
+if [ "$n_pr" = 0 ] && { [ "$part_trunc" -gt 0 ] || [ -n "$CORPUS_TRUNCATED" ]; }; then
+  echo "PR_DISTILL_MAX_CORPUS_BYTES=$MAX_CORPUS_BYTES is smaller than a single PR's feedback: nothing could be kept. Raise it." >&2
   exit 2
 fi
 
@@ -342,7 +354,11 @@ if [ "$part_trunc" -gt 0 ] && [ -z "$CORPUS_TRUNCATED" ]; then
   CORPUS_TRUNCATED="⚠ CORPUS TRUNCATED: the ${MAX_CORPUS_BYTES}-byte cap cut the feedback of $part_trunc PR(s) short (raise PR_DISTILL_MAX_CORPUS_BYTES)."
   echo "  $CORPUS_TRUNCATED" >&2
 elif [ "$part_trunc" -gt 0 ]; then
-  CORPUS_TRUNCATED="$CORPUS_TRUNCATED Feedback for $part_trunc of them was also cut short."
+  # "them" read as the skipped PRs, which is the opposite of what happened: these are PRs that
+  # ARE in the corpus, with their feedback cut short. And the addition has to reach stderr too,
+  # or the operator sees a shorter warning than the one recorded.
+  CORPUS_TRUNCATED="$CORPUS_TRUNCATED Feedback for $part_trunc of the PR(s) that were included was also cut short."
+  echo "  Feedback for $part_trunc of the included PR(s) was also cut short." >&2
 fi
 
 # A partial fetch is reported LOUDLY, never hidden: the proposal would otherwise look

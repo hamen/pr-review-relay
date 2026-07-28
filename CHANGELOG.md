@@ -18,7 +18,9 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   small for a single comment now fails with that message instead of reporting "no review feedback", which
   blamed the repository for an operator setting. Measured: 20 MB of comments on one PR, 50 KB cap, 37 KB
   delivered, no partial record. Note: this makes **`jq` a hard requirement** for `pr-review-distill`
-  (the previous code used `gh --jq`, i.e. gh's embedded gojq) — checked at startup and documented.
+  **1.7+** (the previous code used `gh --jq`, i.e. gh's embedded gojq): `--raw-output0` landed in 1.7,
+  and is feature-detected at startup rather than version-parsed, so a 1.6 install fails with the reason
+  instead of on every fetch.
 
 ### Security
 
