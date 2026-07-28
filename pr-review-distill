@@ -231,7 +231,8 @@ MAX_CORPUS_BYTES="${PR_DISTILL_MAX_CORPUS_BYTES:-300000}"
 case "$MAX_CORPUS_BYTES" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_MAX_CORPUS_BYTES: '$MAX_CORPUS_BYTES' (want a positive number of bytes)" >&2; exit 2;; esac
 CORPUS_TRUNCATED=""
 n_pr=0; n_fb=0; api_err=0
-part_trunc=0   # feedback cut off INSIDE a PR (as opposed to whole PRs never fetched)
+part_trunc=0   # PRs kept in the corpus whose feedback was cut short
+cut_to_empty=0 # PRs whose feedback the cap reduced to nothing (so they were skipped entirely)
 
 # Records are NUL-separated (`jq --raw-output0`), not newline-separated: a comment body is
 # routinely multi-line, so cutting at a line boundary hands the agent half a comment as if it
@@ -245,7 +246,7 @@ part_trunc=0   # feedback cut off INSIDE a PR (as opposed to whole PRs never fet
 # non-141 status from gh itself is a real error.
 #
 fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api error, 2 truncated
-  local dest="$1" endpoint="$2" filter="$3" budget="$4" st_gh st_loop ps
+  local dest="$1" endpoint="$2" filter="$3" budget="$4" st_gh ps
   : > "$dest"
   [ "$budget" -le 0 ] && return 2
   # Read NUL-delimited records with bash's own `read -d ''` and stop at the budget. This keeps
@@ -255,21 +256,25 @@ fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api err
   # paragraph mode. Caught in review.
   # LC_ALL=C so ${#rec} counts BYTES; under a UTF-8 locale it counts characters and the budget
   # would be wrong for any non-ASCII comment, which is most of them.
+  # The truncation signal is a FILE, not an exit status. `exit` here would run in the last stage
+  # of the pipeline — and with `shopt -s lastpipe` that stage runs in the current shell, so the
+  # exit would terminate pr-review-distill itself instead of signalling truncation. Caught in
+  # review; a marker file works the same under either setting.
+  rm -f "$dest.trunc"
   gh api --paginate "$endpoint" 2>/dev/null | jq --raw-output0 "$filter" 2>/dev/null | {
     LC_ALL=C
     used=0
     while IFS= read -r -d '' rec; do
       len=${#rec}
-      [ $((used + len + 1)) -gt "$budget" ] && exit 3   # 3: budget reached, records dropped
+      if [ $((used + len + 1)) -gt "$budget" ]; then : > "$dest.trunc"; break; fi
       printf '%s\n' "$rec" >> "$dest"
       used=$((used + len + 1))
     done
-    exit 0
   }
   # Copy the whole array in ONE command: any command — including an assignment — resets
   # PIPESTATUS, so reading [0] and then [2] would read the second from the wrong pipeline.
   local ps=("${PIPESTATUS[@]}")
-  st_gh="${ps[0]}"; st_loop="${ps[2]:-0}"
+  st_gh="${ps[0]}"
   # 141: we closed the pipe early, which is what truncation looks like from gh's side — not an
   # API failure. Anything else non-zero from gh is.
   case "$st_gh" in
@@ -283,7 +288,7 @@ fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api err
     0|141) ;;
     *) return 1;;
   esac
-  [ "$st_loop" = 3 ] && return 2
+  if [ -f "$dest.trunc" ]; then rm -f "$dest.trunc"; return 2; fi
   return 0
 }
 
@@ -324,12 +329,15 @@ for PR in $PR_NUMBERS; do
     esac
     cat "$PARTS/$name" >> "$PARTS/acc"
   done
-  # Counted BEFORE the skip below: when the cap is so tight that nothing survives, the PR
-  # looks feedback-less and `continue` would drop the fact that it was truncated — which is
-  # exactly the case that must not be reported as "no review feedback".
+  # Two different outcomes, two different counters. A PR whose feedback the cap reduced to
+  # nothing is SKIPPED, not included — counting it as "included but cut short" was the message
+  # this PR exists to get right. The empty case still has to be recorded before the `continue`
+  # below, or the run would report "no review feedback" and blame the repository.
+  if [ -z "$(tr -d '[:space:]' < "$PARTS/acc")" ]; then
+    [ "$pr_trunc" = 1 ] && cut_to_empty=$((cut_to_empty + 1))
+    : > "$PARTS/acc"; continue
+  fi
   [ "$pr_trunc" = 1 ] && part_trunc=$((part_trunc + 1))
-  # Skip PRs with no feedback at all so the corpus stays signal.
-  if [ -z "$(tr -d '[:space:]' < "$PARTS/acc")" ]; then : > "$PARTS/acc"; continue; fi
   n_pr=$((n_pr + 1))
   n_fb=$((n_fb + $(grep -c '^\[' "$PARTS/acc" || true)))
   { printf '\n===== PR #%s: %s =====\n' "$PR" "$title"; cat "$PARTS/acc"; } >> "$CORPUS"
@@ -343,7 +351,7 @@ done
 # could not even hold a PR header (CORPUS_TRUNCATED with no PRs). Both are the operator's
 # setting, not an empty repository — reporting "no review feedback" would blame the wrong thing
 # and look like a clean result.
-if [ "$n_pr" = 0 ] && { [ "$part_trunc" -gt 0 ] || [ -n "$CORPUS_TRUNCATED" ]; }; then
+if [ "$n_pr" = 0 ] && { [ "$cut_to_empty" -gt 0 ] || [ -n "$CORPUS_TRUNCATED" ]; }; then
   echo "PR_DISTILL_MAX_CORPUS_BYTES=$MAX_CORPUS_BYTES is smaller than a single PR's feedback: nothing could be kept. Raise it." >&2
   exit 2
 fi
@@ -365,7 +373,7 @@ fi
 # complete while resting on a corpus with holes.
 INCOMPLETE_NOTE=""
 if [ "$api_err" -gt 0 ]; then
-  INCOMPLETE_NOTE="⚠ INCOMPLETE CORPUS: $api_err GitHub API call(s) failed — some review feedback is missing, so this proposal may be partial."
+  INCOMPLETE_NOTE="⚠ INCOMPLETE CORPUS: $api_err GitHub API/jq pipeline call(s) failed — some review feedback is missing, so this proposal may be partial."
   echo "  $INCOMPLETE_NOTE" >&2
 fi
 # Carry any truncation note into the same channel shown in the output and the --out file.

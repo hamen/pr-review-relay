@@ -267,10 +267,13 @@ if [ "$1" = "pr" ] && [ "$2" = "list" ]; then printf '1\n'; exit 0; fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then echo "Flooded PR"; exit 0; fi
 if [ "$1" = "api" ]; then
   case "$*" in
-    *reviews*) jq -n '[range(200) | {user:{login:("flood" + (tostring))}, body:(("padding line here " * 40) + "\nsecond line of the same comment")}]';;
-    *) echo '[]';;
+    *reviews*)
+      # NOT followed by `exit 0`: the status has to propagate so the reader closing the pipe
+      # actually shows up as SIGPIPE (141), which is the branch real gh takes on truncation.
+      jq -n '[range(200) | {user:{login:("flood" + (tostring))}, body:(("padding line here " * 40) + "\nsecond line of the same comment")}]'
+      exit $?;;
+    *) echo '[]'; exit 0;;
   esac
-  exit 0
 fi
 exit 0
 STUB
