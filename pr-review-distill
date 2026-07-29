@@ -279,8 +279,14 @@ fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api err
   # PIPESTATUS, so reading [0] and then [2] would read the second from the wrong pipeline.
   local ps=("${PIPESTATUS[@]}")
   st_gh="${ps[0]}"
-  # 141: we closed the pipe early, which is what truncation looks like from gh's side — not an
-  # API failure. Anything else non-zero from gh is.
+  # If we hit the budget we intentionally closed the pipe early. That is truncation, not an
+  # API/jq failure — regardless of whether the writers exited 141 (SIGPIPE) or some other
+  # non-zero (observed on GitHub Actions runners: the flood fixture then reported
+  # INCOMPLETE CORPUS instead of "cut the feedback of", red-CI on main since #13). Prefer
+  # the truncation marker over PIPESTATUS when both are set.
+  if [ -f "$dest.trunc" ]; then rm -f "$dest.trunc"; return 2; fi
+  # 141: SIGPIPE from early close that did NOT leave a trunc marker (empty stream edge case).
+  # Anything else non-zero from gh is a real failure.
   case "$st_gh" in
     0|141) ;;
     *) return 1;;
@@ -292,7 +298,6 @@ fetch_into() { # <dest> <endpoint> <jq-filter> <budget> -> 0 complete, 1 api err
     0|141) ;;
     *) return 1;;
   esac
-  if [ -f "$dest.trunc" ]; then rm -f "$dest.trunc"; return 2; fi
   return 0
 }
 
