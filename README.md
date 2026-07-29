@@ -75,12 +75,12 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run` with a read-only agent the relay defines
     (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
   - 🟡 [`qwen`](https://qwen.ai/qwencode) (Qwen Code CLI) — uses `qwen --safe-mode --approval-mode yolo -p`
-  - ⚡ [`grok`](https://grok.com) (Grok Build CLI) — uses `grok --prompt-file … -m grok-4.5 --reasoning-effort medium --permission-mode plan --sandbox read-only` from an isolated cwd (full diff always embedded; stdin is ignored)
     (`--safe-mode` ignores any hooks/extensions/skills/MCP/project config in the reviewed checkout — see
     [Notes & caveats](#-notes--caveats)). Auth is the CLI's own: sign in with the free Qwen OAuth tier, or
     point it at a paid Qwen Cloud / DashScope OpenAI-compatible endpoint via `~/.qwen/.env`
     (`QWEN_DEFAULT_AUTH_TYPE`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). Opt-in: name it
     explicitly in `--reviewers`.
+  - ⚡ [`grok`](https://grok.com) (Grok Build CLI) — uses `grok --prompt-file … -m grok-4.5 --reasoning-effort medium --permission-mode plan --sandbox read-only --deny '*'` from an isolated cwd (full diff always embedded; stdin is ignored). Opt-in: name it explicitly in `--reviewers`.
 
 You only need the agents you actually want as reviewers.
 
@@ -102,7 +102,7 @@ curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comm
 curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
 curl -fsSL "$REPO/lib-grok.sh" -o "$BIN/lib-grok.sh"
 chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-distill" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
-# lib-opencode.sh is sourced, not executed — it needs no +x
+# lib-*.sh are sourced, not executed — they need no +x
 # make sure ~/.local/bin is on your PATH
 ```
 
