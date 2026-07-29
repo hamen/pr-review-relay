@@ -80,8 +80,13 @@ grok_review() {
     opencode_reject_if_in_repo "$grok_bin"
   fi
   timeout_bin="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+  if [ -z "$timeout_bin" ]; then
+    # Fail closed: without a wall-clock limit a hung grok burns the round forever.
+    # --max-turns does not cover startup/network hangs. (macOS: brew install coreutils → gtimeout)
+    echo "grok_review: neither timeout nor gtimeout found — refuse to run without a wall-clock limit" >&2
+    return 1
+  fi
   case "$timeout_bin" in
-    '') ;;
     /*) ;;
     *) timeout_bin="$(cd -- "$(dirname "$timeout_bin")" && pwd)/$(basename "$timeout_bin")";;
   esac
@@ -147,37 +152,20 @@ grok_review() {
   # </dev/null: avoid inheriting a piped stdin from the relay parent.
   (
     cd "$iso_cwd" || exit 1
-    if [ -n "$timeout_bin" ]; then
-      "$timeout_bin" "$agent_timeout" "$grok_bin" \
-        --prompt-file "$prompt_file" \
-        --cwd "$iso_cwd" \
-        -m "$model" \
-        --reasoning-effort "$effort" \
-        --permission-mode plan \
-        --sandbox read-only \
-        --deny '*' \
-        --verbatim \
-        --no-memory \
-        --no-subagents \
-        --disable-web-search \
-        --max-turns 40 \
-        </dev/null 2>"$errf"
-    else
-      "$grok_bin" \
-        --prompt-file "$prompt_file" \
-        --cwd "$iso_cwd" \
-        -m "$model" \
-        --reasoning-effort "$effort" \
-        --permission-mode plan \
-        --sandbox read-only \
-        --deny '*' \
-        --verbatim \
-        --no-memory \
-        --no-subagents \
-        --disable-web-search \
-        --max-turns 40 \
-        </dev/null 2>"$errf"
-    fi
+    "$timeout_bin" "$agent_timeout" "$grok_bin" \
+      --prompt-file "$prompt_file" \
+      --cwd "$iso_cwd" \
+      -m "$model" \
+      --reasoning-effort "$effort" \
+      --permission-mode plan \
+      --sandbox read-only \
+      --deny '*' \
+      --verbatim \
+      --no-memory \
+      --no-subagents \
+      --disable-web-search \
+      --max-turns 40 \
+      </dev/null 2>"$errf"
   )
   rc=$?
 

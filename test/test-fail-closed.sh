@@ -939,6 +939,7 @@ rm -f "$WORK/sha_counter"
 out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
   XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
   GH_SHA_COUNTER="$WORK/sha_counter" \
+  GROK_REVIEW_MODEL= GROK_REVIEW_EFFORT= \
   ARGV_LOG="$ARGV_LOG" PROMPT_FILE_LOG="$PROMPT_FILE_LOG" \
   bash "$RELAY" --pr 1 --author claude --reviewers grok 2>&1 )
 rc=$?
