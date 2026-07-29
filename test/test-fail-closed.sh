@@ -50,7 +50,7 @@ exit 0
 GH
 chmod +x "$BIN/gh"
 
-# --- stub: agents (claude / codex / cursor-agent / agy / opencode / qwen) ----
+# --- stub: agents (claude / codex / cursor-agent / agy / opencode / qwen / grok) ----
 make_agent() {
   cat > "$BIN/$1" <<AG
 #!/usr/bin/env bash
@@ -64,12 +64,27 @@ case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output b
 # The bug this guards against is a flag silently going missing or being renamed, which
 # no output-shape assertion would ever notice.
 [ -n "\${ARGV_LOG:-}" ] && printf '%s %s\n' "\$self" "\$*" >> "\$ARGV_LOG"
+# Grok receives the plan/diff only via --prompt-file (stdin is ignored). When asked,
+# dump the prompt-file contents so tests can assert the full diff reached the agent.
+if [ -n "\${PROMPT_FILE_LOG:-}" ]; then
+  _args=("\$@")
+  for ((_i=0; _i<\${#_args[@]}; _i++)); do
+    if [ "\${_args[\$_i]}" = "--prompt-file" ]; then
+      _pf="\${_args[\$((_i+1))]}"
+      if [ -n "\$_pf" ] && [ -f "\$_pf" ]; then
+        { printf 'PROMPT_FILE path=%s\n' "\$_pf"; cat -- "\$_pf"; } >> "\$PROMPT_FILE_LOG"
+      fi
+      break
+    fi
+  done
+  printf '\nCWD=%s\n' "\$PWD" >> "\$PROMPT_FILE_LOG"
+fi
 echo "LGTM from \$key."
 exit 0
 AG
   chmod +x "$BIN/$1"
 }
-for a in claude codex cursor-agent agy opencode qwen; do make_agent "$a"; done
+for a in claude codex cursor-agent agy opencode qwen grok; do make_agent "$a"; done
 
 # --- test harness ------------------------------------------------------------
 PASS=0; FAIL=0
@@ -911,6 +926,100 @@ lc_run GH_LOCAL_HEAD="$LHEAD"
 ( cd "$LREPO" && git checkout -q -- file.txt )   # clean up the scratch write
 printf '#!/usr/bin/env bash\necho "LGTM"\n' > "$BIN/claude"; chmod +x "$BIN/claude"   # restore
 
+
+# --- grok invocation contract ------------------------------------------------
+# Grok is opt-in (like opencode/qwen). It ignores stdin; the full diff must land
+# in --prompt-file. Runs from an isolated cwd under ATTACH_DIR with medium effort,
+# permission-mode plan, and sandbox read-only.
+mkdir -p "$WORK/home" "$WORK/xdg" "$WORK/tmp"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"
+PROMPT_FILE_LOG="$WORK/grok-prompt.log"; : > "$PROMPT_FILE_LOG"
+ARGV_LOG="$WORK/grok-argv.log"; : > "$ARGV_LOG"
+rm -f "$WORK/sha_counter"
+out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" \
+  GROK_REVIEW_MODEL= GROK_REVIEW_EFFORT= \
+  ARGV_LOG="$ARGV_LOG" PROMPT_FILE_LOG="$PROMPT_FILE_LOG" \
+  bash "$RELAY" --pr 1 --author claude --reviewers grok 2>&1 )
+rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   [0] grok reviewer runs and posts"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] grok reviewer: $out"; FAIL=$((FAIL+1)); fi
+if grep -q -- '--prompt-file' "$ARGV_LOG" && grep -q -- '-m grok-4.5' "$ARGV_LOG" \
+   && grep -q -- '--reasoning-effort medium' "$ARGV_LOG" \
+   && grep -q -- '--permission-mode plan' "$ARGV_LOG" \
+   && grep -q -- '--sandbox read-only' "$ARGV_LOG" \
+   && grep -qF -- "--deny *" "$ARGV_LOG" \
+   && grep -q -- '--verbatim' "$ARGV_LOG" \
+   && grep -q -- '--cwd' "$ARGV_LOG"; then
+  echo "  ok   [-] grok argv pins model/medium/plan/sandbox/deny/verbatim/cwd/prompt-file"; PASS=$((PASS+1))
+else echo "  FAIL grok argv missing required flags: $(cat "$ARGV_LOG" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
+if grep -qF -- '+change' "$PROMPT_FILE_LOG" && grep -qF -- '--- DIFF ---' "$PROMPT_FILE_LOG"; then
+  echo "  ok   [-] grok prompt-file contains the full PR diff"; PASS=$((PASS+1))
+else echo "  FAIL grok prompt-file missing diff content (pl=$(wc -c < "$PROMPT_FILE_LOG" 2>/dev/null)B)"; FAIL=$((FAIL+1)); fi
+# isolated cwd: process cds into iso-grok under TMPDIR/ATTACH
+if grep -q '^CWD=' "$PROMPT_FILE_LOG"; then
+  gcwd=$(sed -n 's/^CWD=//p' "$PROMPT_FILE_LOG" | tail -1)
+  case "$gcwd" in
+    *iso-grok*|"$WORK"/tmp/*) echo "  ok   [-] grok process cwd is the isolated temp dir"; PASS=$((PASS+1));;
+    *) echo "  FAIL grok cwd not isolated ($gcwd)"; FAIL=$((FAIL+1));;
+  esac
+else echo "  FAIL grok CWD not recorded"; FAIL=$((FAIL+1)); fi
+# large-diff path: still must embed the complete diff for grok (threshold does not strip it)
+: > "$PROMPT_FILE_LOG"; : > "$ARGV_LOG"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" LINK_DIFF_FALLBACK_MAX_BYTES=1 \
+  ARGV_LOG="$ARGV_LOG" PROMPT_FILE_LOG="$PROMPT_FILE_LOG" \
+  bash "$RELAY" --pr 1 --author claude --reviewers grok 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && grep -q -- '+change' "$PROMPT_FILE_LOG"; then
+  echo "  ok   [0] grok still gets full diff when LINK_DIFF_FALLBACK_MAX_BYTES=1"; PASS=$((PASS+1))
+else echo "  FAIL grok lost diff under small link threshold (rc=$rc)"; FAIL=$((FAIL+1)); fi
+# author skip — reset round-cap cache so a prior failed round doesn't yield exit 4
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author grok --reviewers grok 2>&1 )
+rc=$?
+if [ "$rc" = 3 ]; then echo "  ok   [3] grok-as-author with only self → no reviewers"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 3] grok author self-exclusion out=$out"; FAIL=$((FAIL+1)); fi
+# missing binary when explicit — pruned PATH so a real ~/.local/bin/grok cannot mask it
+rm -f "$BIN/grok"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+BIN2="$WORK/bin2"; mkdir -p "$BIN2"
+cp -a "$BIN/gh" "$BIN2/gh"
+# coreutils the relay needs
+for b in bash timeout gtimeout mktemp cat tr sed head tail wc rm mkdir chmod node; do
+  src=$(command -v "$b" 2>/dev/null) || continue
+  ln -sf "$src" "$BIN2/$b" 2>/dev/null || true
+done
+# wrap helper needs node + mjs next to relay - already via absolute RELAY path
+out=$( env PATH="$BIN2:/usr/bin:/bin" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author claude --reviewers grok 2>&1 )
+rc=$?
+if [ "$rc" = 3 ]; then echo "  ok   [3] explicit grok missing binary → fail"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 3] missing grok not fail-closed out=$out"; FAIL=$((FAIL+1)); fi
+make_agent grok   # restore
+
+# review-local also dispatches grok
+: > "$PROMPT_FILE_LOG"; : > "$ARGV_LOG"
+RLREPO="$WORK/rlrepo"; rm -rf "$RLREPO"; mkdir -p "$RLREPO" "$WORK/tmp"
+( cd "$RLREPO" && git init -q && git config user.email t@t && git config user.name t \
+  && echo a > f && git add f && git commit -q -m i \
+  && echo b >> f && git add f && git commit -q -m c )
+out=$( cd "$RLREPO" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  ARGV_LOG="$ARGV_LOG" PROMPT_FILE_LOG="$PROMPT_FILE_LOG" \
+  bash "$HERE/../review-local" --author claude --reviewers grok --base HEAD~1 2>&1 )
+rc=$?
+if [ "$rc" = 0 ] && grep -q -- '--reasoning-effort medium' "$ARGV_LOG" && grep -qF -- '--- DIFF ---' "$PROMPT_FILE_LOG"; then
+  echo "  ok   [0] review-local dispatches grok with medium + full diff"; PASS=$((PASS+1))
+else echo "  FAIL review-local grok (rc=$rc) argv=$(cat "$ARGV_LOG" 2>/dev/null) pl=$(head -5 "$PROMPT_FILE_LOG" 2>/dev/null) out=$out"; FAIL=$((FAIL+1)); fi
+
 # --- SCRIPT_DIR follows the script's own symlink to find the sibling lib ------------
 # Regression: invoked through a symlink whose directory has NO lib-opencode.sh next to it
 # (exactly how ~/.local/bin/pr-review-relay -> the repo checkout is installed), the relay
@@ -921,17 +1030,17 @@ printf '#!/usr/bin/env bash\necho "LGTM"\n' > "$BIN/claude"; chmod +x "$BIN/clau
 # and exits 0 without touching gh, so it's a clean probe.
 SLINK_BIN="$WORK/slinkbin"; mkdir -p "$SLINK_BIN"
 ln -s "$RELAY" "$SLINK_BIN/pr-review-relay"
-if out=$(bash "$SLINK_BIN/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+if out=$(bash "$SLINK_BIN/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then
   echo "  ok   [-] absolute symlink invocation resolves the sibling lib"; PASS=$((PASS+1))
 else
   echo "  FAIL absolute symlink invocation could not find lib-opencode.sh"; FAIL=$((FAIL+1))
 fi
 # A RELATIVE symlink target must resolve against the LINK's directory, not the cwd.
 REALD="$WORK/real"; mkdir -p "$REALD"
-cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
+cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
 LINKD="$WORK/linkbin"; mkdir -p "$LINKD"
 ( cd "$LINKD" && ln -s "../real/pr-review-relay" pr-review-relay )
-if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then
   echo "  ok   [-] relative symlink resolves against the link's own dir"; PASS=$((PASS+1))
 else
   echo "  FAIL relative symlink did not resolve the lib"; FAIL=$((FAIL+1))
@@ -939,7 +1048,7 @@ fi
 # Invoked as a BARE filename from the link's own dir (`bash pr-review-relay`): $_self has no
 # slash, so the relative-target branch must resolve against the cwd, not build a bogus
 # "pr-review-relay/../real/..." path. Regression for the no-slash case.
-if out=$( cd "$LINKD" && bash pr-review-relay --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode\|cannot resolve'; then
+if out=$( cd "$LINKD" && bash pr-review-relay --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)|cannot resolve'; then
   echo "  ok   [-] bare-filename relative symlink resolves (no-slash \$_self)"; PASS=$((PASS+1))
 else
   echo "  FAIL bare-filename relative symlink broke (no-slash case): $(printf '%s' "$out" | head -1)"; FAIL=$((FAIL+1))
@@ -947,7 +1056,7 @@ fi
 # The same bootstrap lives in review-local; symlink it too so the two can't drift.
 cp "$HERE/../review-local" "$REALD/" 2>/dev/null
 RLINK="$WORK/rlinkbin"; mkdir -p "$RLINK"; ln -s "$REALD/review-local" "$RLINK/review-local"
-if out=$(bash "$RLINK/review-local" --help 2>&1) && ! printf '%s' "$out" | grep -q 'missing.*lib-opencode'; then
+if out=$(bash "$RLINK/review-local" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then
   echo "  ok   [-] review-local resolves the sibling lib through a symlink"; PASS=$((PASS+1))
 else
   echo "  FAIL review-local symlink did not resolve the lib"; FAIL=$((FAIL+1))

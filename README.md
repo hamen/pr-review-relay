@@ -21,7 +21,7 @@
 
 You build a feature with one agent (Claude Code, Codex, Cursor, or Antigravity), it opens a PR — and the
 **others** automatically review that PR, headless, and post their findings as PR comments. (Reviewers
-are *asked* to be read-only; only the OpenCode one has that enforced — see
+are *asked* to be read-only; OpenCode and Grok enforce read-only (Grok via --deny '*' + sandbox; OpenCode via its own agent policy) — see
 [Notes & caveats](#-notes--caveats).) Local, free (it uses the agent CLIs you already pay for), and idempotent.
 
 ```
@@ -80,6 +80,7 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
     point it at a paid Qwen Cloud / DashScope OpenAI-compatible endpoint via `~/.qwen/.env`
     (`QWEN_DEFAULT_AUTH_TYPE`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). Opt-in: name it
     explicitly in `--reviewers`.
+  - ⚡ [`grok`](https://grok.com) (Grok Build CLI) — uses `grok --prompt-file … -m grok-4.5 --reasoning-effort medium --permission-mode plan --sandbox read-only --deny '*'` from an isolated cwd (full diff always embedded; stdin is ignored). Opt-in: name it explicitly in `--reviewers`.
 
 You only need the agents you actually want as reviewers.
 
@@ -99,14 +100,15 @@ curl -fsSL "$REPO/pr-review-collapse-comments" -o "$BIN/pr-review-collapse-comme
 curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
 curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
 curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
+curl -fsSL "$REPO/lib-grok.sh" -o "$BIN/lib-grok.sh"
 chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-distill" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
-# lib-opencode.sh is sourced, not executed — it needs no +x
+# lib-*.sh are sourced, not executed — they need no +x
 # make sure ~/.local/bin is on your PATH
 ```
 
 `pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too. `review-local` doesn't need it (it never posts anywhere).
 
-`pr-review-relay` and `review-local` both source **`lib-opencode.sh`** from their own directory — it holds the OpenCode reviewer's binary resolution and read-only permission policy, kept in one place so the two scripts cannot drift apart on a security-relevant setting. Both refuse to start if it is missing.
+`pr-review-relay` and `review-local` both source **`lib-opencode.sh`** and **`lib-grok.sh`** from their own directory — shared OpenCode and Grok reviewer policies so the two scripts cannot drift on security-relevant settings. Both refuse to start if either lib is missing.
 
 ### 🪟 Windows
 
@@ -180,7 +182,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that opened the PR. It auto-excludes itself from reviewing. |
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` and `qwen` are supported but opt-in — name them explicitly to include them. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode`, `qwen`, and `grok` are supported but opt-in — name them explicitly to include them. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
 | `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
@@ -224,7 +226,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that wrote the branch. It auto-excludes itself from reviewing. |
 | `--base <ref>` | Ref to diff against. Default: `main`. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` and `qwen` are supported but opt-in — name them explicitly to include them. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode`, `qwen`, and `grok` are supported but opt-in — name them explicitly to include them. |
 | `--parallel` | Run the reviewers concurrently. |
 
 Reviewers that read stdin (`claude` / `codex` / `cursor` / `qwen`) get the diff piped in, so a large branch
@@ -456,7 +458,7 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
 
 ## 📋 Notes & caveats
 
-- **⚠️ Only the OpenCode reviewer is enforced read-only.** The others are asked not to modify
+- **⚠️ OpenCode and Grok are enforced read-only (others are asked).** The others are asked not to modify
   anything and normally don't — but a prompt is not a boundary, and the thing they are reading is
   exactly what would try to argue them out of one. They all predate the OpenCode work and are
   documented rather than quietly changed: tightening any of them affects that agent's reviews and
@@ -482,6 +484,7 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
     sandbox (`--sandbox` / `QWEN_SANDBOX`) if your machine has one configured. The relay sets
     `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` on the invocation purely to keep the yolo-no-sandbox banner off
     the captured review output — it changes nothing about what the reviewer may do.
+- **Grok is also enforced (tool-less + sandbox):** `grok --prompt-file … --deny '*' --sandbox read-only --permission-mode plan`. Headless Grok **ignores stdin**, so the full diff is always embedded in the prompt-file (the link-mode size threshold that strips inline diffs for other agents does **not** apply to Grok). `--deny '*'` removes tools so a malicious PR cannot drive host file reads via tools; the sandbox blocks writes and (on Linux) child network. Checkout-scoped `.grok` is avoided via an isolated cwd. **Residual:** global `~/.grok` config/plugins may still load — treat that as a trust boundary, not a sealed sandbox.
 - **OpenCode is the exception, and it is enforced:** `opencode --pure run` with a primary agent the
   relay defines itself and an inline default-deny policy. `--pure` matters — it stops external plugins,
   which execute at startup regardless of permissions.

@@ -4,14 +4,14 @@
 # Same idea as pr-review-relay --author <self>, but for branches that aren't
 # pushed / don't have a PR open yet. Diffs the current branch against a base
 # ref (default: main), sends that diff to the other agents (claude / codex /
-# cursor / antigravity / opencode / qwen) for review, and prints each review to the
-# screen. ("Read-only" is ENFORCED only for opencode — see the README caveats.) Nothing is pushed, nothing is posted anywhere — this is
+# cursor / antigravity / opencode / qwen / grok) for review, and prints each review to the
+# screen. ("Read-only" is ENFORCED for opencode and grok — see the README caveats.) Nothing is pushed, nothing is posted anywhere — this is
 # purely so you get a clean, reviewed branch before you open the PR.
 #
 # Usage:
-#   review-local [--author claude|codex|cursor|antigravity|opencode|qwen] [--base <ref>] \
+#   review-local [--author claude|codex|cursor|antigravity|opencode|qwen|grok] [--base <ref>] \
 #                [--reviewers claude,codex,cursor,antigravity] [--parallel]
-#                (opencode and qwen are also supported, opt-in: name them explicitly)
+#                (opencode, qwen, and grok are also supported, opt-in: name them explicitly)
 #   (run from inside the repo, on the branch you want reviewed)
 set -uo pipefail
 
@@ -55,6 +55,9 @@ unset _self _rl _n _link
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
 . "$OPENCODE_LIB"
+GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
+[ -r "$GROK_LIB" ] || { echo "missing $GROK_LIB (keep it next to this script)" >&2; exit 1; }
+. "$GROK_LIB"
 
 AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; REVIEWERS_EXPLICIT=0
 AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
@@ -101,7 +104,6 @@ echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHO
 # Prompt attachments (opencode receives the diff as a file) live here; mktemp -d is
 # mode 700, and the EXIT trap fires on SIGTERM too, so an interrupted review does not
 # leave the branch diff sitting in /tmp.
-# Only the opencode reviewer attaches anything; skip the allocation otherwise.
 # Reviewer failures are recorded as files so they survive the subshells that
 # --parallel creates; without this the script printed "✔ Local review done." after
 # every reviewer had timed out or returned nothing.
@@ -111,8 +113,9 @@ trap 'rm -rf "$FAILDIR"' EXIT
 # as ATTACH_DIR rather than leaving a second temp dir with a different standard.
 relay_assert_tmpdir_outside_repo "$FAILDIR"
 
+# opencode (diff attach) and grok (prompt-file + isolated cwd) need ATTACH_DIR.
 ATTACH_DIR=""
-if opencode_is_selected; then
+if opencode_is_selected || grok_is_selected; then
   ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
   trap 'rm -rf "$ATTACH_DIR" "$FAILDIR"' EXIT
   relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
@@ -126,20 +129,22 @@ read -r -d '' PROMPT <<'P' || true
 You are reviewing an in-progress local branch that has not yet been opened as a
 pull request. The diff is provided
 to you (on stdin or appended below; the opencode reviewer receives it as an
-attached file instead). Review it for correctness bugs, security
+attached file; the grok reviewer receives the full diff in a prompt-file).
+Review it for correctness bugs, security
 issues, broken edge cases, and clear design/maintainability problems. You may
 read files in the current repo for context, but DO NOT modify anything. Be
 concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
 good, say so in one line.
 P
 
-tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; qwen) echo qwen;; *) echo "";; esac; }
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; qwen) echo qwen;; grok) echo grok;; *) echo "";; esac; }
 
 # Agents that read stdin (claude / codex / cursor / qwen) get the diff piped in, so a
 # large diff never hits the process argv limit (Windows caps it at ~32K chars).
 # agy doesn't read a prompt from stdin, so it takes prompt+diff as an argument.
 # opencode takes the diff as an ATTACHED FILE (-f) instead, which keeps a large
 # diff off the argv entirely — same approach as pr-review-relay.
+# grok ignores stdin: full diff goes in a --prompt-file; runs from an isolated cwd.
 review_with() {
   local name="$1" out="" rc=0 errf
   errf="$(mktemp)"
@@ -151,6 +156,10 @@ review_with() {
     antigravity) out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "" \
+              "the in-progress local branch '$BRANCH_LABEL', diffed against '$BASE'" \
+              "$errf" "$AGENT_TIMEOUT"); rc=$?;;
+    grok)
+      out=$(grok_review "$ATTACH_DIR" "$DIFF" "" \
               "the in-progress local branch '$BRANCH_LABEL', diffed against '$BASE'" \
               "$errf" "$AGENT_TIMEOUT"); rc=$?;;
   esac
