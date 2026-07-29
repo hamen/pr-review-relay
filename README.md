@@ -75,6 +75,7 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run` with a read-only agent the relay defines
     (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
   - 🟡 [`qwen`](https://qwen.ai/qwencode) (Qwen Code CLI) — uses `qwen --safe-mode --approval-mode yolo -p`
+  - ⚡ [`grok`](https://grok.com) (Grok Build CLI) — uses `grok --prompt-file … -m grok-4.5 --reasoning-effort medium --permission-mode plan --sandbox read-only` from an isolated cwd (full diff always embedded; stdin is ignored)
     (`--safe-mode` ignores any hooks/extensions/skills/MCP/project config in the reviewed checkout — see
     [Notes & caveats](#-notes--caveats)). Auth is the CLI's own: sign in with the free Qwen OAuth tier, or
     point it at a paid Qwen Cloud / DashScope OpenAI-compatible endpoint via `~/.qwen/.env`
@@ -99,6 +100,7 @@ curl -fsSL "$REPO/pr-review-collapse-comments" -o "$BIN/pr-review-collapse-comme
 curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
 curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
 curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
+curl -fsSL "$REPO/lib-grok.sh" -o "$BIN/lib-grok.sh"
 chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-distill" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
 # lib-opencode.sh is sourced, not executed — it needs no +x
 # make sure ~/.local/bin is on your PATH
@@ -106,7 +108,7 @@ chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN
 
 `pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too. `review-local` doesn't need it (it never posts anywhere).
 
-`pr-review-relay` and `review-local` both source **`lib-opencode.sh`** from their own directory — it holds the OpenCode reviewer's binary resolution and read-only permission policy, kept in one place so the two scripts cannot drift apart on a security-relevant setting. Both refuse to start if it is missing.
+`pr-review-relay` and `review-local` both source **`lib-opencode.sh`** and **`lib-grok.sh`** from their own directory — shared OpenCode and Grok reviewer policies so the two scripts cannot drift on security-relevant settings. Both refuse to start if either lib is missing.
 
 ### 🪟 Windows
 
@@ -180,7 +182,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that opened the PR. It auto-excludes itself from reviewing. |
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` and `qwen` are supported but opt-in — name them explicitly to include them. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode`, `qwen`, and `grok` are supported but opt-in — name them explicitly to include them. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
 | `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
@@ -224,7 +226,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that wrote the branch. It auto-excludes itself from reviewing. |
 | `--base <ref>` | Ref to diff against. Default: `main`. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` and `qwen` are supported but opt-in — name them explicitly to include them. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode`, `qwen`, and `grok` are supported but opt-in — name them explicitly to include them. |
 | `--parallel` | Run the reviewers concurrently. |
 
 Reviewers that read stdin (`claude` / `codex` / `cursor` / `qwen`) get the diff piped in, so a large branch

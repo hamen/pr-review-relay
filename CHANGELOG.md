@@ -6,6 +6,17 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Added
+
+- **`grok` reviewer (Grok Build / `grok-4.5`).** Opt-in via `--reviewers …,grok` (same as
+  opencode/qwen). Shared policy in **`lib-grok.sh`** so `pr-review-relay` and `review-local`
+  cannot drift. Headless Grok ignores stdin, so the **complete** PR/branch diff always goes
+  into a `--prompt-file` (the link-mode size threshold that strips inline diffs for other
+  agents does **not** apply). Runs from an isolated temp cwd with `--permission-mode plan`,
+  `--sandbox read-only`, `--reasoning-effort medium`, `--no-memory`, `--no-subagents`, and
+  `--disable-web-search`. Checkout-scoped `.grok` config is not loaded; global `~/.grok` may
+  still load (documented). Icon ⚡. Prompt-file write failures are fail-closed.
+
 ### Fixed
 
 - **`pr-review-distill` applies the corpus cap while reading, not after.** Every page of every endpoint
