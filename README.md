@@ -21,7 +21,7 @@
 
 You build a feature with one agent (Claude Code, Codex, Cursor, or Antigravity), it opens a PR — and the
 **others** automatically review that PR, headless, and post their findings as PR comments. (Reviewers
-are *asked* to be read-only; only the OpenCode one has that enforced — see
+are *asked* to be read-only; OpenCode and Grok enforce read-only (Grok via --deny '*' + sandbox; OpenCode via its own agent policy) — see
 [Notes & caveats](#-notes--caveats).) Local, free (it uses the agent CLIs you already pay for), and idempotent.
 
 ```
@@ -458,7 +458,7 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
 
 ## 📋 Notes & caveats
 
-- **⚠️ Only the OpenCode reviewer is enforced read-only.** The others are asked not to modify
+- **⚠️ OpenCode and Grok are enforced read-only (others are asked).** The others are asked not to modify
   anything and normally don't — but a prompt is not a boundary, and the thing they are reading is
   exactly what would try to argue them out of one. They all predate the OpenCode work and are
   documented rather than quietly changed: tightening any of them affects that agent's reviews and
@@ -484,6 +484,7 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
     sandbox (`--sandbox` / `QWEN_SANDBOX`) if your machine has one configured. The relay sets
     `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` on the invocation purely to keep the yolo-no-sandbox banner off
     the captured review output — it changes nothing about what the reviewer may do.
+- **Grok is also enforced (tool-less + sandbox):** `grok --prompt-file … --deny '*' --sandbox read-only --permission-mode plan`. Headless Grok **ignores stdin**, so the full diff is always embedded in the prompt-file (the link-mode size threshold that strips inline diffs for other agents does **not** apply to Grok). `--deny '*'` removes tools so a malicious PR cannot drive host file reads via tools; the sandbox blocks writes and (on Linux) child network. Checkout-scoped `.grok` is avoided via an isolated cwd. **Residual:** global `~/.grok` config/plugins may still load — treat that as a trust boundary, not a sealed sandbox.
 - **OpenCode is the exception, and it is enforced:** `opencode --pure run` with a primary agent the
   relay defines itself and an inline default-deny policy. `--pure` matters — it stops external plugins,
   which execute at startup regardless of permissions.

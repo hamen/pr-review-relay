@@ -12,11 +12,14 @@
 # Grok headless does NOT read piped stdin — the plan/diff MUST go in --prompt-file.
 # Project discovery loads checkout-scoped .grok from cwd before tool permissions,
 # so we always run with --cwd pointed at an empty dir under $attach_dir (outside
-# any repo). Global ~/.grok config/plugins may still load; that is documented, not
-# claimed-away. --permission-mode plan overrides a machine always-approve config.
-# --sandbox read-only is the OS write barrier (needs a working sandbox on Linux —
-# typically bubblewrap + user namespaces); child network is blocked, so we never
-# tell Grok to run `gh` — the complete diff is always in the prompt-file.
+# any repo). Global ~/.grok config/plugins may still load; that is documented in the
+# README caveats, not claimed-away. --permission-mode plan overrides a machine
+# always-approve config. --deny '*' removes every tool so a malicious PR cannot
+# make Grok read secrets from the host filesystem (the built-in read-only sandbox
+# still allows reading everywhere). --sandbox read-only is the OS write barrier
+# (needs a working sandbox on Linux — typically bubblewrap + user namespaces);
+# child network is blocked, so we never tell Grok to run `gh` — the complete diff
+# is always in the prompt-file.
 #
 # Default model: grok-4.5. Default PR-review effort: medium (plan-review uses a
 # different name/effort in ship-feature). Override with GROK_REVIEW_MODEL /
@@ -43,6 +46,7 @@ grok_is_selected() {
 grok_review() {
   local attach_dir="$1" diff="$2" context_block="$3" subject="$4" errf="$5" agent_timeout="$6"
   local iso_cwd prompt_file body expected_bytes actual_bytes model effort rc=0
+  local grok_bin timeout_bin
 
   [ -n "$attach_dir" ] && [ -d "$attach_dir" ] || {
     echo "grok_review: attach_dir missing or not a directory" >&2
@@ -56,14 +60,28 @@ grok_review() {
   model="${GROK_REVIEW_MODEL:-grok-4.5}"
   effort="${GROK_REVIEW_EFFORT:-medium}"
 
+  # Resolve binaries BEFORE cd so a relative PATH entry cannot resolve differently
+  # (or vanish) inside iso_cwd — same class of guard as opencode_review.
+  grok_bin="$(command -v grok 2>/dev/null)" || {
+    echo "grok_review: grok not found on PATH" >&2
+    return 127
+  }
+  case "$grok_bin" in /*) ;; *) grok_bin="$(cd -- "$(dirname "$grok_bin")" && pwd)/$(basename "$grok_bin")";; esac
+  timeout_bin="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+
+  # Absolute errf before cd (relative TMPDIR would otherwise write into iso_cwd).
+  case "$errf" in /*) ;; *) errf="$(cd -- "$(dirname "$errf")" && pwd)/$(basename "$errf")";; esac
+
   # Isolated cwd under attach_dir so EXIT trap (which removes ATTACH_DIR) cleans it
   # even if we are interrupted mid-run. Outside any git checkout.
   iso_cwd="$(mktemp -d "$attach_dir/iso-grok.XXXXXX")" || {
     echo "grok_review: cannot create isolated cwd under $attach_dir" >&2
     return 1
   }
-  prompt_file="$attach_dir/grok-prompt-$$.txt"
-  # Absolute path: after we cd into iso_cwd the relative form would break.
+  prompt_file="$(mktemp "$attach_dir/grok-prompt.XXXXXX")" || {
+    echo "grok_review: cannot create prompt-file under $attach_dir" >&2
+    return 1
+  }
   case "$prompt_file" in /*) ;; *) prompt_file="$(cd -- "$(dirname "$prompt_file")" && pwd)/$(basename "$prompt_file")";; esac
   case "$iso_cwd" in /*) ;; *) iso_cwd="$(cd -- "$iso_cwd" && pwd)";; esac
 
@@ -87,26 +105,44 @@ grok_review() {
     return 1
   fi
 
-  # Pinned argv (see ship-feature plan 2026-07-29). No --no-leader (not a top-level flag).
-  # stderr → errf; stdout is the review text the caller posts/prints.
-  # cd into iso_cwd AND pass --cwd: process-level isolation (kimi3 pattern) so a
-  # stub/test can see the cwd, and Grok's own project discovery uses the empty dir.
+  # Pinned argv. No --no-leader (not a top-level flag).
+  # --deny '*' : no tools (blocks host filesystem reads via tools; sandbox alone allows reads).
+  # --verbatim : send the prompt-file literally (untrusted diff).
+  # cd into iso_cwd AND pass --cwd for process-level + project-discovery isolation.
   # </dev/null: avoid inheriting a piped stdin from the relay parent.
-  # prompt_file stays under attach_dir (absolute path), so it remains readable after cd.
   (
     cd "$iso_cwd" || exit 1
-    timeout "$agent_timeout" grok \
-      --prompt-file "$prompt_file" \
-      --cwd "$iso_cwd" \
-      -m "$model" \
-      --reasoning-effort "$effort" \
-      --permission-mode plan \
-      --sandbox read-only \
-      --no-memory \
-      --no-subagents \
-      --disable-web-search \
-      --max-turns 40 \
-      </dev/null 2>"$errf"
+    if [ -n "$timeout_bin" ]; then
+      "$timeout_bin" "$agent_timeout" "$grok_bin" \
+        --prompt-file "$prompt_file" \
+        --cwd "$iso_cwd" \
+        -m "$model" \
+        --reasoning-effort "$effort" \
+        --permission-mode plan \
+        --sandbox read-only \
+        --deny '*' \
+        --verbatim \
+        --no-memory \
+        --no-subagents \
+        --disable-web-search \
+        --max-turns 40 \
+        </dev/null 2>"$errf"
+    else
+      "$grok_bin" \
+        --prompt-file "$prompt_file" \
+        --cwd "$iso_cwd" \
+        -m "$model" \
+        --reasoning-effort "$effort" \
+        --permission-mode plan \
+        --sandbox read-only \
+        --deny '*' \
+        --verbatim \
+        --no-memory \
+        --no-subagents \
+        --disable-web-search \
+        --max-turns 40 \
+        </dev/null 2>"$errf"
+    fi
   )
   rc=$?
 

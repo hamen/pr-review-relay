@@ -948,8 +948,10 @@ if grep -q -- '--prompt-file' "$ARGV_LOG" && grep -q -- '-m grok-4.5' "$ARGV_LOG
    && grep -q -- '--reasoning-effort medium' "$ARGV_LOG" \
    && grep -q -- '--permission-mode plan' "$ARGV_LOG" \
    && grep -q -- '--sandbox read-only' "$ARGV_LOG" \
+   && grep -q -- "--deny *" "$ARGV_LOG" \
+   && grep -q -- '--verbatim' "$ARGV_LOG" \
    && grep -q -- '--cwd' "$ARGV_LOG"; then
-  echo "  ok   [-] grok argv pins model/medium/plan/sandbox/cwd/prompt-file"; PASS=$((PASS+1))
+  echo "  ok   [-] grok argv pins model/medium/plan/sandbox/deny/verbatim/cwd/prompt-file"; PASS=$((PASS+1))
 else echo "  FAIL grok argv missing required flags: $(cat "$ARGV_LOG" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
 if grep -qF -- '+change' "$PROMPT_FILE_LOG" && grep -qF -- '--- DIFF ---' "$PROMPT_FILE_LOG"; then
   echo "  ok   [-] grok prompt-file contains the full PR diff"; PASS=$((PASS+1))
@@ -983,9 +985,17 @@ out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
 rc=$?
 if [ "$rc" = 3 ]; then echo "  ok   [3] grok-as-author with only self → no reviewers"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 3] grok author self-exclusion out=$out"; FAIL=$((FAIL+1)); fi
-# missing binary when explicit
+# missing binary when explicit — pruned PATH so a real ~/.local/bin/grok cannot mask it
 rm -f "$BIN/grok"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
-out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+BIN2="$WORK/bin2"; mkdir -p "$BIN2"
+cp -a "$BIN/gh" "$BIN2/gh"
+# coreutils the relay needs
+for b in bash timeout gtimeout mktemp cat tr sed head tail wc rm mkdir chmod node; do
+  src=$(command -v "$b" 2>/dev/null) || continue
+  ln -sf "$src" "$BIN2/$b" 2>/dev/null || true
+done
+# wrap helper needs node + mjs next to relay - already via absolute RELAY path
+out=$( env PATH="$BIN2:/usr/bin:/bin" HOME="$WORK/home" \
   XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
   GH_SHA_COUNTER="$WORK/sha_counter" \
   bash "$RELAY" --pr 1 --author claude --reviewers grok 2>&1 )
