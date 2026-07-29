@@ -948,7 +948,7 @@ if grep -q -- '--prompt-file' "$ARGV_LOG" && grep -q -- '-m grok-4.5' "$ARGV_LOG
    && grep -q -- '--reasoning-effort medium' "$ARGV_LOG" \
    && grep -q -- '--permission-mode plan' "$ARGV_LOG" \
    && grep -q -- '--sandbox read-only' "$ARGV_LOG" \
-   && grep -q -- "--deny *" "$ARGV_LOG" \
+   && grep -qF -- "--deny *" "$ARGV_LOG" \
    && grep -q -- '--verbatim' "$ARGV_LOG" \
    && grep -q -- '--cwd' "$ARGV_LOG"; then
   echo "  ok   [-] grok argv pins model/medium/plan/sandbox/deny/verbatim/cwd/prompt-file"; PASS=$((PASS+1))
