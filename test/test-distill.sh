@@ -162,6 +162,16 @@ else
   bad "cursor model not pinned (rc=$rc)"; cat "$WORK/uargs" 2>/dev/null "$WORK/err" >&2
 fi
 
+# The override is the documented recovery path if Cursor retires the id, so distill asserts it
+# too — otherwise this call site could honour the default while ignoring the escape hatch.
+echo "test: CURSOR_REVIEW_MODEL overrides the pinned default"
+rc=$(CURSOR_REVIEW_MODEL=composer-2.5 CURSOR_ARGS_FILE="$WORK/uargs" "$DISTILL" --agent cursor >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q -- '--model composer-2.5' "$WORK/uargs" 2>/dev/null; then
+  ok "cursor model override honoured"
+else
+  bad "cursor model override ignored (rc=$rc)"; cat "$WORK/uargs" 2>/dev/null "$WORK/err" >&2
+fi
+
 echo "test: agent non-zero exit with output still fails → exit 1 (no truncated proposal)"
 rc=$(CLAUDE_RC=42 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
 if [ "$rc" = 1 ] && ! grep -q '========== proposed rules' "$WORK/out"; then

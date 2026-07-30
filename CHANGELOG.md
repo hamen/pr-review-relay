@@ -20,8 +20,9 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 ### Fixed
 
 - **The Cursor reviewer no longer runs on `Auto`.** All three `cursor-agent` call sites
-  (`pr-review-relay`, `review-local`, `pr-review-distill`) now pass
-  `--model "${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"`. Without it `cursor-agent` fell back to
+  (`pr-review-relay`, `review-local`, `pr-review-distill`) now pass `--model`, from a
+  `CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"` default set once per script.
+  Without it `cursor-agent` fell back to
   `~/.cursor/cli-config.json`, whose default is `Auto` — which (a) billed Cursor's small *Other
   Models* quota (Claude/GPT) while the much larger Cursor-branded pool went unused, and (b) could
   route the review to a **Claude** model, so a Claude-authored PR was reviewed by Claude under a
