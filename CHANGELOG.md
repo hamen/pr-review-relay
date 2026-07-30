@@ -30,9 +30,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   `~/.cursor/cli-config.json`, whose default is `Auto` — which (a) billed Cursor's small *Other
   Models* quota (Claude/GPT) while the much larger Cursor-branded pool went unused, and (b) could
   route the review to a **Claude** model, so a Claude-authored PR was reviewed by Claude under a
-  Cursor badge and the panel silently lost a reviewer's worth of independence. The default is
-  Cursor-pool and is neither Claude nor GPT nor Codex. Asserted on all three call sites plus the
-  override, so an unpinned path cannot come back unnoticed.
+  Cursor badge and the panel silently lost a reviewer's worth of independence. Asserted on all
+  three call sites plus the override, so an unpinned path cannot come back unnoticed.
 - **`test-fail-closed.sh` no longer fails on a developer's own `PR_RELAY_OPENCODE_MODEL`.** The
   "unset → no `-m`" assertion tests a default, but `oc_run` inherited the ambient environment, so
   anyone who exports that documented knob saw a red suite on an unmodified checkout. It is now
