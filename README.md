@@ -404,8 +404,11 @@ and that breaks two things at once:
 Codex, so it adds a genuinely distinct reader to the panel.
 
 Override with `CURSOR_REVIEW_MODEL` — `cursor-agent --list-models` shows what your account offers.
-An id your account does not have is safe to try: `cursor-agent` exits 1 with empty output, and the
-relay reports a failed reviewer (exit 3) rather than posting the error text as a review.
+An id your account does not have is safe to try: as of `cursor-agent 2026.07`, an unknown model makes
+it exit 1 and print the error on **stderr**, leaving stdout empty, so the relay reports a failed
+reviewer (exit 3) instead of a review. Note the guarantee rests on that stdout being empty — the relay
+does post non-empty stdout even on a non-zero exit, marking the round unclean, so a future CLI that
+printed the error on stdout would surface it as a (clearly broken-looking) review rather than silently.
 
 > One caveat if you opt into the `grok` reviewer *and* keep `cursor`: both are then Grok-family, which
 > thins diversity the same way Auto-picking-Claude does. The default panel

@@ -102,8 +102,9 @@ case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$
 #      Claude wearing a Cursor badge — the panel reads as N independent reviewers while two of
 #      them are the same model. Cross-review is only worth running on distinct models.
 # cursor-grok-4.5-high is Cursor-pool AND neither Claude nor GPT nor Codex, so it fixes both.
-# An unknown id is safe: cursor-agent exits 1 with empty stdout, which the fail-closed path
-# below reports as a failed reviewer rather than posting the error text as a review.
+# An unknown id is safe as of cursor-agent 2026.07: it exits 1 and puts the error on stderr,
+# leaving stdout empty, so the fail-closed path below reports a failed reviewer. That rests on
+# stdout being empty — a non-zero exit WITH output is still posted (marked unclean).
 # Same value in review-local and pr-review-distill; the tests assert all three.
 CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"
 

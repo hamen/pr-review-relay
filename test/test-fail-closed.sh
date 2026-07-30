@@ -1078,6 +1078,17 @@ rc=$?
 if [ "$rc" = 0 ]; then echo "  ok   [0] review-local dispatches cursor"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 0] review-local cursor: $out"; FAIL=$((FAIL+1)); fi
 cur_model_assert "review-local pins the cursor model too" "$CUR_ARGV"
+# ...and honours the override, like the relay and distill paths. A call site that respects the
+# default but ignores the escape hatch would leave the documented recovery path broken on one
+# of the three scripts, which no default-only assertion would ever notice.
+: > "$CUR_ARGV"
+out=$( cd "$RLREPO" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  CURSOR_REVIEW_MODEL=composer-2.5 ARGV_LOG="$CUR_ARGV" \
+  bash "$RL" --author claude --reviewers cursor --base HEAD~1 2>&1 )
+if grep -q -- '--model composer-2.5' "$CUR_ARGV" 2>/dev/null; then
+  echo "  ok   [-] review-local honours CURSOR_REVIEW_MODEL"; PASS=$((PASS+1))
+else echo "  FAIL review-local ignored CURSOR_REVIEW_MODEL — argv: $(cat "$CUR_ARGV" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
 
 # --- SCRIPT_DIR follows the script's own symlink to find the sibling lib ------------
 # Regression: invoked through a symlink whose directory has NO lib-opencode.sh next to it
