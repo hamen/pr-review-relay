@@ -61,6 +61,10 @@ GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 
 AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; REVIEWERS_EXPLICIT=0
 AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+# Pin the Cursor reviewer's model — see the long rationale in pr-review-relay. Short version:
+# cursor-agent's own default is "Auto", which bills the small "Other Models" pool AND may pick a
+# Claude model, so a Claude-authored branch gets reviewed by Claude in a Cursor badge.
+CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"
 # agy enforces its own --print-timeout (default 5m) on top of ours; unset, it wins whenever
 # AGENT_TIMEOUT is raised. Same handling as pr-review-relay: give agy our budget and keep a few
 # seconds of outer grace so its own diagnosis survives instead of a bare rc 124.
@@ -152,7 +156,7 @@ review_with() {
     claude)      out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>"$errf"); rc=$?;;
     codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>"$errf"); rc=$?;;
     qwen)        out=$(printf '%s' "$DIFF" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
-    cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
+    cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2>"$errf"); rc=$?;;
     antigravity) out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "" \

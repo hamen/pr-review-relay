@@ -288,7 +288,13 @@ oc_run() { # oc_run <expected_exit> <desc> [VAR=val ...] [-- <relay args...>]
     case "$1" in --) shift; relay_args=("$@"); break;; *) envs+=("$1"); shift;; esac
   done
   rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+  # Clear PR_RELAY_OPENCODE_MODEL first: the "unset → no -m" assertion below tests the
+  # DEFAULT, so a developer who exports the variable in their own shell (a normal thing to
+  # do — it is a documented knob) would otherwise fail the suite on an unmodified checkout.
+  # It stays overridable: `env X= X=val` applies left to right, so an explicit value in
+  # "${envs[@]}" still wins.
   env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    PR_RELAY_OPENCODE_MODEL= \
     OC_ARGV_FILE="$OC_ARGV" ${envs[@]+"${envs[@]}"} \
     bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode \
       ${relay_args[@]+"${relay_args[@]}"} >/dev/null 2>&1
@@ -1019,6 +1025,70 @@ rc=$?
 if [ "$rc" = 0 ] && grep -q -- '--reasoning-effort medium' "$ARGV_LOG" && grep -qF -- '--- DIFF ---' "$PROMPT_FILE_LOG"; then
   echo "  ok   [0] review-local dispatches grok with medium + full diff"; PASS=$((PASS+1))
 else echo "  FAIL review-local grok (rc=$rc) argv=$(cat "$ARGV_LOG" 2>/dev/null) pl=$(head -5 "$PROMPT_FILE_LOG" 2>/dev/null) out=$out"; FAIL=$((FAIL+1)); fi
+
+# --- cursor invocation contract ----------------------------------------------------
+# cursor-agent's own default model is "Auto", which routes to the frontier models: it bills
+# the small "Other Models" quota AND may pick a Claude model, so a Claude-authored PR gets
+# reviewed by Claude in a Cursor badge and the panel is one model short of what it claims.
+# The default must therefore be pinned on EVERY cursor call site. The default is asserted
+# with CURSOR_REVIEW_MODEL cleared, so an exported override in a dev/CI env cannot make
+# these pass by accident.
+cur_model_assert() { # <label> <argv-file>
+  if grep -q -- '--model cursor-grok-4.5-high' "$2" 2>/dev/null; then
+    echo "  ok   [-] $1"; PASS=$((PASS+1))
+  else
+    echo "  FAIL $1 — argv: $(grep '^cursor-agent ' "$2" 2>/dev/null || echo '<no cursor-agent invocation recorded>')"; FAIL=$((FAIL+1))
+  fi
+}
+CUR_ARGV="$WORK/cursor-argv.log"
+# link mode (the default) and diff mode are separate branches of the case, so both need cover.
+for cur_mode in link diff; do
+  : > "$CUR_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+    XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+    GH_SHA_COUNTER="$WORK/sha_counter" CURSOR_REVIEW_MODEL= ARGV_LOG="$CUR_ARGV" \
+    bash "$RELAY" --pr 1 --author claude --reviewers cursor "--$cur_mode" 2>&1 )
+  rc=$?
+  if [ "$rc" = 0 ]; then echo "  ok   [0] relay dispatches cursor in $cur_mode mode"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want 0] relay cursor $cur_mode mode: $out"; FAIL=$((FAIL+1)); fi
+  cur_model_assert "relay pins the cursor model in $cur_mode mode" "$CUR_ARGV"
+done
+# The override is the documented recovery path if Cursor ever retires the model id, so it is
+# part of the contract, not a convenience.
+: > "$CUR_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" CURSOR_REVIEW_MODEL=composer-2.5 ARGV_LOG="$CUR_ARGV" \
+  bash "$RELAY" --pr 1 --author claude --reviewers cursor 2>&1 )
+if grep -q -- '--model composer-2.5' "$CUR_ARGV" 2>/dev/null; then
+  echo "  ok   [-] CURSOR_REVIEW_MODEL overrides the pinned default"; PASS=$((PASS+1))
+else echo "  FAIL CURSOR_REVIEW_MODEL ignored — argv: $(cat "$CUR_ARGV" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
+# review-local has its own copy of the cursor invocation. Without this assertion the two
+# drift silently — the same failure mode the antigravity argv test above was written for.
+: > "$CUR_ARGV"
+RLREPO="$WORK/rlrepo"; rm -rf "$RLREPO"; mkdir -p "$RLREPO" "$WORK/tmp"
+( cd "$RLREPO" && git init -q && git config user.email t@t && git config user.name t \
+  && echo a > f && git add f && git commit -q -m i \
+  && echo b >> f && git add f && git commit -q -m c )
+out=$( cd "$RLREPO" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  CURSOR_REVIEW_MODEL= ARGV_LOG="$CUR_ARGV" \
+  bash "$RL" --author claude --reviewers cursor --base HEAD~1 2>&1 )
+rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   [0] review-local dispatches cursor"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] review-local cursor: $out"; FAIL=$((FAIL+1)); fi
+cur_model_assert "review-local pins the cursor model too" "$CUR_ARGV"
+# ...and honours the override, like the relay and distill paths. A call site that respects the
+# default but ignores the escape hatch would leave the documented recovery path broken on one
+# of the three scripts, which no default-only assertion would ever notice.
+: > "$CUR_ARGV"
+out=$( cd "$RLREPO" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  CURSOR_REVIEW_MODEL=composer-2.5 ARGV_LOG="$CUR_ARGV" \
+  bash "$RL" --author claude --reviewers cursor --base HEAD~1 2>&1 )
+if grep -q -- '--model composer-2.5' "$CUR_ARGV" 2>/dev/null; then
+  echo "  ok   [-] review-local honours CURSOR_REVIEW_MODEL"; PASS=$((PASS+1))
+else echo "  FAIL review-local ignored CURSOR_REVIEW_MODEL — argv: $(cat "$CUR_ARGV" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
 
 # --- SCRIPT_DIR follows the script's own symlink to find the sibling lib ------------
 # Regression: invoked through a symlink whose directory has NO lib-opencode.sh next to it

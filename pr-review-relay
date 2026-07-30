@@ -93,6 +93,21 @@ AUTHOR=""; PR=""; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; DRY=0
 # Validate here rather than letting `timeout` fail with a bare exit 125.
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
+# Pin the Cursor reviewer's model. Left unset, `cursor-agent` falls back to whatever
+# ~/.cursor/cli-config.json holds — typically "Auto", which routes to the frontier models.
+# That is wrong here for two reasons, and the second one is the serious one:
+#   1. Auto bills against Cursor's "Other Models" quota (Claude/GPT), a much smaller pool than
+#      the Cursor-branded one. A relay running on every PR drains it mid-cycle.
+#   2. Auto is free to pick a Claude model. A PR written by Claude would then be reviewed by
+#      Claude wearing a Cursor badge — the panel reads as N independent reviewers while two of
+#      them are the same model. Cross-review is only worth running on distinct models.
+# cursor-grok-4.5-high is Cursor-pool AND neither Claude nor GPT nor Codex, so it fixes both.
+# An unknown id is safe as of cursor-agent 2026.07: it exits 1 and puts the error on stderr,
+# leaving stdout empty, so the fail-closed path below reports a failed reviewer. That rests on
+# stdout being empty — a non-zero exit WITH output is still posted (marked unclean).
+# Same value in review-local and pr-review-distill; the tests assert all three.
+CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"
+
 # agy enforces its OWN wait (--print-timeout, default 5m) on top of ours. Left unset it wins whenever
 # AGENT_TIMEOUT is raised above 300, which is how three of four antigravity rounds died on 2026-07-27
 # with "timeout waiting for response" despite PR_RELAY_AGENT_TIMEOUT=900. We hand agy our budget and
@@ -385,9 +400,9 @@ review_with() {
     qwen)         out=$(printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)
       if [ "$MODE" = diff ]; then
-        out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf")
+        out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2>"$errf")
       else
-        out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf")
+        out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2>"$errf")
       fi; rc=$?;;
     antigravity)
       if [ "$MODE" = diff ]; then

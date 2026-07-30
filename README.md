@@ -29,7 +29,7 @@ are *asked* to be read-only; OpenCode and Grok enforce read-only (Grok via --den
                                          │
          ┌───────────────────────────────┼───────────────────────────────┐
          ▼                               ▼                               ▼
-   claude -p                       codex exec                      cursor-agent -p
+   claude -p                       codex exec                cursor-agent -p --model <cursor-pool>
    agy -p          opencode --pure run (own agent)     qwen --safe-mode --approval-mode yolo -p
          └───────────────────────────────┴───────────────────────────────┘
                                          │
@@ -70,7 +70,8 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
 - Any subset of these agent CLIs, logged in:
   - 🟣 [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code) — uses `claude -p`
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
-  - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`
+  - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`, pinned to
+    `cursor-grok-4.5-high` (see [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned))
   - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
   - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run` with a read-only agent the relay defines
     (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
@@ -197,6 +198,7 @@ Environment:
 |----------|---------|
 | `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. Also handed to `agy` as `--print-timeout`, because it enforces its own wait (default 5m) on top of ours — left unset, that inner limit wins whenever you raise this one, and the round dies with `timeout waiting for response` no matter how high you set it. The outer `timeout` gets a few seconds of grace so agy reaches its own limit first and gets to say so. Whether the other reviewers have internal waits of their own has not been checked. |
+| `CURSOR_REVIEW_MODEL` | Model for the `cursor` reviewer. Default: `cursor-grok-4.5-high`. Read by `pr-review-relay`, `review-local` **and** `pr-review-distill` — hence no `PR_RELAY_` prefix. Change it if Cursor retires the id, or to pick another Cursor-pool model (`cursor-agent --list-models` shows what your account has); an unknown id makes `cursor-agent` exit 1 with empty output, which the relay reports as a failed reviewer. See [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned). |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
 | `PR_RELAY_OPENCODE_ALLOW_IN_REPO` | Set to `1` to allow `PR_RELAY_OPENCODE_BIN` to point at a binary **inside the repository under review**. Refused by default: that file is written by whoever wrote the diff. |
 | `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. A value **containing a `/`** that resolves inside the repo is refused too, unless `PR_RELAY_OPENCODE_ALLOW_IN_REPO=1`. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` or `~/` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; the `~user/…` form is *not* supported, give a real path for that; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
@@ -364,7 +366,8 @@ comment cannot forge a section boundary using the prompt's own `---` / `## …` 
 feedback early, faking the existing-rules block, or emitting the empty-result sentinel). That closes the
 structural forgery only; prose that argues with the model is still prose it may believe. `--agent` only offers agents pinned to a read-only mode on the command line
 (never relying on ambient settings a checkout could carry): `claude` (default, `--permission-mode plan` —
-plan mode can't edit or run commands), `codex` (`-s read-only`), `cursor` (`--mode=ask`). Each runs from
+plan mode can't edit or run commands), `codex` (`-s read-only`), `cursor` (`--mode=ask`, on the same
+pinned `CURSOR_REVIEW_MODEL` as the reviewers). Each runs from
 an empty scratch directory so no checkout-local config or hooks load, and the prompt is fed via **stdin**
 (so a large review history can't blow the ~128 KiB argv limit). `antigravity` is not offered — its
 headless CLI would need `--dangerously-skip-permissions`.
@@ -381,6 +384,35 @@ skipped, or one PR's feedback cut short. A cap too small for even one comment is
 not an empty result. A non-zero agent exit fails the run (a truncated proposal is never emitted as
 complete), and a failed GitHub fetch — or a `jq` failure — is surfaced as an `INCOMPLETE CORPUS`
 warning. Raise the per-agent budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300s).
+
+## 🔵 Why the Cursor model is pinned
+
+Every `cursor-agent` call in this repo passes `--model "$CURSOR_REVIEW_MODEL"`
+(default `cursor-grok-4.5-high`). Left off, `cursor-agent` uses the model in your
+`~/.cursor/cli-config.json`, which out of the box is **Auto**. Auto routes to the frontier models,
+and that breaks two things at once:
+
+- **It drains the wrong quota.** Auto bills Cursor's *Other Models* pool (Claude, GPT), which is much
+  smaller than the Cursor-branded pool. A relay that runs on every PR empties it mid-cycle and the
+  cross-review starts failing for a billing reason that looks like a bug.
+- **It can collapse the panel to one model.** Auto may pick a Claude model. A PR written by Claude
+  then gets reviewed by Claude wearing a Cursor badge — the output still says "🔵 Cursor", so four
+  reviewers *look* independent while two of them are the same model agreeing with itself. The whole
+  value of a cross-review is that the reviewers fail differently from the author.
+
+`cursor-grok-4.5-high` fixes both: it is in the Cursor pool, and it is neither Claude nor GPT nor
+Codex, so it adds a genuinely distinct reader to the panel.
+
+Override with `CURSOR_REVIEW_MODEL` — `cursor-agent --list-models` shows what your account offers.
+An id your account does not have is safe to try: as of `cursor-agent 2026.07`, an unknown model makes
+it exit 1 and print the error on **stderr**, leaving stdout empty, so the relay reports a failed
+reviewer (exit 3) instead of a review. Note the guarantee rests on that stdout being empty — the relay
+does post non-empty stdout even on a non-zero exit, marking the round unclean, so a future CLI that
+printed the error on stdout would surface it as a (clearly broken-looking) review rather than silently.
+
+> One caveat if you opt into the `grok` reviewer *and* keep `cursor`: both are then Grok-family, which
+> thins diversity the same way Auto-picking-Claude does. The default panel
+> (`claude,codex,cursor,antigravity`) is unaffected.
 
 ## 🛡️ Loop safety (no runaway iteration)
 
@@ -472,8 +504,10 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
   - **Claude** — `claude -p` honours permission rules from `settings.json`, and the relay runs inside
     the checkout, so a PR-controlled `.claude/settings.json` can pre-authorise Bash or Write. No
     enforced deny-list is supplied on the command line.
-  - **Cursor** — `cursor-agent -p --trust --mode=ask` keeps it in Q&A mode, which is the closest to a
-    real constraint of the three, but it is still the agent's own mode rather than an enforced policy.
+  - **Cursor** — `cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL"` keeps it in Q&A
+    mode, which is the closest to a real constraint of the three, but it is still the agent's own mode
+    rather than an enforced policy. The model is pinned rather than left to Cursor's `Auto` — see
+    [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned).
   - **Qwen** — `qwen --safe-mode --approval-mode yolo -p`. `yolo` auto-approves shell/write with no
     sandbox, the same unconfined posture as Codex and Antigravity above. What it adds over them is
     `--safe-mode`: Qwen Code otherwise loads `.qwen/settings.json` / `QWEN.md` / hooks / extensions /

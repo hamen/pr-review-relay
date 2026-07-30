@@ -96,6 +96,11 @@ relay_assert_tmpdir_outside_repo_global
 AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
+# Pin the Cursor agent's model — see the long rationale in pr-review-relay. Short version:
+# cursor-agent's own default is "Auto", which bills the small "Other Models" pool instead of the
+# Cursor-branded one. Distillation is the same binary on the same account, so it shares the fix.
+CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"
+
 REPO=""; REPO_EXPLICIT=0; LIMIT=20; STATE="merged"; AGENT="claude"; RULES_FILE=""; OUT=""; PRINT_ONLY=0; DRY=0
 # A value-taking option with no argument must fail with a clean usage error (exit 2),
 # not crash on an unbound $2 under `set -u` (matches review-local's guard).
@@ -526,7 +531,7 @@ out=""; rc=0
 case "$AGENT" in
   claude)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan ) 2>/dev/null); rc=$?;;
   codex)       out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" codex exec -s read-only ) 2>/dev/null); rc=$?;;
-  cursor)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask ) 2>/dev/null); rc=$?;;
+  cursor)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" ) 2>/dev/null); rc=$?;;
 esac
 
 # Fail CLOSED on a non-zero exit even if there IS output: a timeout or crash can leave a
