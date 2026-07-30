@@ -21,14 +21,17 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 - **The Cursor reviewer no longer runs on `Auto`.** All three `cursor-agent` call sites
   (`pr-review-relay`, `review-local`, `pr-review-distill`) now pass `--model`, from a
-  `CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"` default set once per script.
+  `CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"` default set once per script.
+  The default is **Composer 2.5, Cursor's own model** — Cursor-branded pool, and not Claude, GPT,
+  Codex or Grok, so every reviewer stays on the model its own vendor built. (An earlier iteration
+  defaulted to `cursor-grok-4.5-high`; that put a second Grok-family reader in the panel for anyone
+  also running the opt-in `grok` reviewer — the same defect as Auto picking Claude, one row down.)
   Without it `cursor-agent` fell back to
   `~/.cursor/cli-config.json`, whose default is `Auto` — which (a) billed Cursor's small *Other
   Models* quota (Claude/GPT) while the much larger Cursor-branded pool went unused, and (b) could
   route the review to a **Claude** model, so a Claude-authored PR was reviewed by Claude under a
-  Cursor badge and the panel silently lost a reviewer's worth of independence. The default is
-  Cursor-pool and is neither Claude nor GPT nor Codex. Asserted on all three call sites plus the
-  override, so an unpinned path cannot come back unnoticed.
+  Cursor badge and the panel silently lost a reviewer's worth of independence. Asserted on all
+  three call sites plus the override, so an unpinned path cannot come back unnoticed.
 - **`test-fail-closed.sh` no longer fails on a developer's own `PR_RELAY_OPENCODE_MODEL`.** The
   "unset → no `-m`" assertion tests a default, but `oc_run` inherited the ambient environment, so
   anyone who exports that documented knob saw a red suite on an unmodified checkout. It is now
