@@ -1034,7 +1034,7 @@ else echo "  FAIL review-local grok (rc=$rc) argv=$(cat "$ARGV_LOG" 2>/dev/null)
 # with CURSOR_REVIEW_MODEL cleared, so an exported override in a dev/CI env cannot make
 # these pass by accident.
 cur_model_assert() { # <label> <argv-file>
-  if grep -q -- '--model cursor-grok-4.5-high' "$2" 2>/dev/null; then
+  if grep -q -- '--model composer-2.5' "$2" 2>/dev/null; then
     echo "  ok   [-] $1"; PASS=$((PASS+1))
   else
     echo "  FAIL $1 — argv: $(grep '^cursor-agent ' "$2" 2>/dev/null || echo '<no cursor-agent invocation recorded>')"; FAIL=$((FAIL+1))
@@ -1058,9 +1058,9 @@ done
 : > "$CUR_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
 out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
   XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
-  GH_SHA_COUNTER="$WORK/sha_counter" CURSOR_REVIEW_MODEL=composer-2.5 ARGV_LOG="$CUR_ARGV" \
+  GH_SHA_COUNTER="$WORK/sha_counter" CURSOR_REVIEW_MODEL=cursor-grok-4.5-high ARGV_LOG="$CUR_ARGV" \
   bash "$RELAY" --pr 1 --author claude --reviewers cursor 2>&1 )
-if grep -q -- '--model composer-2.5' "$CUR_ARGV" 2>/dev/null; then
+if grep -q -- '--model cursor-grok-4.5-high' "$CUR_ARGV" 2>/dev/null; then
   echo "  ok   [-] CURSOR_REVIEW_MODEL overrides the pinned default"; PASS=$((PASS+1))
 else echo "  FAIL CURSOR_REVIEW_MODEL ignored — argv: $(cat "$CUR_ARGV" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
 # review-local has its own copy of the cursor invocation. Without this assertion the two
@@ -1084,9 +1084,9 @@ cur_model_assert "review-local pins the cursor model too" "$CUR_ARGV"
 : > "$CUR_ARGV"
 out=$( cd "$RLREPO" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
   XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
-  CURSOR_REVIEW_MODEL=composer-2.5 ARGV_LOG="$CUR_ARGV" \
+  CURSOR_REVIEW_MODEL=cursor-grok-4.5-high ARGV_LOG="$CUR_ARGV" \
   bash "$RL" --author claude --reviewers cursor --base HEAD~1 2>&1 )
-if grep -q -- '--model composer-2.5' "$CUR_ARGV" 2>/dev/null; then
+if grep -q -- '--model cursor-grok-4.5-high' "$CUR_ARGV" 2>/dev/null; then
   echo "  ok   [-] review-local honours CURSOR_REVIEW_MODEL"; PASS=$((PASS+1))
 else echo "  FAIL review-local ignored CURSOR_REVIEW_MODEL — argv: $(cat "$CUR_ARGV" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
 

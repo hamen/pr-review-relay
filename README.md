@@ -71,7 +71,7 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   - 🟣 [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code) — uses `claude -p`
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`, pinned to
-    `cursor-grok-4.5-high` (see [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned))
+    `composer-2.5` (see [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned))
   - 🟠 [`agy`](https://antigravity.google/) (Antigravity CLI) — uses `agy -p` (run from shell, not inside the agy TUI)
   - ⚪ [`opencode`](https://opencode.ai) (OpenCode CLI) — uses `opencode --pure run` with a read-only agent the relay defines
     (found on `PATH` or at the stock install path `~/.opencode/bin/opencode`)
@@ -198,7 +198,7 @@ Environment:
 |----------|---------|
 | `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. Also handed to `agy` as `--print-timeout`, because it enforces its own wait (default 5m) on top of ours — left unset, that inner limit wins whenever you raise this one, and the round dies with `timeout waiting for response` no matter how high you set it. The outer `timeout` gets a few seconds of grace so agy reaches its own limit first and gets to say so. Whether the other reviewers have internal waits of their own has not been checked. |
-| `CURSOR_REVIEW_MODEL` | Model for the `cursor` reviewer. Default: `cursor-grok-4.5-high`. Read by `pr-review-relay`, `review-local` **and** `pr-review-distill` — hence no `PR_RELAY_` prefix. Change it if Cursor retires the id, or to pick another Cursor-pool model (`cursor-agent --list-models` shows what your account has); an unknown id makes `cursor-agent` exit 1 with empty output, which the relay reports as a failed reviewer. See [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned). |
+| `CURSOR_REVIEW_MODEL` | Model for the `cursor` reviewer. Default: `composer-2.5` (Cursor's own model). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill` — hence no `PR_RELAY_` prefix. Change it if Cursor retires the id, or to pick another Cursor-pool model (`cursor-agent --list-models` shows what your account has); an unknown id makes `cursor-agent` exit 1 with empty output, which the relay reports as a failed reviewer. See [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned). |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
 | `PR_RELAY_OPENCODE_ALLOW_IN_REPO` | Set to `1` to allow `PR_RELAY_OPENCODE_BIN` to point at a binary **inside the repository under review**. Refused by default: that file is written by whoever wrote the diff. |
 | `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. A value **containing a `/`** that resolves inside the repo is refused too, unless `PR_RELAY_OPENCODE_ALLOW_IN_REPO=1`. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` or `~/` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; the `~user/…` form is *not* supported, give a real path for that; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
@@ -388,7 +388,7 @@ warning. Raise the per-agent budget with `PR_DISTILL_AGENT_TIMEOUT` (default 300
 ## 🔵 Why the Cursor model is pinned
 
 Every `cursor-agent` call in this repo passes `--model "$CURSOR_REVIEW_MODEL"`
-(default `cursor-grok-4.5-high`). Left off, `cursor-agent` uses the model in your
+(default `composer-2.5`). Left off, `cursor-agent` uses the model in your
 `~/.cursor/cli-config.json`, which out of the box is **Auto**. Auto routes to the frontier models,
 and that breaks two things at once:
 
@@ -400,8 +400,14 @@ and that breaks two things at once:
   reviewers *look* independent while two of them are the same model agreeing with itself. The whole
   value of a cross-review is that the reviewers fail differently from the author.
 
-`cursor-grok-4.5-high` fixes both: it is in the Cursor pool, and it is neither Claude nor GPT nor
-Codex, so it adds a genuinely distinct reader to the panel.
+`composer-2.5` fixes both. It is Cursor's own model, so it draws on the Cursor-branded pool, and it
+is not Claude, GPT, Codex or Grok — every reviewer in the panel stays on the model its own vendor
+built, which is the cleanest way to keep them failing differently from each other.
+
+That last point is why the default is Composer rather than Cursor's Grok build. With
+`cursor-grok-4.5-high`, anyone who also opts into the `grok` reviewer ends up with two Grok-family
+readers in a panel that reports two independent ones — the same defect as Auto picking Claude, one
+row further down.
 
 Override with `CURSOR_REVIEW_MODEL` — `cursor-agent --list-models` shows what your account offers.
 An id your account does not have is safe to try: as of `cursor-agent 2026.07`, an unknown model makes
@@ -410,9 +416,9 @@ reviewer (exit 3) instead of a review. Note the guarantee rests on that stdout b
 does post non-empty stdout even on a non-zero exit, marking the round unclean, so a future CLI that
 printed the error on stdout would surface it as a (clearly broken-looking) review rather than silently.
 
-> One caveat if you opt into the `grok` reviewer *and* keep `cursor`: both are then Grok-family, which
-> thins diversity the same way Auto-picking-Claude does. The default panel
-> (`claude,codex,cursor,antigravity`) is unaffected.
+> Whatever you override to, keep it out of the other reviewers' families. Setting it to `auto`, to a
+> `claude-*` id, or to a `cursor-grok-*` id while you also run the opt-in `grok` reviewer all
+> collapse two nominally independent seats onto one model family.
 
 ## 🛡️ Loop safety (no runaway iteration)
 

@@ -99,7 +99,7 @@ case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: 
 # Pin the Cursor agent's model — see the long rationale in pr-review-relay. Short version:
 # cursor-agent's own default is "Auto", which bills the small "Other Models" pool instead of the
 # Cursor-branded one. Distillation is the same binary on the same account, so it shares the fix.
-CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"
+CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
 
 REPO=""; REPO_EXPLICIT=0; LIMIT=20; STATE="merged"; AGENT="claude"; RULES_FILE=""; OUT=""; PRINT_ONLY=0; DRY=0
 # A value-taking option with no argument must fail with a clean usage error (exit 2),

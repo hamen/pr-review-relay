@@ -156,7 +156,7 @@ fi
 # noticing. CURSOR_REVIEW_MODEL is cleared so an exported override cannot fake a pass.
 echo "test: cursor is pinned to a Cursor-pool model (not the Auto default)"
 rc=$(CURSOR_REVIEW_MODEL= CURSOR_ARGS_FILE="$WORK/uargs" "$DISTILL" --agent cursor >"$WORK/out" 2>"$WORK/err"; echo $?)
-if [ "$rc" = 0 ] && grep -q -- '--model cursor-grok-4.5-high' "$WORK/uargs" 2>/dev/null; then
+if [ "$rc" = 0 ] && grep -q -- '--model composer-2.5' "$WORK/uargs" 2>/dev/null; then
   ok "cursor model pinned"
 else
   bad "cursor model not pinned (rc=$rc)"; cat "$WORK/uargs" 2>/dev/null "$WORK/err" >&2
@@ -165,8 +165,8 @@ fi
 # The override is the documented recovery path if Cursor retires the id, so distill asserts it
 # too — otherwise this call site could honour the default while ignoring the escape hatch.
 echo "test: CURSOR_REVIEW_MODEL overrides the pinned default"
-rc=$(CURSOR_REVIEW_MODEL=composer-2.5 CURSOR_ARGS_FILE="$WORK/uargs" "$DISTILL" --agent cursor >"$WORK/out" 2>"$WORK/err"; echo $?)
-if [ "$rc" = 0 ] && grep -q -- '--model composer-2.5' "$WORK/uargs" 2>/dev/null; then
+rc=$(CURSOR_REVIEW_MODEL=cursor-grok-4.5-high CURSOR_ARGS_FILE="$WORK/uargs" "$DISTILL" --agent cursor >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q -- '--model cursor-grok-4.5-high' "$WORK/uargs" 2>/dev/null; then
   ok "cursor model override honoured"
 else
   bad "cursor model override ignored (rc=$rc)"; cat "$WORK/uargs" 2>/dev/null "$WORK/err" >&2

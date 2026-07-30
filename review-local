@@ -64,7 +64,7 @@ AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 # Pin the Cursor reviewer's model — see the long rationale in pr-review-relay. Short version:
 # cursor-agent's own default is "Auto", which bills the small "Other Models" pool AND may pick a
 # Claude model, so a Claude-authored branch gets reviewed by Claude in a Cursor badge.
-CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"
+CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
 # agy enforces its own --print-timeout (default 5m) on top of ours; unset, it wins whenever
 # AGENT_TIMEOUT is raised. Same handling as pr-review-relay: give agy our budget and keep a few
 # seconds of outer grace so its own diagnosis survives instead of a bare rc 124.

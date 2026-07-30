@@ -101,12 +101,16 @@ case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$
 #   2. Auto is free to pick a Claude model. A PR written by Claude would then be reviewed by
 #      Claude wearing a Cursor badge — the panel reads as N independent reviewers while two of
 #      them are the same model. Cross-review is only worth running on distinct models.
-# cursor-grok-4.5-high is Cursor-pool AND neither Claude nor GPT nor Codex, so it fixes both.
+# composer-2.5 is Cursor's own model: Cursor-pool, and not Claude, GPT, Codex or Grok — so each
+# reviewer in the panel stays on the model its own vendor built. That last part matters once the
+# opt-in `grok` reviewer is in the panel: a Cursor-branded Grok would put two Grok-family readers
+# in a panel that claims two independent ones, which is the same defect as Auto picking Claude,
+# just one row down.
 # An unknown id is safe as of cursor-agent 2026.07: it exits 1 and puts the error on stderr,
 # leaving stdout empty, so the fail-closed path below reports a failed reviewer. That rests on
 # stdout being empty — a non-zero exit WITH output is still posted (marked unclean).
 # Same value in review-local and pr-review-distill; the tests assert all three.
-CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"
+CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
 
 # agy enforces its OWN wait (--print-timeout, default 5m) on top of ours. Left unset it wins whenever
 # AGENT_TIMEOUT is raised above 300, which is how three of four antigravity rounds died on 2026-07-27
