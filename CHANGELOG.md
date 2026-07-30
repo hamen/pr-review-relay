@@ -19,6 +19,20 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Fixed
 
+- **The Cursor reviewer no longer runs on `Auto`.** All three `cursor-agent` call sites
+  (`pr-review-relay`, `review-local`, `pr-review-distill`) now pass
+  `--model "${CURSOR_REVIEW_MODEL:-cursor-grok-4.5-high}"`. Without it `cursor-agent` fell back to
+  `~/.cursor/cli-config.json`, whose default is `Auto` — which (a) billed Cursor's small *Other
+  Models* quota (Claude/GPT) while the much larger Cursor-branded pool went unused, and (b) could
+  route the review to a **Claude** model, so a Claude-authored PR was reviewed by Claude under a
+  Cursor badge and the panel silently lost a reviewer's worth of independence. The default is
+  Cursor-pool and is neither Claude nor GPT nor Codex. Asserted on all three call sites plus the
+  override, so an unpinned path cannot come back unnoticed.
+- **`test-fail-closed.sh` no longer fails on a developer's own `PR_RELAY_OPENCODE_MODEL`.** The
+  "unset → no `-m`" assertion tests a default, but `oc_run` inherited the ambient environment, so
+  anyone who exports that documented knob saw a red suite on an unmodified checkout. It is now
+  cleared inside `oc_run` and still overridable per-test.
+
 - **`pr-review-distill` applies the corpus cap while reading, not after.** Every page of every endpoint
   was captured into a shell variable and the cap was measured only once a whole PR had been appended, so
   one flooded PR peaked in memory before the cap could fire — while the README claimed the cap prevented
