@@ -1063,6 +1063,56 @@ out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
 if grep -q -- '--model cursor-grok-4.5-high' "$CUR_ARGV" 2>/dev/null; then
   echo "  ok   [-] CURSOR_REVIEW_MODEL overrides the pinned default"; PASS=$((PASS+1))
 else echo "  FAIL CURSOR_REVIEW_MODEL ignored — argv: $(cat "$CUR_ARGV" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
+# --- codex / antigravity model overrides -------------------------------------
+# Three reviewers flagged the same blocker on the first cut of this feature: on
+# Bash 3.2 (what macOS ships) `"${arr[@]}"` on an EMPTY array aborts under
+# `set -u`, and empty is the normal case here. Both the empty and the populated
+# path are asserted, plus the argv contract for each call site.
+CODEX_ARGV="$WORK/codex-argv.log"
+AGY_ARGV="$WORK/agy-argv.log"
+
+# The guard itself, run under a shell that emulates the 3.2 failure: `set -u`
+# plus the bare expansion is exactly what used to abort.
+if bash -c 'set -u; A=(); printf "%s" ${A[@]+"${A[@]}"}; exit 0' >/dev/null 2>&1; then
+  echo "  ok   [-] empty override array expands safely under set -u"; PASS=$((PASS+1))
+else
+  echo "  FAIL empty override array aborts under set -u"; FAIL=$((FAIL+1))
+fi
+
+# Unset overrides must add NO argv at all — not an empty string argument.
+: > "$CODEX_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" CODEX_REVIEW_MODEL= CODEX_REVIEW_EFFORT= ARGV_LOG="$CODEX_ARGV" \
+  bash "$RELAY" --pr 1 --author claude --reviewers codex 2>&1 )
+if grep -q -- '-m ' "$CODEX_ARGV" 2>/dev/null || grep -q -- 'model_reasoning_effort' "$CODEX_ARGV" 2>/dev/null; then
+  echo "  FAIL unset codex overrides still added argv: $(cat "$CODEX_ARGV")"; FAIL=$((FAIL+1))
+else
+  echo "  ok   [-] unset codex overrides add no argv"; PASS=$((PASS+1))
+fi
+
+: > "$CODEX_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" CODEX_REVIEW_MODEL=gpt-5.6-sol CODEX_REVIEW_EFFORT=high ARGV_LOG="$CODEX_ARGV" \
+  bash "$RELAY" --pr 1 --author claude --reviewers codex 2>&1 )
+if grep -q -- '-m gpt-5.6-sol' "$CODEX_ARGV" 2>/dev/null && grep -q 'model_reasoning_effort' "$CODEX_ARGV" 2>/dev/null; then
+  echo "  ok   [-] CODEX_REVIEW_MODEL/EFFORT reach codex argv"; PASS=$((PASS+1))
+else
+  echo "  FAIL codex overrides ignored — argv: $(cat "$CODEX_ARGV" 2>/dev/null)"; FAIL=$((FAIL+1))
+fi
+
+: > "$AGY_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" AGY_REVIEW_MODEL=gemini-3.1-pro-high ARGV_LOG="$AGY_ARGV" \
+  bash "$RELAY" --pr 1 --author claude --reviewers antigravity 2>&1 )
+if grep -q -- '--model gemini-3.1-pro-high' "$AGY_ARGV" 2>/dev/null; then
+  echo "  ok   [-] AGY_REVIEW_MODEL reaches agy argv"; PASS=$((PASS+1))
+else
+  echo "  FAIL AGY_REVIEW_MODEL ignored — argv: $(cat "$AGY_ARGV" 2>/dev/null)"; FAIL=$((FAIL+1))
+fi
+
 # review-local has its own copy of the cursor invocation. Without this assertion the two
 # drift silently — the same failure mode the antigravity argv test above was written for.
 : > "$CUR_ARGV"
