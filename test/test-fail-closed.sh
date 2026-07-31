@@ -1325,6 +1325,7 @@ cl_assert "CLAUDE_REVIEW_FALLBACK_MODEL reaches claude argv"   '--fallback-model
   bash "$RL" --author codex --reviewers claude --base HEAD~1 >/dev/null 2>&1 )
 cl_assert "review-local pins the claude model"              '--model opus'            has
 cl_assert "review-local sets the claude fallback"           '--fallback-model sonnet' has
+cl_assert "review-local adds no --effort when unset"        '--effort'                hasnot
 cl_assert "review-local does NOT add --permission-mode"     '--permission-mode'       hasnot
 cl_assert "review-local does NOT add --safe-mode"           '--safe-mode'             hasnot
 

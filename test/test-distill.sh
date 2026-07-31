@@ -201,7 +201,11 @@ fi
 # pointed out the omission itself was wrong, since this script's corpus is untrusted PR comments
 # from every participant, not the user's own history. Assert both, so neither half can be dropped.
 echo "test: distill keeps plan mode AND --safe-mode"
-if grep -q -- '--permission-mode plan' "$WORK/cargs" 2>/dev/null \
+# Re-run rather than reading the previous test's $WORK/cargs: cursor flagged that reusing it
+# couples the two, so a reorder (or an earlier failure before cargs is written) would report
+# this assertion as the failure instead of the real one.
+rc=$(CLAUDE_ARGS_FILE="$WORK/cargs" "$DISTILL" --agent claude >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q -- '--permission-mode plan' "$WORK/cargs" 2>/dev/null \
    && grep -q -- '--safe-mode' "$WORK/cargs" 2>/dev/null; then
   ok "distill runs claude with plan mode and --safe-mode"
 else

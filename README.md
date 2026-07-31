@@ -381,7 +381,8 @@ an empty scratch directory so no checkout-local config or hooks load, and the pr
 (so a large review history can't blow the ~128 KiB argv limit). `antigravity` is not offered — its
 headless CLI would need `--dangerously-skip-permissions`.
 
-This blocks **writes and command execution**, but it is **not full isolation**: a read-only agent can
+This blocks **writes and mutating commands**, but it is **not full isolation**: read-only commands
+still run (claude's plan mode refuses `touch` but runs `git` and `gh`), and a read-only agent can
 still read files it can reach and use whatever MCP tools / network your ambient config grants, so a
 crafted comment could in principle steer those. Same threat model as the rest of this toolkit (see
 [Notes & caveats](#-notes--caveats)) — run it on repos whose review history you don't consider actively

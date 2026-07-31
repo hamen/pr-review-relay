@@ -115,11 +115,12 @@ CODEX_MODEL_ARGS=()
 # agent sees UNTRUSTED PR comments from every participant. The empty scratch cwd keeps
 # checkout-local config out, but it does nothing about AMBIENT hooks, plugins and MCP servers,
 # which is exactly what an injected comment would reach for. Same posture as the relay.
-# (--permission-mode plan is on the call site below, not in this array; both are asserted.)
+# Both read-only flags live in this array, as they do in the relay — they were split across the
+# array and the call site, which reads as if one of them were optional. Both are asserted.
 CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
 CLAUDE_REVIEW_FALLBACK_MODEL="${CLAUDE_REVIEW_FALLBACK_MODEL:-sonnet}"
-CLAUDE_MODEL_ARGS=(--model "$CLAUDE_REVIEW_MODEL" --fallback-model "$CLAUDE_REVIEW_FALLBACK_MODEL" --safe-mode)
+CLAUDE_MODEL_ARGS=(--model "$CLAUDE_REVIEW_MODEL" --fallback-model "$CLAUDE_REVIEW_FALLBACK_MODEL" --permission-mode plan --safe-mode)
 [ -n "$CLAUDE_REVIEW_EFFORT" ] && CLAUDE_MODEL_ARGS+=(--effort "$CLAUDE_REVIEW_EFFORT")
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
@@ -559,7 +560,7 @@ out=""; rc=0
 # Each agent runs in the empty $AGENT_CWD (subshell `cd`) so no project config from the
 # checkout is loaded, with the prompt on stdin (avoids the ~128 KiB argv limit).
 case "$AGENT" in
-  claude)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} ) 2>/dev/null); rc=$?;;
+  claude)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} ) 2>/dev/null); rc=$?;;
   codex)       out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" codex exec -s read-only ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} ) 2>/dev/null); rc=$?;;
   cursor)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" ) 2>/dev/null); rc=$?;;
 esac
