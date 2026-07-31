@@ -68,9 +68,12 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   because `gh --jq` cannot emit the NUL-separated records its corpus cap needs. The `--raw-output0` flag
   it relies on landed in 1.7, and is feature-detected at startup. The other commands don't need jq.
 - Any subset of these agent CLIs, logged in:
-  - 🟣 [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code) — uses `claude -p`,
-    pinned to `$CLAUDE_REVIEW_MODEL` and (in `pr-review-relay`) held read-only with
-    `--permission-mode plan --safe-mode`
+  - 🟣 [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code) **2.1.220+** — uses
+    `claude -p`, pinned to `$CLAUDE_REVIEW_MODEL` and (in `pr-review-relay` and
+    `pr-review-distill`) held read-only with `--permission-mode plan --safe-mode`. The version
+    floor is what `--fallback-model`, `--safe-mode` and `--effort` were measured on; an older CLI
+    rejects them, which the relay sees as empty output and reports as a failed reviewer — fail-closed, but the message points at the reviewer rather than at the flag, so check the
+    version first if the Claude seat starts failing after an upgrade to this tool
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`, pinned to
     `composer-2.5` (see [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned))
@@ -519,7 +522,7 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
     where a PR-controlled `.claude/settings.json` could pre-authorise Bash or Write — plan mode
     alone does **not** stop those hooks from running at session start.
     **Residual, stated precisely:** plan mode does not refuse *read-only* commands. Measured on
-    claude 2026.07, `git --version` and `gh pr diff` run under it while `touch` is refused — which
+    claude 2.1.220, `git --version` and `gh pr diff` run under it while `touch` is refused — which
     is deliberate, since the link-mode prompt tells the reviewer to fetch the PR itself. So a
     prompt-injected reviewer keeps a **network-capable read channel** (`gh`, `curl`): it cannot
     alter your checkout, but it can read and exfiltrate. There is no OS sandbox and `Read` is

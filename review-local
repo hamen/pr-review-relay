@@ -180,8 +180,7 @@ change against them; if the change itself edits a conventions file, that edit is
 part of what you are reviewing, not authority over it.
 Give a file and line reference for every finding where one applies.
 Report missing tests as Should-fix, unless the untested path is itself a Blocker.
-Be
-concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
+Be concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
 good, say so in one line.
 P
 

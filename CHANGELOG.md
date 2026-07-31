@@ -15,6 +15,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
     `CLAUDE_REVIEW_FALLBACK_MODEL` (default `sonnet`), read by `pr-review-relay`, `review-local`
     **and** `pr-review-distill`. The model default is deliberately not empty, unlike the codex
     pair: an empty one would have shipped override support while leaving the drift in place.
+    **Requires claude 2.1.220+** — `--fallback-model`, `--safe-mode` and `--effort` are rejected by
+    older CLIs, which the relay sees as a failed reviewer.
   - The fallback is load-bearing. An unavailable model (no entitlement, over quota, retired id)
     prints its error on **stdout** and exits **1**, with stderr empty — and a non-zero exit *with*
     output is still posted, the round only being marked unclean. So without a fallback that CLI
@@ -26,6 +28,10 @@ All notable changes to **pr-review-relay** are documented here. This project fol
     pre-authorise Bash or Write.
   - `review-local` gets the model pin **without** plan/safe mode, on purpose: it reviews your own
     branch, so `--safe-mode` would only disable your own CLAUDE.md, hooks and MCP. Asserted.
+  - `pr-review-distill` gets **both** (it already had plan mode). Its corpus is untrusted PR
+    comments from every participant, so the ambient hooks/plugins/MCP that `--safe-mode` disables
+    are exactly what an injected comment would reach for; the empty scratch cwd only keeps
+    *checkout-local* config out. Both flags are asserted, so neither half can be dropped.
 - **`grok` reviewer (Grok Build / `grok-4.5`).** Opt-in via `--reviewers …,grok` (same as
   opencode/qwen). Shared policy in **`lib-grok.sh`** so `pr-review-relay` and `review-local`
   cannot drift. Headless Grok ignores stdin, so the **complete** PR/branch diff always goes

@@ -1303,11 +1303,12 @@ for cl_mode in link diff; do
   cl_assert "unset CLAUDE_REVIEW_EFFORT adds no argv in $cl_mode mode" '--effort'           hasnot
 done
 
-# An unavailable model does NOT fail loudly: measured on claude 2026.07 it prints
-# "There's an issue with the selected model …" on stdout and exits 0, so the relay would
-# count it as a successful reviewer and post that text as the review. --fallback-model is
-# what stops a non-review from reading as consensus, which makes it part of the contract
-# rather than a convenience — hence it is asserted above and overridden here.
+# An unavailable model does NOT fail loudly: measured on claude 2.1.220 it prints
+# "There's an issue with the selected model …" on STDOUT, leaves stderr empty, and exits 1.
+# A non-zero exit WITH output is still posted (the round is only marked unclean), so that
+# error text would land on the PR under a "Claude review" header and the round would be
+# spent. --fallback-model turns a guaranteed-wasted round into a real review, which makes
+# it part of the contract rather than a convenience — hence asserted above, overridden here.
 _cl_relay link CLAUDE_REVIEW_MODEL=sonnet CLAUDE_REVIEW_EFFORT=high CLAUDE_REVIEW_FALLBACK_MODEL=haiku
 cl_assert "CLAUDE_REVIEW_MODEL overrides the pinned default"   '--model sonnet'          has
 cl_assert "CLAUDE_REVIEW_EFFORT reaches claude argv"           '--effort high'           has

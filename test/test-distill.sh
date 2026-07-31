@@ -196,15 +196,16 @@ else
   bad "distill claude argv contract not met (rc=$rc)"; cat "$WORK/cargs" 2>/dev/null >&2
 fi
 
-# Distill gets plan mode but deliberately NOT --safe-mode: its input is your own merged PR
-# history, not a diff written by someone else, and --safe-mode would disable your own
-# CLAUDE.md/hooks/MCP for it. Relay and review-local both assert their side of this split;
-# without the third assertion a "make all three match" edit reintroduces it with no red test.
-echo "test: distill deliberately does NOT add --safe-mode"
-if ! grep -q -- '--safe-mode' "$WORK/cargs" 2>/dev/null; then
-  ok "distill keeps plan mode without --safe-mode"
+# Distill takes BOTH halves — plan mode and --safe-mode. Grok pointed out that the first cut
+# asserted only the flag it omitted, so a "drop plan mode" edit would have stayed green; codex
+# pointed out the omission itself was wrong, since this script's corpus is untrusted PR comments
+# from every participant, not the user's own history. Assert both, so neither half can be dropped.
+echo "test: distill keeps plan mode AND --safe-mode"
+if grep -q -- '--permission-mode plan' "$WORK/cargs" 2>/dev/null \
+   && grep -q -- '--safe-mode' "$WORK/cargs" 2>/dev/null; then
+  ok "distill runs claude with plan mode and --safe-mode"
 else
-  bad "distill added --safe-mode"; cat "$WORK/cargs" 2>/dev/null >&2
+  bad "distill claude read-only flags incomplete"; cat "$WORK/cargs" 2>/dev/null >&2
 fi
 
 echo "test: the claude overrides reach the distill call"

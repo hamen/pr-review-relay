@@ -109,12 +109,17 @@ CODEX_MODEL_ARGS=()
 # which model reviews is exactly the bug this repo keeps re-learning. Same hard default and same
 # load-bearing --fallback-model as the relay (an unavailable model prints its error on STDOUT,
 # stderr empty, and exits 1 — and output plus a non-zero exit is still taken for the agent's
-# answer, so without a fallback the run is spent on CLI error text). Plan mode is already on the call
-# site below; --safe-mode is not added here, where the input is your own merged PR history.
+# answer, so without a fallback the run is spent on CLI error text).
+# --safe-mode is here too, and the first cut of this change got the reason wrong: it claimed the
+# input was "your own merged PR history". It is not — this script's own SECURITY header says the
+# agent sees UNTRUSTED PR comments from every participant. The empty scratch cwd keeps
+# checkout-local config out, but it does nothing about AMBIENT hooks, plugins and MCP servers,
+# which is exactly what an injected comment would reach for. Same posture as the relay.
+# (--permission-mode plan is on the call site below, not in this array; both are asserted.)
 CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
 CLAUDE_REVIEW_FALLBACK_MODEL="${CLAUDE_REVIEW_FALLBACK_MODEL:-sonnet}"
-CLAUDE_MODEL_ARGS=(--model "$CLAUDE_REVIEW_MODEL" --fallback-model "$CLAUDE_REVIEW_FALLBACK_MODEL")
+CLAUDE_MODEL_ARGS=(--model "$CLAUDE_REVIEW_MODEL" --fallback-model "$CLAUDE_REVIEW_FALLBACK_MODEL" --safe-mode)
 [ -n "$CLAUDE_REVIEW_EFFORT" ] && CLAUDE_MODEL_ARGS+=(--effort "$CLAUDE_REVIEW_EFFORT")
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
@@ -539,7 +544,7 @@ PROMPT=$(printf '%s\n\n---\n\n%s\n\n---\n\n## Review feedback from recent PRs\n\
 #   codex   — `-s read-only` sandbox
 #   cursor  — `--mode=ask` (read-only)
 #   claude  — `--permission-mode plan`: plan mode refuses WRITES and mutating commands. It does
-#             NOT refuse read-only ones — measured on claude 2026.07, `git --version` and
+#             NOT refuse read-only ones — measured on claude 2.1.220, `git --version` and
 #             `gh pr diff` run under it while `touch` is refused. (`-p` alone is NOT read-only
 #             at all — it honours settings.json, which a PR-controlled `.claude/settings.json`
 #             could widen.)
