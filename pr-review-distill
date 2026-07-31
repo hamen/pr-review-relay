@@ -103,6 +103,16 @@ CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
 CODEX_MODEL_ARGS=()
 [ -n "$CODEX_REVIEW_MODEL" ] && CODEX_MODEL_ARGS+=(-m "$CODEX_REVIEW_MODEL")
 [ -n "$CODEX_REVIEW_EFFORT" ] && CODEX_MODEL_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REVIEW_EFFORT\"")
+# Claude's pin, carried here for the same anti-drift reason: three copies that disagree about
+# which model reviews is exactly the bug this repo keeps re-learning. Same hard default and same
+# load-bearing --fallback-model as the relay (an unavailable model prints its error on STDOUT and
+# exits 0, so without a fallback that text is taken for output). Plan mode is already on the call
+# site below; --safe-mode is not added here, where the input is your own merged PR history.
+CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
+CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
+CLAUDE_REVIEW_FALLBACK_MODEL="${CLAUDE_REVIEW_FALLBACK_MODEL:-sonnet}"
+CLAUDE_MODEL_ARGS=(--model "$CLAUDE_REVIEW_MODEL" --fallback-model "$CLAUDE_REVIEW_FALLBACK_MODEL")
+[ -n "$CLAUDE_REVIEW_EFFORT" ] && CLAUDE_MODEL_ARGS+=(--effort "$CLAUDE_REVIEW_EFFORT")
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
 # Pin the Cursor agent's model — see the long rationale in pr-review-relay. Short version:
@@ -525,11 +535,14 @@ PROMPT=$(printf '%s\n\n---\n\n%s\n\n---\n\n## Review feedback from recent PRs\n\
 # the command line — never relying on ambient settings a checkout could carry:
 #   codex   — `-s read-only` sandbox
 #   cursor  — `--mode=ask` (read-only)
-#   claude  — `--permission-mode plan`: plan mode cannot edit files or run commands. (`-p`
-#             alone is NOT read-only — it honours settings.json, which a PR-controlled
-#             `.claude/settings.json` could widen.)
-# This blocks WRITES and command execution; it does NOT sandbox reads or your ambient user
-# config (MCP/network) — see the SECURITY note in the header for the residual risk.
+#   claude  — `--permission-mode plan`: plan mode refuses WRITES and mutating commands. It does
+#             NOT refuse read-only ones — measured on claude 2026.07, `git --version` and
+#             `gh pr diff` run under it while `touch` is refused. (`-p` alone is NOT read-only
+#             at all — it honours settings.json, which a PR-controlled `.claude/settings.json`
+#             could widen.)
+# This blocks WRITES; it does NOT sandbox reads, read-only commands, or your ambient user
+# config (MCP/network) — so a prompt-injected agent keeps a network-capable READ channel.
+# See the SECURITY note in the header for the residual risk.
 # antigravity is not offered: its headless CLI needs `--dangerously-skip-permissions`.
 # The prompt goes in via STDIN, not as an argv string — a large review history can exceed
 # the ~128 KiB single-argument limit (E2BIG) if passed on the command line.
@@ -538,7 +551,7 @@ out=""; rc=0
 # Each agent runs in the empty $AGENT_CWD (subshell `cd`) so no project config from the
 # checkout is loaded, with the prompt on stdin (avoids the ~128 KiB argv limit).
 case "$AGENT" in
-  claude)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan ) 2>/dev/null); rc=$?;;
+  claude)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} ) 2>/dev/null); rc=$?;;
   codex)       out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" codex exec -s read-only ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} ) 2>/dev/null); rc=$?;;
   cursor)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" ) 2>/dev/null); rc=$?;;
 esac

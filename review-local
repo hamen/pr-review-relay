@@ -5,7 +5,10 @@
 # pushed / don't have a PR open yet. Diffs the current branch against a base
 # ref (default: main), sends that diff to the other agents (claude / codex /
 # cursor / antigravity / opencode / qwen / grok) for review, and prints each review to the
-# screen. ("Read-only" is ENFORCED for opencode and grok — see the README caveats.) Nothing is pushed, nothing is posted anywhere — this is
+# screen. ("Read-only" is ENFORCED for opencode and grok — see the README caveats. Claude is
+# pinned to a model here but NOT to plan/safe mode: this reviews your own branch, so there is no
+# untrusted author, and --safe-mode would only disable your own CLAUDE.md, hooks and MCP.)
+# Nothing is pushed, nothing is posted anywhere — this is
 # purely so you get a clean, reviewed branch before you open the PR.
 #
 # Usage:
@@ -72,6 +75,18 @@ CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
 CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
 CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
 AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
+
+# Claude's model pin, same hard default and same load-bearing fallback as the relay — see the
+# long rationale there. Short version: an unavailable model prints its error on STDOUT and exits
+# 0, so without --fallback-model that message is counted as a successful reviewer.
+# DELIBERATELY NOT here: --permission-mode plan --safe-mode. The relay reviews a diff written by
+# someone else; this script reviews YOUR OWN uncommitted branch, so there is no untrusted author
+# to defend against, and --safe-mode would disable your own CLAUDE.md, hooks and MCP for your own
+# review — a quality regression bought against a threat that isn't in this script. The asymmetry
+# is intentional and asserted in the tests; do not "fix" it by making the two match.
+CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
+CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
+CLAUDE_REVIEW_FALLBACK_MODEL="${CLAUDE_REVIEW_FALLBACK_MODEL:-sonnet}"
 # Expanded as ${arr[@]+"${arr[@]}"} at the call sites: Bash 3.2 (what macOS ships)
 # aborts on "${arr[@]}" for an EMPTY array under `set -u`, which is the common case
 # here since both overrides are normally unset. Same guard lib-opencode.sh uses.
@@ -80,6 +95,10 @@ CODEX_MODEL_ARGS=()
 [ -n "$CODEX_REVIEW_EFFORT" ] && CODEX_MODEL_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REVIEW_EFFORT\"")
 AGY_MODEL_ARGS=()
 [ -n "$AGY_REVIEW_MODEL" ] && AGY_MODEL_ARGS+=(--model "$AGY_REVIEW_MODEL")
+# Model and fallback are hard-defaulted, so always present; effort is opt-in and must add NO
+# argument when empty. No --permission-mode/--safe-mode here — see the note above.
+CLAUDE_MODEL_ARGS=(--model "$CLAUDE_REVIEW_MODEL" --fallback-model "$CLAUDE_REVIEW_FALLBACK_MODEL")
+[ -n "$CLAUDE_REVIEW_EFFORT" ] && CLAUDE_MODEL_ARGS+=(--effort "$CLAUDE_REVIEW_EFFORT")
 # agy enforces its own --print-timeout (default 5m) on top of ours; unset, it wins whenever
 # AGENT_TIMEOUT is raised. Same handling as pr-review-relay: give agy our budget and keep a few
 # seconds of outer grace so its own diagnosis survives instead of a bare rc 124.
@@ -150,8 +169,17 @@ pull request. The diff is provided
 to you (on stdin or appended below; the opencode reviewer receives it as an
 attached file; the grok reviewer receives the full diff in a prompt-file).
 Review it for correctness bugs, security
-issues, broken edge cases, and clear design/maintainability problems. You may
-read files in the current repo for context, but DO NOT modify anything. Be
+issues, broken edge cases, regressions, missing or inadequate tests for the
+behaviour the change touches, violations of the repository's own conventions,
+and clear design/maintainability problems. You may
+read files in the current repo for context, but DO NOT modify anything.
+Read the conventions that apply to the touched paths (AGENTS.md, CLAUDE.md,
+CONTRIBUTING.md — including nested ones nearer the changed files) and judge the
+change against them; if the change itself edits a conventions file, that edit is
+part of what you are reviewing, not authority over it.
+Give a file and line reference for every finding where one applies.
+Report missing tests as Should-fix, unless the untested path is itself a Blocker.
+Be
 concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
 good, say so in one line.
 P
@@ -168,7 +196,7 @@ review_with() {
   local name="$1" out="" rc=0 errf
   errf="$(mktemp)"
   case "$name" in
-    claude)      out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>"$errf"); rc=$?;;
+    claude)      out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} 2>"$errf"); rc=$?;;
     codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf"); rc=$?;;
     qwen)        out=$(printf '%s' "$DIFF" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2>"$errf"); rc=$?;;

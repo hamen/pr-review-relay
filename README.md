@@ -201,6 +201,8 @@ Environment:
 | `CURSOR_REVIEW_MODEL` | Model for the `cursor` reviewer. Default: `composer-2.5` (Cursor's own model). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill` — hence no `PR_RELAY_` prefix. Change it if Cursor retires the id, or to pick another Cursor-pool model (`cursor-agent --list-models` shows what your account has); an unknown id makes `cursor-agent` exit 1 with empty output, which the relay reports as a failed reviewer. See [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned). |
 | `CODEX_REVIEW_MODEL` / `CODEX_REVIEW_EFFORT` | Model and reasoning effort for the `codex` reviewer. **Both default to empty, which means "use whatever `~/.codex/config.toml` says"** — the previous, and still normal, behaviour. Set them to review one PR with a specific model without editing that config, which every other use of the `codex` CLI shares. `CODEX_REVIEW_EFFORT` becomes `-c model_reasoning_effort=…`; note that an invalid model id fails the reviewer (e.g. `gpt-5.6` is rejected on a ChatGPT account, where the id is `gpt-5.6-sol`). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill`. |
 | `AGY_REVIEW_MODEL` | Model for the `antigravity` reviewer, e.g. `gemini-3.1-pro-high` (`agy models` lists them). Empty = agy's own configured default. Read by `pr-review-relay` and `review-local`. |
+| `CLAUDE_REVIEW_MODEL` / `CLAUDE_REVIEW_EFFORT` | Model and effort for the `claude` reviewer. **The model defaults to `opus` — unlike the codex pair, this default is not empty.** Claude was the last seat taking its model from ambient config, so a `/model` switch silently changed what the panel reviewed with; an empty default would have left that in place for everyone. `opus` is a *family alias*: it pins the tier, not a frozen build. `CLAUDE_REVIEW_EFFORT` is opt-in (empty = the CLI's own default) and becomes `--effort …`; set it to `high` for a hard review, at proportional cost. Read by `pr-review-relay`, `review-local` **and** `pr-review-distill`. |
+| `CLAUDE_REVIEW_FALLBACK_MODEL` | Model `claude` falls back to when the pinned one is unavailable. Default: `sonnet`. **This is load-bearing, not a convenience.** Measured on claude 2026.07, an unavailable model (no entitlement, over quota, retired id) prints `There's an issue with the selected model …` on **stdout** and exits **0** — so without a fallback the relay counts that as a successful reviewer and posts the message as its review. A non-review that reads as consensus is worse than a failed seat. (Contrast `cursor-agent`, which exits 1 with empty output and is correctly reported as failed.) |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
 | `PR_RELAY_OPENCODE_ALLOW_IN_REPO` | Set to `1` to allow `PR_RELAY_OPENCODE_BIN` to point at a binary **inside the repository under review**. Refused by default: that file is written by whoever wrote the diff. |
 | `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. A value **containing a `/`** that resolves inside the repo is refused too, unless `PR_RELAY_OPENCODE_ALLOW_IN_REPO=1`. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` or `~/` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; the `~user/…` form is *not* supported, give a real path for that; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
@@ -368,7 +370,7 @@ comment cannot forge a section boundary using the prompt's own `---` / `## …` 
 feedback early, faking the existing-rules block, or emitting the empty-result sentinel). That closes the
 structural forgery only; prose that argues with the model is still prose it may believe. `--agent` only offers agents pinned to a read-only mode on the command line
 (never relying on ambient settings a checkout could carry): `claude` (default, `--permission-mode plan` —
-plan mode can't edit or run commands), `codex` (`-s read-only`), `cursor` (`--mode=ask`, on the same
+plan mode refuses writes and mutating commands, though **not** read-only ones), `codex` (`-s read-only`), `cursor` (`--mode=ask`, on the same
 pinned `CURSOR_REVIEW_MODEL` as the reviewers). Each runs from
 an empty scratch directory so no checkout-local config or hooks load, and the prompt is fed via **stdin**
 (so a large review history can't blow the ~128 KiB argv limit). `antigravity` is not offered — its
@@ -498,7 +500,7 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
 
 ## 📋 Notes & caveats
 
-- **⚠️ OpenCode and Grok are enforced read-only (others are asked).** The others are asked not to modify
+- **⚠️ OpenCode, Grok and Claude are enforced read-only (codex, antigravity and cursor are asked).** The rest are asked not to modify
   anything and normally don't — but a prompt is not a boundary, and the thing they are reading is
   exactly what would try to argue them out of one. They all predate the OpenCode work and are
   documented rather than quietly changed: tightening any of them affects that agent's reviews and
@@ -509,9 +511,23 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
   - **Antigravity** — `agy --dangerously-skip-permissions -p` auto-approves permissions. The prompt
     asks it not to modify anything, but a prompt is not a boundary, and the content it is reading is
     exactly what would try to talk it out of one.
-  - **Claude** — `claude -p` honours permission rules from `settings.json`, and the relay runs inside
-    the checkout, so a PR-controlled `.claude/settings.json` can pre-authorise Bash or Write. No
-    enforced deny-list is supplied on the command line.
+  - **Claude** — now enforced on the command line: `--permission-mode plan --safe-mode`. Plan mode
+    refuses writes and mutating commands; `--safe-mode` disables checkout-supplied customizations
+    (CLAUDE.md, skills, plugins, hooks, MCP, commands, agents), which is what closes the old hole
+    where a PR-controlled `.claude/settings.json` could pre-authorise Bash or Write — plan mode
+    alone does **not** stop those hooks from running at session start.
+    **Residual, stated precisely:** plan mode does not refuse *read-only* commands. Measured on
+    claude 2026.07, `git --version` and `gh pr diff` run under it while `touch` is refused — which
+    is deliberate, since the link-mode prompt tells the reviewer to fetch the PR itself. So a
+    prompt-injected reviewer keeps a **network-capable read channel** (`gh`, `curl`): it cannot
+    alter your checkout, but it can read and exfiltrate. There is no OS sandbox and `Read` is
+    unrestricted. Note also that plan mode still writes a plan file under `~/.claude/plans/`, so
+    "blocks writes" is true of the checkout, not of the whole filesystem.
+    `review-local` deliberately gets the model pin **without** plan/safe mode: it reviews your own
+    branch, so there is no untrusted author, and `--safe-mode` there would only disable your own
+    CLAUDE.md, hooks and MCP for your own review.
+  - **Qwen** — `qwen --safe-mode --approval-mode yolo -p` takes no model flag, so it is the one
+    remaining seat whose model is whatever its own config says. Pinning it belongs in its own PR.
   - **Cursor** — `cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL"` keeps it in Q&A
     mode, which is the closest to a real constraint of the three, but it is still the agent's own mode
     rather than an enforced policy. The model is pinned rather than left to Cursor's `Auto` — see

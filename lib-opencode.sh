@@ -476,7 +476,7 @@ opencode_review() {
   # the relay would count that as a clean reviewer. Fail instead.
   printf '%s' "$diff" > "$diff_file" || { echo "cannot write the diff attachment" >&2; return 1; }
 
-  oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is ATTACHED to this message as a file. That attachment, plus any\ncontext given above, is everything you have: there is no shell and no checkout, so\ncommands will be refused, nothing is on stdin, and nothing is appended below.\n\nLook for correctness bugs, security issues, broken edge cases, and clear design or\nmaintainability problems. Be concise. Group findings by severity: Blocker /\nShould-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
+  oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is ATTACHED to this message as a file. That attachment, plus any\ncontext given above, is everything you have: there is no shell and no checkout, so\ncommands will be refused, nothing is on stdin, and nothing is appended below.\n\nLook for correctness bugs, security issues, broken edge cases, regressions, missing or\ninadequate tests for the behaviour the change touches, and clear design or\nmaintainability problems. Give a file and line reference for every finding where one\napplies. Report missing tests as Should-fix, unless the untested path is itself a\nBlocker. Be concise. Group findings by severity:\nBlocker / Should-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
 
   # PATH is validated from the repository, but a RELATIVE entry means something
   # different once we cd — it could resolve to a wholly different `timeout`. Pin it

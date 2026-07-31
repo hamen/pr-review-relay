@@ -183,6 +183,29 @@ else
   bad "distill added codex argv with overrides unset (rc=$rc)"; cat "$WORK/cargs" 2>/dev/null >&2
 fi
 
+# Distillation is also the third CLAUDE call site. Its model pin is hard-defaulted (unlike
+# codex's opt-in one), so the assertion is that the default IS present — run with the
+# variables cleared, so an exported value in a dev/CI env cannot fake a pass.
+echo "test: the claude model pin and its fallback reach the distill call"
+rc=$(CLAUDE_REVIEW_MODEL= CLAUDE_REVIEW_EFFORT= CLAUDE_REVIEW_FALLBACK_MODEL= CLAUDE_ARGS_FILE="$WORK/cargs" "$DISTILL" --agent claude >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q -- '--model opus' "$WORK/cargs" 2>/dev/null \
+   && grep -q -- '--fallback-model sonnet' "$WORK/cargs" 2>/dev/null \
+   && ! grep -q -- '--effort' "$WORK/cargs" 2>/dev/null; then
+  ok "distill pins the claude model, sets the fallback, adds no effort when unset"
+else
+  bad "distill claude argv contract not met (rc=$rc)"; cat "$WORK/cargs" 2>/dev/null >&2
+fi
+
+echo "test: the claude overrides reach the distill call"
+rc=$(CLAUDE_REVIEW_MODEL=sonnet CLAUDE_REVIEW_EFFORT=high CLAUDE_REVIEW_FALLBACK_MODEL=haiku CLAUDE_ARGS_FILE="$WORK/cargs" "$DISTILL" --agent claude >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q -- '--model sonnet' "$WORK/cargs" 2>/dev/null \
+   && grep -q -- '--effort high' "$WORK/cargs" 2>/dev/null \
+   && grep -q -- '--fallback-model haiku' "$WORK/cargs" 2>/dev/null; then
+  ok "distill honours the claude overrides"
+else
+  bad "distill ignored the claude overrides (rc=$rc)"; cat "$WORK/cargs" 2>/dev/null >&2
+fi
+
 echo "test: CODEX_REVIEW_MODEL/EFFORT reach the distill codex call"
 rc=$(CODEX_REVIEW_MODEL=gpt-5.6-sol CODEX_REVIEW_EFFORT=high CODEX_ARGS_FILE="$WORK/cargs" "$DISTILL" --agent codex >"$WORK/out" 2>"$WORK/err"; echo $?)
 if [ "$rc" = 0 ] && grep -q -- '-m gpt-5.6-sol' "$WORK/cargs" 2>/dev/null && grep -q 'model_reasoning_effort' "$WORK/cargs" 2>/dev/null; then
