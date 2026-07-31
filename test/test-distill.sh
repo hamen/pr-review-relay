@@ -172,6 +172,25 @@ else
   bad "cursor model override ignored (rc=$rc)"; cat "$WORK/uargs" 2>/dev/null "$WORK/err" >&2
 fi
 
+# Distillation is the THIRD codex call site (relay and review-local are the other two).
+# Codex flagged that the first cut of these overrides tested only the relay, while this
+# repo has already been bitten by exactly this kind of drift between copies.
+echo "test: unset codex overrides add no argv here either"
+rc=$(CODEX_REVIEW_MODEL= CODEX_REVIEW_EFFORT= CODEX_ARGS_FILE="$WORK/cargs" "$DISTILL" --agent codex >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && ! grep -qE -- '(^| )-m ( |$)|model_reasoning_effort' "$WORK/cargs" 2>/dev/null; then
+  ok "distill adds no codex model argv when unset"
+else
+  bad "distill added codex argv with overrides unset (rc=$rc)"; cat "$WORK/cargs" 2>/dev/null >&2
+fi
+
+echo "test: CODEX_REVIEW_MODEL/EFFORT reach the distill codex call"
+rc=$(CODEX_REVIEW_MODEL=gpt-5.6-sol CODEX_REVIEW_EFFORT=high CODEX_ARGS_FILE="$WORK/cargs" "$DISTILL" --agent codex >"$WORK/out" 2>"$WORK/err"; echo $?)
+if [ "$rc" = 0 ] && grep -q -- '-m gpt-5.6-sol' "$WORK/cargs" 2>/dev/null && grep -q 'model_reasoning_effort' "$WORK/cargs" 2>/dev/null; then
+  ok "distill honours the codex overrides"
+else
+  bad "distill ignored the codex overrides (rc=$rc)"; cat "$WORK/cargs" 2>/dev/null >&2
+fi
+
 echo "test: agent non-zero exit with output still fails → exit 1 (no truncated proposal)"
 rc=$(CLAUDE_RC=42 "$DISTILL" >"$WORK/out" 2>"$WORK/err"; echo $?)
 if [ "$rc" = 1 ] && ! grep -q '========== proposed rules' "$WORK/out"; then

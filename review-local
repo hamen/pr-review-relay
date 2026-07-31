@@ -65,6 +65,21 @@ AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 # cursor-agent's own default is "Auto", which bills the small "Other Models" pool AND may pick a
 # Claude model, so a Claude-authored branch gets reviewed by Claude in a Cursor badge.
 CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
+
+# Same overrides as pr-review-relay: codex and antigravity otherwise take their
+# model from their own global config, so pinning one for a review meant editing
+# that config for every other use of the CLI. Unset = unchanged behaviour.
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
+CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
+AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
+# Expanded as ${arr[@]+"${arr[@]}"} at the call sites: Bash 3.2 (what macOS ships)
+# aborts on "${arr[@]}" for an EMPTY array under `set -u`, which is the common case
+# here since both overrides are normally unset. Same guard lib-opencode.sh uses.
+CODEX_MODEL_ARGS=()
+[ -n "$CODEX_REVIEW_MODEL" ] && CODEX_MODEL_ARGS+=(-m "$CODEX_REVIEW_MODEL")
+[ -n "$CODEX_REVIEW_EFFORT" ] && CODEX_MODEL_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REVIEW_EFFORT\"")
+AGY_MODEL_ARGS=()
+[ -n "$AGY_REVIEW_MODEL" ] && AGY_MODEL_ARGS+=(--model "$AGY_REVIEW_MODEL")
 # agy enforces its own --print-timeout (default 5m) on top of ours; unset, it wins whenever
 # AGENT_TIMEOUT is raised. Same handling as pr-review-relay: give agy our budget and keep a few
 # seconds of outer grace so its own diagnosis survives instead of a bare rc 124.
@@ -154,10 +169,10 @@ review_with() {
   errf="$(mktemp)"
   case "$name" in
     claude)      out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>"$errf"); rc=$?;;
-    codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only "$PROMPT" 2>"$errf"); rc=$?;;
+    codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf"); rc=$?;;
     qwen)        out=$(printf '%s' "$DIFF" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2>"$errf"); rc=$?;;
-    antigravity) out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
+    antigravity) out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf"); rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "" \
               "the in-progress local branch '$BRANCH_LABEL', diffed against '$BASE'" \

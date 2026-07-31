@@ -94,6 +94,15 @@ relay_assert_path_outside_repo
 relay_assert_tmpdir_outside_repo_global
 
 AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
+
+# Same codex override as pr-review-relay and review-local, so the three do not
+# drift. Expanded with ${arr[@]+…} because Bash 3.2 (macOS) aborts on an empty
+# array under `set -u`.
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
+CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
+CODEX_MODEL_ARGS=()
+[ -n "$CODEX_REVIEW_MODEL" ] && CODEX_MODEL_ARGS+=(-m "$CODEX_REVIEW_MODEL")
+[ -n "$CODEX_REVIEW_EFFORT" ] && CODEX_MODEL_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REVIEW_EFFORT\"")
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
 # Pin the Cursor agent's model — see the long rationale in pr-review-relay. Short version:
@@ -530,7 +539,7 @@ out=""; rc=0
 # checkout is loaded, with the prompt on stdin (avoids the ~128 KiB argv limit).
 case "$AGENT" in
   claude)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" claude -p --permission-mode plan ) 2>/dev/null); rc=$?;;
-  codex)       out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" codex exec -s read-only ) 2>/dev/null); rc=$?;;
+  codex)       out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" codex exec -s read-only ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} ) 2>/dev/null); rc=$?;;
   cursor)      out=$(printf '%s' "$PROMPT" | ( cd "$AGENT_CWD" && timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" ) 2>/dev/null); rc=$?;;
 esac
 

@@ -112,6 +112,28 @@ case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$
 # Same value in review-local and pr-review-distill; the tests assert all three.
 CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
 
+# Codex and antigravity took their model from their own global config, so the only
+# way to review a PR with a specific model was to edit that config — which changes
+# every other use of the CLI too. Both now accept an override, matching what cursor
+# and grok already had. Left unset, each keeps reading its own config exactly as
+# before.
+#   CODEX_REVIEW_MODEL=gpt-5.6  CODEX_REVIEW_EFFORT=high
+#   AGY_REVIEW_MODEL=gemini-3.1-pro-high
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
+CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
+AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
+
+# Built as arrays, not strings: an empty override must add NO argument at all,
+# whereas an unquoted empty string would be passed along as one.
+# Expanded as ${arr[@]+"${arr[@]}"} at the call sites: Bash 3.2 (what macOS ships)
+# aborts on "${arr[@]}" for an EMPTY array under `set -u`, which is the common case
+# here since both overrides are normally unset. Same guard lib-opencode.sh uses.
+CODEX_MODEL_ARGS=()
+[ -n "$CODEX_REVIEW_MODEL" ] && CODEX_MODEL_ARGS+=(-m "$CODEX_REVIEW_MODEL")
+[ -n "$CODEX_REVIEW_EFFORT" ] && CODEX_MODEL_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REVIEW_EFFORT\"")
+AGY_MODEL_ARGS=()
+[ -n "$AGY_REVIEW_MODEL" ] && AGY_MODEL_ARGS+=(--model "$AGY_REVIEW_MODEL")
+
 # agy enforces its OWN wait (--print-timeout, default 5m) on top of ours. Left unset it wins whenever
 # AGENT_TIMEOUT is raised above 300, which is how three of four antigravity rounds died on 2026-07-27
 # with "timeout waiting for response" despite PR_RELAY_AGENT_TIMEOUT=900. We hand agy our budget and
@@ -400,7 +422,7 @@ review_with() {
   [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
   case "$name" in
     claude)       out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>"$errf"); rc=$?;;
-    codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access "$PROMPT" 2>"$errf"); rc=$?;;
+    codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf"); rc=$?;;
     qwen)         out=$(printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)
       if [ "$MODE" = diff ]; then
@@ -410,9 +432,9 @@ review_with() {
       fi; rc=$?;;
     antigravity)
       if [ "$MODE" = diff ]; then
-        out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
+        out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
       else
-        out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$PROMPT" 2>"$errf")
+        out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$PROMPT" 2>"$errf")
       fi; rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
