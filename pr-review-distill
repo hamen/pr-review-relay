@@ -31,8 +31,10 @@
 # a section boundary with the prompt's own `---` / `## …` markers, which is the cheap attack.
 # It does not stop a model from being talked round by prose. Beyond that: each agent runs in its read-only /
 # sandboxed mode (codex `-s read-only`, cursor `--mode=ask`, claude `--permission-mode plan`)
-# from an empty scratch dir, so an injected instruction cannot WRITE files or RUN commands,
-# and no checkout-local config/hooks load. It does NOT sandbox reads or your AMBIENT user
+# from an empty scratch dir, so an injected instruction cannot WRITE files, and no checkout-local
+# config/hooks load. It CAN still run READ-ONLY commands — claude's plan mode refuses `touch` but
+# runs `git`/`gh` — so the read/exfiltration channel below is the honest boundary, not "no
+# commands". It does NOT sandbox reads or your AMBIENT user
 # config: a read-only agent can still read files it can reach and use any MCP tools / network
 # your global setup grants. Treat this like the rest of the toolkit — run it on repos whose
 # review history you don't consider actively hostile. antigravity is not offered at all (its
@@ -105,8 +107,9 @@ CODEX_MODEL_ARGS=()
 [ -n "$CODEX_REVIEW_EFFORT" ] && CODEX_MODEL_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REVIEW_EFFORT\"")
 # Claude's pin, carried here for the same anti-drift reason: three copies that disagree about
 # which model reviews is exactly the bug this repo keeps re-learning. Same hard default and same
-# load-bearing --fallback-model as the relay (an unavailable model prints its error on STDOUT and
-# exits 0, so without a fallback that text is taken for output). Plan mode is already on the call
+# load-bearing --fallback-model as the relay (an unavailable model prints its error on STDOUT,
+# stderr empty, and exits 1 — and output plus a non-zero exit is still taken for the agent's
+# answer, so without a fallback the run is spent on CLI error text). Plan mode is already on the call
 # site below; --safe-mode is not added here, where the input is your own merged PR history.
 CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"

@@ -68,7 +68,9 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
   because `gh --jq` cannot emit the NUL-separated records its corpus cap needs. The `--raw-output0` flag
   it relies on landed in 1.7, and is feature-detected at startup. The other commands don't need jq.
 - Any subset of these agent CLIs, logged in:
-  - 🟣 [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code) — uses `claude -p`
+  - 🟣 [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code) — uses `claude -p`,
+    pinned to `$CLAUDE_REVIEW_MODEL` and (in `pr-review-relay`) held read-only with
+    `--permission-mode plan --safe-mode`
   - 🟢 [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — uses `codex exec`
   - 🔵 [`cursor-agent`](https://docs.cursor.com/) (Cursor CLI) — uses `cursor-agent -p`, pinned to
     `composer-2.5` (see [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned))
@@ -202,7 +204,7 @@ Environment:
 | `CODEX_REVIEW_MODEL` / `CODEX_REVIEW_EFFORT` | Model and reasoning effort for the `codex` reviewer. **Both default to empty, which means "use whatever `~/.codex/config.toml` says"** — the previous, and still normal, behaviour. Set them to review one PR with a specific model without editing that config, which every other use of the `codex` CLI shares. `CODEX_REVIEW_EFFORT` becomes `-c model_reasoning_effort=…`; note that an invalid model id fails the reviewer (e.g. `gpt-5.6` is rejected on a ChatGPT account, where the id is `gpt-5.6-sol`). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill`. |
 | `AGY_REVIEW_MODEL` | Model for the `antigravity` reviewer, e.g. `gemini-3.1-pro-high` (`agy models` lists them). Empty = agy's own configured default. Read by `pr-review-relay` and `review-local`. |
 | `CLAUDE_REVIEW_MODEL` / `CLAUDE_REVIEW_EFFORT` | Model and effort for the `claude` reviewer. **The model defaults to `opus` — unlike the codex pair, this default is not empty.** Claude was the last seat taking its model from ambient config, so a `/model` switch silently changed what the panel reviewed with; an empty default would have left that in place for everyone. `opus` is a *family alias*: it pins the tier, not a frozen build. `CLAUDE_REVIEW_EFFORT` is opt-in (empty = the CLI's own default) and becomes `--effort …`; set it to `high` for a hard review, at proportional cost. Read by `pr-review-relay`, `review-local` **and** `pr-review-distill`. |
-| `CLAUDE_REVIEW_FALLBACK_MODEL` | Model `claude` falls back to when the pinned one is unavailable. Default: `sonnet`. **This is load-bearing, not a convenience.** Measured on claude 2026.07, an unavailable model (no entitlement, over quota, retired id) prints `There's an issue with the selected model …` on **stdout** and exits **0** — so without a fallback the relay counts that as a successful reviewer and posts the message as its review. A non-review that reads as consensus is worse than a failed seat. (Contrast `cursor-agent`, which exits 1 with empty output and is correctly reported as failed.) |
+| `CLAUDE_REVIEW_FALLBACK_MODEL` | Model `claude` falls back to when the pinned one is unavailable. Default: `sonnet`. **This is load-bearing, not a convenience.** Measured on claude 2.1.220, an unavailable model (no entitlement, over quota, retired id) prints `There's an issue with the selected model …` on **stdout** and exits **1**, leaving stderr empty. A non-zero exit *with* output is still POSTED — the relay only marks the round unclean — so without a fallback that error text lands on the PR wearing a `Claude review` header, and the round is burnt. The fallback turns a guaranteed-wasted round into a real review. (Contrast `cursor-agent`, whose unknown-id error goes to **stderr** with stdout empty, so it is correctly reported as a failed reviewer and nothing is posted.) **Residual:** if the fallback model fails the same way, the error text is still what gets posted. |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
 | `PR_RELAY_OPENCODE_ALLOW_IN_REPO` | Set to `1` to allow `PR_RELAY_OPENCODE_BIN` to point at a binary **inside the repository under review**. Refused by default: that file is written by whoever wrote the diff. |
 | `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. A value **containing a `/`** that resolves inside the repo is refused too, unless `PR_RELAY_OPENCODE_ALLOW_IN_REPO=1`. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` or `~/` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; the `~user/…` form is *not* supported, give a real path for that; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
@@ -526,13 +528,13 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
     `review-local` deliberately gets the model pin **without** plan/safe mode: it reviews your own
     branch, so there is no untrusted author, and `--safe-mode` there would only disable your own
     CLAUDE.md, hooks and MCP for your own review.
-  - **Qwen** — `qwen --safe-mode --approval-mode yolo -p` takes no model flag, so it is the one
-    remaining seat whose model is whatever its own config says. Pinning it belongs in its own PR.
   - **Cursor** — `cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL"` keeps it in Q&A
     mode, which is the closest to a real constraint of the three, but it is still the agent's own mode
     rather than an enforced policy. The model is pinned rather than left to Cursor's `Auto` — see
     [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned).
-  - **Qwen** — `qwen --safe-mode --approval-mode yolo -p`. `yolo` auto-approves shell/write with no
+  - **Qwen** — `qwen --safe-mode --approval-mode yolo -p`. It takes no model flag, so it is now the
+    one remaining seat whose model is whatever its own config says; pinning it belongs in its own PR.
+    `yolo` auto-approves shell/write with no
     sandbox, the same unconfined posture as Codex and Antigravity above. What it adds over them is
     `--safe-mode`: Qwen Code otherwise loads `.qwen/settings.json` / `QWEN.md` / hooks / extensions /
     skills / MCP servers from the checkout it runs in — the same PR-controlled injection surface the

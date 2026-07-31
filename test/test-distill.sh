@@ -196,6 +196,17 @@ else
   bad "distill claude argv contract not met (rc=$rc)"; cat "$WORK/cargs" 2>/dev/null >&2
 fi
 
+# Distill gets plan mode but deliberately NOT --safe-mode: its input is your own merged PR
+# history, not a diff written by someone else, and --safe-mode would disable your own
+# CLAUDE.md/hooks/MCP for it. Relay and review-local both assert their side of this split;
+# without the third assertion a "make all three match" edit reintroduces it with no red test.
+echo "test: distill deliberately does NOT add --safe-mode"
+if ! grep -q -- '--safe-mode' "$WORK/cargs" 2>/dev/null; then
+  ok "distill keeps plan mode without --safe-mode"
+else
+  bad "distill added --safe-mode"; cat "$WORK/cargs" 2>/dev/null >&2
+fi
+
 echo "test: the claude overrides reach the distill call"
 rc=$(CLAUDE_REVIEW_MODEL=sonnet CLAUDE_REVIEW_EFFORT=high CLAUDE_REVIEW_FALLBACK_MODEL=haiku CLAUDE_ARGS_FILE="$WORK/cargs" "$DISTILL" --agent claude >"$WORK/out" 2>"$WORK/err"; echo $?)
 if [ "$rc" = 0 ] && grep -q -- '--model sonnet' "$WORK/cargs" 2>/dev/null \

@@ -1364,6 +1364,18 @@ done
 pr_criteria "review-local prompt" "$CL_ARGV"
 pr_assert "review-local prompt asks for conventions" "$CL_ARGV" 'AGENTS.md, CLAUDE.md' has
 
+# The THIRD relay prompt is the local-context one, reached only when the stubbed gh reports this
+# checkout as the PR head. Codex flagged that --link and --diff alone leave it uncovered, which is
+# how a prompt variant gets edited in source and never exercised. Reuses the local-context repo
+# built above; unlike lc_run, ARGV_LOG is set so the argv-logging stub records the prompt.
+: > "$CL_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" \
+  GH_SHA_COUNTER="$WORK/sha_counter" GH_LOCAL_HEAD="$LHEAD" ARGV_LOG="$CL_ARGV" \
+  bash "$RELAY" --pr 1 --author codex --reviewers claude >/dev/null 2>&1 )
+pr_assert "the local-context prompt is the one under test" "$CL_ARGV" 'CHECKED OUT in the current directory' has
+pr_criteria "relay/local-context prompt" "$CL_ARGV"
+pr_assert "relay/local-context prompt asks for conventions" "$CL_ARGV" 'AGENTS.md, CLAUDE.md' has
+
 # opencode: prompt arrives as argv (`-- "$oc_prompt"`), but only the strict stub records it —
 # the generic agent stub is never reached, because the relay resolves the opencode binary
 # itself rather than taking it off PATH. grok: only via --prompt-file, stdin is ignored.

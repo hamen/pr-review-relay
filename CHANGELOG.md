@@ -16,35 +16,16 @@ All notable changes to **pr-review-relay** are documented here. This project fol
     **and** `pr-review-distill`. The model default is deliberately not empty, unlike the codex
     pair: an empty one would have shipped override support while leaving the drift in place.
   - The fallback is load-bearing. An unavailable model (no entitlement, over quota, retired id)
-    prints its error on **stdout** and exits **0**, so without one the relay counts that as a
-    successful reviewer and posts the message as its review — a non-review that reads as consensus.
+    prints its error on **stdout** and exits **1**, with stderr empty — and a non-zero exit *with*
+    output is still posted, the round only being marked unclean. So without a fallback that CLI
+    error text lands on the PR under a `Claude review` header and the round is burnt. Contrast
+    `cursor-agent`, whose error goes to stderr with stdout empty and is correctly reported failed.
   - `pr-review-relay` now also passes `--permission-mode plan --safe-mode`, making Claude the third
     enforced-read-only seat. Plan mode refuses writes; `--safe-mode` disables checkout-supplied
     customizations, closing the hole where a PR-controlled `.claude/settings.json` could
     pre-authorise Bash or Write.
   - `review-local` gets the model pin **without** plan/safe mode, on purpose: it reviews your own
     branch, so `--safe-mode` would only disable your own CLAUDE.md, hooks and MCP. Asserted.
-
-### Changed
-
-- **Reviewers are now asked about tests, regressions and repository conventions.** All six review
-  prompts (three `pr-review-relay` variants, `review-local`, `lib-opencode.sh`, `lib-grok.sh`) ask
-  for regressions and missing-or-inadequate tests, require a file and line reference where one
-  applies, and fix the severity of a missing test at Should-fix so the seats do not disagree and
-  lengthen the round. The four prompts whose seat can open a file also ask it to read the
-  conventions for the touched paths (AGENTS.md, CLAUDE.md, CONTRIBUTING.md, including nested ones)
-  and state that a change *to* a conventions file is under review, not authority over it.
-  `lib-opencode.sh` and `lib-grok.sh` are excluded from that part: both run tool-less from an
-  isolated cwd with no checkout, so it would only manufacture findings about a file they cannot see.
-
-### Fixed
-
-- **The documented claim that plan mode "cannot run commands" was wrong**, in `README.md` and
-  `pr-review-distill`. Measured on claude 2026.07: `git --version` and `gh pr diff` run under
-  `--permission-mode plan` while `touch` is refused. This matters because the link-mode prompt
-  tells the reviewer to fetch the PR itself — and because the honest residual is a
-  network-capable **read** channel, not "no commands". The README caveat now says so.
-
 - **`grok` reviewer (Grok Build / `grok-4.5`).** Opt-in via `--reviewers …,grok` (same as
   opencode/qwen). Shared policy in **`lib-grok.sh`** so `pr-review-relay` and `review-local`
   cannot drift. Headless Grok ignores stdin, so the **complete** PR/branch diff always goes
@@ -55,6 +36,12 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   still load (documented). Icon ⚡. Prompt-file write failures are fail-closed.
 
 ### Fixed
+
+- **The documented claim that plan mode "cannot run commands" was wrong**, in `README.md` and
+  `pr-review-distill`. Measured on claude 2.1.220: `git --version` and `gh pr diff` run under
+  `--permission-mode plan` while `touch` is refused. This matters because the link-mode prompt
+  tells the reviewer to fetch the PR itself — and because the honest residual is a
+  network-capable **read** channel, not "no commands". The README caveat now says so.
 
 - **The Cursor reviewer no longer runs on `Auto`.** All three `cursor-agent` call sites
   (`pr-review-relay`, `review-local`, `pr-review-distill`) now pass `--model`, from a
@@ -102,6 +89,18 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   agy hits its own limit first and its diagnosis survives instead of a bare exit 124. A test asserts the
   flag reaches agy, since a silently missing flag is invisible to any output-shape assertion. This
   alignment is **agy-only**: whether the other reviewers enforce internal waits has not been checked.
+
+### Changed
+
+- **Reviewers are now asked about tests, regressions and repository conventions.** All six review
+  prompts (three `pr-review-relay` variants, `review-local`, `lib-opencode.sh`, `lib-grok.sh`) ask
+  for regressions and missing-or-inadequate tests, require a file and line reference where one
+  applies, and fix the severity of a missing test at Should-fix so the seats do not disagree and
+  lengthen the round. The four prompts whose seat can open a file also ask it to read the
+  conventions for the touched paths (AGENTS.md, CLAUDE.md, CONTRIBUTING.md, including nested ones)
+  and state that a change *to* a conventions file is under review, not authority over it.
+  `lib-opencode.sh` and `lib-grok.sh` are excluded from that part: both run tool-less from an
+  isolated cwd with no checkout, so it would only manufacture findings about a file they cannot see.
 
 ### Security
 

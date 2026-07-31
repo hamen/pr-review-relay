@@ -135,13 +135,15 @@ AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
 # start failing; CURSOR_REVIEW_MODEL carries the same tradeoff, and the same "change it if the id
 # is retired" applies here.
 #
-# The fallback is LOAD-BEARING, not a courtesy. Measured on claude 2026.07: an unavailable model
+# The fallback is LOAD-BEARING, not a courtesy. Measured on claude 2.1.220: an unavailable model
 # (no entitlement, over quota, retired id) prints "There's an issue with the selected model …" on
-# STDOUT and exits 0. The relay's fail-closed path keys off exit status and empty stdout, so
-# without a fallback that message is counted as a successful reviewer and POSTED to the PR as its
-# review. That is worse than a failed seat: a non-review that reads as consensus. Cursor's unknown
-# id is safe (exit 1, empty stdout, note above); claude's is not, hence --fallback-model. This repo
-# is public — most installs are not on the account that chose `opus`.
+# STDOUT and exits 1, with stderr EMPTY. As the cursor note above spells out, a non-zero exit WITH
+# output is still posted (the round is only marked unclean) — so without a fallback that error text
+# lands on the PR under a "Claude review" header and the round is burnt. Cursor's unknown id is
+# safe because its error goes to stderr and stdout stays empty; claude's does the opposite.
+# The fallback turns a guaranteed-wasted round into a real review. This repo is public — most
+# installs are not on the account that chose `opus`.
+# RESIDUAL: if the fallback model fails the same way, the error text is still what gets posted.
 CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
 CLAUDE_REVIEW_FALLBACK_MODEL="${CLAUDE_REVIEW_FALLBACK_MODEL:-sonnet}"
@@ -481,7 +483,7 @@ review_with() {
   errf="$(mktemp)"
   [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
   case "$name" in
-    claude)       out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} 2>"$errf"); rc=$?;;
+    claude)       out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf"); rc=$?;;
     codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf"); rc=$?;;
     qwen)         out=$(printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)

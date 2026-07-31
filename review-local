@@ -77,8 +77,9 @@ CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
 AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
 
 # Claude's model pin, same hard default and same load-bearing fallback as the relay — see the
-# long rationale there. Short version: an unavailable model prints its error on STDOUT and exits
-# 0, so without --fallback-model that message is counted as a successful reviewer.
+# long rationale there. Short version: an unavailable model prints its error on STDOUT (stderr
+# stays empty) and exits 1, and a non-zero exit WITH output is still shown as that reviewer's
+# review, so without --fallback-model the round is spent on CLI error text.
 # DELIBERATELY NOT here: --permission-mode plan --safe-mode. The relay reviews a diff written by
 # someone else; this script reviews YOUR OWN uncommitted branch, so there is no untrusted author
 # to defend against, and --safe-mode would disable your own CLAUDE.md, hooks and MCP for your own
@@ -196,7 +197,7 @@ review_with() {
   local name="$1" out="" rc=0 errf
   errf="$(mktemp)"
   case "$name" in
-    claude)      out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} 2>"$errf"); rc=$?;;
+    claude)      out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf"); rc=$?;;
     codex)       out=$(printf '%s' "$DIFF" | timeout "$AGENT_TIMEOUT" codex exec -s read-only ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf"); rc=$?;;
     qwen)        out=$(printf '%s' "$DIFF" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
     cursor)      out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2>"$errf"); rc=$?;;
