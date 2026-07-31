@@ -1108,6 +1108,17 @@ fi
 : > "$AGY_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
 out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
   XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" AGY_REVIEW_MODEL= ARGV_LOG="$AGY_ARGV" \
+  bash "$RELAY" --pr 1 --author claude --reviewers antigravity 2>&1 )
+if grep -q -- '--model' "$AGY_ARGV" 2>/dev/null; then
+  echo "  FAIL unset AGY_REVIEW_MODEL still added --model: $(cat "$AGY_ARGV")"; FAIL=$((FAIL+1))
+else
+  echo "  ok   [-] unset AGY_REVIEW_MODEL adds no argv"; PASS=$((PASS+1))
+fi
+
+: > "$AGY_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
   GH_SHA_COUNTER="$WORK/sha_counter" AGY_REVIEW_MODEL=gemini-3.1-pro-high ARGV_LOG="$AGY_ARGV" \
   bash "$RELAY" --pr 1 --author claude --reviewers antigravity 2>&1 )
 if grep -q -- '--model gemini-3.1-pro-high' "$AGY_ARGV" 2>/dev/null; then
@@ -1146,6 +1157,17 @@ if grep -q -- '-m gpt-5.6-sol' "$CODEX_ARGV_RL" 2>/dev/null && grep -q 'model_re
   echo "  ok   [-] review-local honours the codex overrides"; PASS=$((PASS+1))
 else
   echo "  FAIL review-local ignored the codex overrides — argv: $(cat "$CODEX_ARGV_RL" 2>/dev/null)"; FAIL=$((FAIL+1))
+fi
+
+: > "$AGY_ARGV_RL"
+out=$( cd "$RLREPO2" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  AGY_REVIEW_MODEL= ARGV_LOG="$AGY_ARGV_RL" \
+  bash "$RL" --author claude --reviewers antigravity --base HEAD~1 2>&1 )
+if grep -q -- '--model' "$AGY_ARGV_RL" 2>/dev/null; then
+  echo "  FAIL review-local added --model with AGY_REVIEW_MODEL unset: $(cat "$AGY_ARGV_RL")"; FAIL=$((FAIL+1))
+else
+  echo "  ok   [-] review-local adds no agy argv when unset"; PASS=$((PASS+1))
 fi
 
 : > "$AGY_ARGV_RL"
