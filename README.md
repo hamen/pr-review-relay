@@ -40,6 +40,18 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 
 ## 🆕 What's new
 
+**v1.4.0** — **the `claude` seat is pinned, and the panel asks about tests.** It was the last
+reviewer taking both its model and its permissions from ambient config, so a `/model` switch silently
+changed what your panel reviewed with. It now runs on `CLAUDE_REVIEW_MODEL` (default `opus`, with a
+load-bearing `--fallback-model`) and, in `pr-review-relay` and `pr-review-distill`, is held read-only
+on the command line with `--permission-mode plan --safe-mode`. Alongside it: the `grok` reviewer, the
+cursor model pin, and opt-in model overrides for codex and antigravity — `qwen` and `opencode` still
+follow their own config. Every review prompt now asks about **regressions** and **missing tests**,
+with a file and line reference per finding; the seats that run in your checkout are also asked to
+read your repository's conventions (opencode and grok run tool-less from an isolated cwd, with no
+checkout to read, so they are asked only for the criteria).
+Requires **claude 2.1.220+**. See [Notes & caveats](#-notes--caveats).
+
 **v1.3.0** — **`pr-review-distill`: turn review feedback into written rules.** Code review comments are the
 rules you forgot to write down. The new sibling reads the review feedback from recent PRs, compares it to
 your `AGENTS.md` / `CLAUDE.md`, and asks an agent to **propose** the unwritten conventions worth adding —

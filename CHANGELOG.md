@@ -6,6 +6,10 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.4.0] — 2026-08-01
+
 ### Added
 
 - **The `claude` reviewer is pinned, on the command line.** It was the last seat taking BOTH its
@@ -337,5 +341,8 @@ First tagged release.
 - **`--context-file`**: prepend a doc / spec / API reference so every reviewer verifies the PR against it.
 - **Bounded loop**: a per-PR round cap keeps read→fix→re-run from spiraling; re-runs are idempotent.
 
+[1.4.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.4.0
+[1.3.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.3.0
+[1.2.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.2.0
 [1.1.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.1.0
 [1.0.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.0.0
