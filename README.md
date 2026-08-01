@@ -47,8 +47,9 @@ load-bearing `--fallback-model`) and, in `pr-review-relay` and `pr-review-distil
 on the command line with `--permission-mode plan --safe-mode`. Alongside it: the `grok` reviewer, the
 cursor model pin, and opt-in model overrides for codex and antigravity — `qwen` and `opencode` still
 follow their own config. Every review prompt now asks about **regressions** and **missing tests**,
-with a file and line reference per finding; the four seats that can open a file are also asked to
-read your repository's conventions (opencode and grok run tool-less, with no checkout to read).
+with a file and line reference per finding; the seats that run in your checkout are also asked to
+read your repository's conventions (opencode and grok run tool-less from an isolated cwd, with no
+checkout to read, so they are asked only for the criteria).
 Requires **claude 2.1.220+**. See [Notes & caveats](#-notes--caveats).
 
 **v1.3.0** — **`pr-review-distill`: turn review feedback into written rules.** Code review comments are the
