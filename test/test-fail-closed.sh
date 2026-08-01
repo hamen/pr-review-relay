@@ -1261,6 +1261,146 @@ for s in pr-review-consensus pr-review-collapse-comments; do
   else echo "  FAIL $s failed to resolve its symlink"; FAIL=$((FAIL+1)); fi
 done
 
+
+# --- claude invocation contract ----------------------------------------------
+# Earlier tests replace $BIN/claude with minimal stubs (one writes a file to prove plan
+# mode is not what stops it; the next restores a bare `echo LGTM`), and neither records
+# argv. Rebuild the full stub or every assertion below silently sees no invocation.
+make_agent claude
+# Claude was the last seat taking BOTH its model and its permissions from ambient config
+# (a bare `claude -p`), so a `/model` switch silently changed what the panel reviewed with
+# and nothing in the output said so. Unlike the codex/agy overrides, the model default here
+# is HARD — asserting the default IS the point of the change, so these run with
+# CLAUDE_REVIEW_MODEL cleared, and an exported value in a dev/CI env cannot fake a pass.
+CL_ARGV="$WORK/claude-argv.log"
+cl_argv_has() { grep -q -- "$1" "$CL_ARGV" 2>/dev/null; }
+cl_assert() { # <label> <flag> <want: has|hasnot>
+  if [ "$3" = has ]; then
+    if cl_argv_has "$2"; then echo "  ok   [-] $1"; PASS=$((PASS+1))
+    else echo "  FAIL $1 — argv: $(grep '^claude ' "$CL_ARGV" 2>/dev/null | head -1 || echo '<no claude invocation recorded>')"; FAIL=$((FAIL+1)); fi
+  else
+    if cl_argv_has "$2"; then echo "  FAIL $1 — argv: $(grep '^claude ' "$CL_ARGV" 2>/dev/null | head -1)"; FAIL=$((FAIL+1))
+    else echo "  ok   [-] $1"; PASS=$((PASS+1)); fi
+  fi
+}
+_cl_relay() { # <mode> [env assignments...]
+  local mode="$1"; shift
+  : > "$CL_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  env PATH="$BIN:$PATH" HOME="$WORK/home" \
+    XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+    GH_SHA_COUNTER="$WORK/sha_counter" ARGV_LOG="$CL_ARGV" "$@" \
+    bash "$RELAY" --pr 1 --author codex --reviewers claude "--$mode" >/dev/null 2>&1
+}
+
+# link and diff are separate branches of the case statement, so both need cover.
+for cl_mode in link diff; do
+  _cl_relay "$cl_mode" CLAUDE_REVIEW_MODEL= CLAUDE_REVIEW_EFFORT= CLAUDE_REVIEW_FALLBACK_MODEL=
+  cl_assert "relay pins the claude model in $cl_mode mode"        '--model opus'             has
+  cl_assert "relay sets the claude fallback in $cl_mode mode"     '--fallback-model sonnet'  has
+  cl_assert "relay holds claude in plan mode in $cl_mode mode"    '--permission-mode plan'   has
+  cl_assert "relay adds --safe-mode for claude in $cl_mode mode"  '--safe-mode'              has
+  # Effort is the one opt-in knob: unset it must add NO argument, not an empty string.
+  cl_assert "unset CLAUDE_REVIEW_EFFORT adds no argv in $cl_mode mode" '--effort'           hasnot
+done
+
+# An unavailable model does NOT fail loudly: measured on claude 2.1.220 it prints
+# "There's an issue with the selected model …" on STDOUT, leaves stderr empty, and exits 1.
+# A non-zero exit WITH output is still posted (the round is only marked unclean), so that
+# error text would land on the PR under a "Claude review" header and the round would be
+# spent. --fallback-model turns a guaranteed-wasted round into a real review, which makes
+# it part of the contract rather than a convenience — hence asserted above, overridden here.
+_cl_relay link CLAUDE_REVIEW_MODEL=sonnet CLAUDE_REVIEW_EFFORT=high CLAUDE_REVIEW_FALLBACK_MODEL=haiku
+cl_assert "CLAUDE_REVIEW_MODEL overrides the pinned default"   '--model sonnet'          has
+cl_assert "CLAUDE_REVIEW_EFFORT reaches claude argv"           '--effort high'           has
+cl_assert "CLAUDE_REVIEW_FALLBACK_MODEL reaches claude argv"   '--fallback-model haiku'  has
+
+# review-local deliberately does NOT get plan/safe mode: it reviews YOUR OWN branch, so
+# --safe-mode would only disable your own CLAUDE.md, hooks and MCP for your own review.
+# The asymmetry is the decision; assert it, or a later "make the two consistent" pass
+# will quietly undo it.
+: > "$CL_ARGV"
+( cd "$RLREPO2" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  CLAUDE_REVIEW_MODEL= CLAUDE_REVIEW_EFFORT= CLAUDE_REVIEW_FALLBACK_MODEL= ARGV_LOG="$CL_ARGV" \
+  bash "$RL" --author codex --reviewers claude --base HEAD~1 >/dev/null 2>&1 )
+cl_assert "review-local pins the claude model"              '--model opus'            has
+cl_assert "review-local sets the claude fallback"           '--fallback-model sonnet' has
+cl_assert "review-local adds no --effort when unset"        '--effort'                hasnot
+cl_assert "review-local does NOT add --permission-mode"     '--permission-mode'       hasnot
+cl_assert "review-local does NOT add --safe-mode"           '--safe-mode'             hasnot
+
+# --- review prompt contract --------------------------------------------------
+# The criteria live in six prompt strings across four files. They drift: this repo has
+# already shipped one copy of a reviewer invocation while fixing another. The split that
+# matters is whether the seat can OPEN A FILE — opencode and grok run tool-less from an
+# isolated cwd with no checkout, so telling them to read AGENTS.md would manufacture
+# findings about a file they cannot see.
+pr_assert() { # <label> <file> <needle> <want: has|hasnot>
+  if grep -qF -- "$3" "$2" 2>/dev/null; then
+    [ "$4" = has ] && { echo "  ok   [-] $1"; PASS=$((PASS+1)); return; }
+    echo "  FAIL $1 — '$3' present in $2"; FAIL=$((FAIL+1)); return
+  fi
+  [ "$4" = hasnot ] && { echo "  ok   [-] $1"; PASS=$((PASS+1)); return; }
+  echo "  FAIL $1 — '$3' missing from $2"; FAIL=$((FAIL+1))
+}
+# All six prompts carry the criteria.
+pr_criteria() { # <label> <file>
+  pr_assert "$1 asks about regressions"        "$2" 'regressions'                    has
+  pr_assert "$1 asks about missing tests"      "$2" 'inadequate tests'               has
+  pr_assert "$1 asks for file/line references" "$2" 'Give a file and line reference'  has
+  pr_assert "$1 pins the missing-test severity" "$2" 'Report missing tests as Should-fix' has
+  # The severity buckets are what ship-feature's loop-termination rule keys off, and
+  # "do not modify" is the only instruction standing between a reviewer and the tree.
+  pr_assert "$1 keeps the severity buckets"    "$2" 'Blocker / Should-fix / Nit'      has
+}
+for cl_mode in link diff; do
+  _cl_relay "$cl_mode"
+  pr_criteria "relay/$cl_mode prompt" "$CL_ARGV"
+  pr_assert "relay/$cl_mode prompt asks for conventions" "$CL_ARGV" 'AGENTS.md, CLAUDE.md' has
+  pr_assert "relay/$cl_mode prompt keeps do-not-modify"  "$CL_ARGV" 'modify anything'      has
+done
+: > "$CL_ARGV"
+( cd "$RLREPO2" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  ARGV_LOG="$CL_ARGV" bash "$RL" --author codex --reviewers claude --base HEAD~1 >/dev/null 2>&1 )
+pr_criteria "review-local prompt" "$CL_ARGV"
+pr_assert "review-local prompt asks for conventions" "$CL_ARGV" 'AGENTS.md, CLAUDE.md' has
+
+# The THIRD relay prompt is the local-context one, reached only when the stubbed gh reports this
+# checkout as the PR head. Codex flagged that --link and --diff alone leave it uncovered, which is
+# how a prompt variant gets edited in source and never exercised. Reuses the local-context repo
+# built above; unlike lc_run, ARGV_LOG is set so the argv-logging stub records the prompt.
+: > "$CL_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" \
+  GH_SHA_COUNTER="$WORK/sha_counter" GH_LOCAL_HEAD="$LHEAD" ARGV_LOG="$CL_ARGV" \
+  bash "$RELAY" --pr 1 --author codex --reviewers claude >/dev/null 2>&1 )
+pr_assert "the local-context prompt is the one under test" "$CL_ARGV" 'CHECKED OUT in the current directory' has
+pr_criteria "relay/local-context prompt" "$CL_ARGV"
+pr_assert "relay/local-context prompt asks for conventions" "$CL_ARGV" 'AGENTS.md, CLAUDE.md' has
+
+# opencode: prompt arrives as argv (`-- "$oc_prompt"`), but only the strict stub records it —
+# the generic agent stub is never reached, because the relay resolves the opencode binary
+# itself rather than taking it off PATH. grok: only via --prompt-file, stdin is ignored.
+OC_PROMPT_ARGV="$WORK/oc-prompt-argv.log"
+BIN_OCP="$WORK/bin-ocp"; make_strict_opencode "$BIN_OCP"
+rm -f "$OC_PROMPT_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_PROMPT_ARGV" \
+  PR_RELAY_OPENCODE_BIN="$BIN_OCP/opencode" \
+  bash "$RELAY" --pr 1 --author codex --reviewers opencode >/dev/null 2>&1
+pr_criteria "opencode prompt" "$OC_PROMPT_ARGV"
+pr_assert "opencode prompt does NOT ask for conventions" "$OC_PROMPT_ARGV" 'AGENTS.md' hasnot
+
+GK_PROMPT="$WORK/grok-prompt-contract.log"
+: > "$GK_PROMPT"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" HOME="$WORK/home" \
+  XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  GH_SHA_COUNTER="$WORK/sha_counter" PROMPT_FILE_LOG="$GK_PROMPT" \
+  bash "$RELAY" --pr 1 --author codex --reviewers grok >/dev/null 2>&1
+pr_criteria "grok prompt" "$GK_PROMPT"
+pr_assert "grok prompt does NOT ask for conventions" "$GK_PROMPT" 'AGENTS.md' hasnot
+
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

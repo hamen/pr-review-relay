@@ -128,7 +128,7 @@ grok_review() {
   # Build the full prompt. ALWAYS embed the complete diff — Grok cannot run gh
   # under --sandbox read-only, and headless ignores stdin. Do not reuse the
   # relay's size-thresholded $PROMPT (which may omit the diff and tell agents to fetch).
-  body="$(printf '%s\n\nYou are reviewing %s.\nThe COMPLETE change is in the fenced DIFF section below. Review that content only - do not require a git checkout, and do not run gh or other network commands. DO NOT modify anything. Be concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks good, say so in one line.\n\n--- DIFF ---\n```diff\n%s\n```\n--- END DIFF ---\n' \
+  body="$(printf '%s\n\nYou are reviewing %s.\nThe COMPLETE change is in the fenced DIFF section below. Review that content only - do not require a git checkout, and do not run gh or other network commands. DO NOT modify anything. Look for correctness bugs, security issues, broken edge cases, regressions, missing or inadequate tests for the behaviour the change touches, and clear design or maintainability problems. Give a file and line reference for every finding where one applies. Report missing tests as Should-fix, unless the untested path is itself a Blocker. Be concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks good, say so in one line.\n\n--- DIFF ---\n```diff\n%s\n```\n--- END DIFF ---\n' \
     "${context_block}" \
     "$subject" \
     "$diff")"
