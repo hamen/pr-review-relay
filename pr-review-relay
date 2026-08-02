@@ -460,7 +460,7 @@ relay_log "start pid=$$ pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ') round=
 
 if [ "$_state_legacy" = 1 ] && [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
   relay_log "verdict exit=4 round cap (legacy state $ROUND/$MAX_ROUNDS)"
-  echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS)." >&2
+  echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS reviewed revisions)." >&2
   echo "   STOP the review loop: do NOT run the relay again on this PR. Address any" >&2
   echo "   remaining items manually, or pass --reset to force another round." >&2
   exit 4
@@ -601,6 +601,11 @@ review_with() {
   # cannot fill the disk" guarantee false: agents are chatty on stderr (progress, retries, stack
   # traces) and nothing limited it. Only the last LOG_MAX_BYTES are kept, because the diagnosis is
   # at the END of a transcript, and the reader only ever sees `tail -n 15` of it anyway.
+  # Bounded LIVE through a process substitution, not trimmed afterwards: trimming after the fact
+  # still lets a noisy agent fill the disk WHILE it runs, which is exactly the guarantee being
+  # claimed. `head` sees EOF and exits when the agent closes stderr. Kept for the reviewers whose
+  # stderr goes through a library function instead (opencode/grok), where the redirect above cannot
+  # reach — there it is still a post-hoc trim, and says so.
   _cap_errf() { [ -s "$errf" ] || return 0
     [ "$(wc -c < "$errf" 2>/dev/null || echo 0)" -le "$LOG_MAX_BYTES" ] && return 0
     local _t; _t="$(mktemp)" || return 0
@@ -615,6 +620,12 @@ review_with() {
     echo fail > "$STATUS_DIR/$skey"; rm -f "$errf"; return 0
   fi
   printf '=== %s review — started %s ===\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$side"
+  # Measured, not assumed: the body is sized on its own below, and the header length varies with the
+  # reviewer's name and the timestamp.
+  local _hdr; _hdr="$(wc -c < "$side" 2>/dev/null || echo 0)"
+  # Read ONE BYTE past the cap. If that byte exists, the reviewer had more to say than we kept, and
+  # we know it from the size alone — see the truncation block below for why that matters.
+  local LOG_CAP_PROBE=$((LOG_MAX_BYTES + 1))
   # THE CAPTURE. The agent's stdout streams into the sidecar as it is produced, instead of being
   # buffered whole in `out=$(...)` — which is what made a mid-reviewer kill lose everything the
   # reviewer had already written. Three things are load-bearing and easy to get wrong:
@@ -629,47 +640,48 @@ review_with() {
   # This is strictly better than the old behaviour, which lost the lot.
   local -a SB=(); command -v stdbuf >/dev/null 2>&1 && SB=(stdbuf -oL)
   case "$name" in
-    claude)       printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf" | head -c "$LOG_MAX_BYTES" >> "$side"; rc=${PIPESTATUS[1]};;
-    codex)        printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2>"$errf" | head -c "$LOG_MAX_BYTES" >> "$side"; rc=${PIPESTATUS[1]};;
-    qwen)         printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf" | head -c "$LOG_MAX_BYTES" >> "$side"; rc=${PIPESTATUS[1]};;
+    claude)       printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    codex)        printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    qwen)         printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
     cursor)
       if [ "$MODE" = diff ]; then
-        printf '%s\n\n%s' "$PROMPT" "$DIFF" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2>"$errf" | head -c "$LOG_MAX_BYTES" >> "$side"
+        printf '%s\n\n%s' "$PROMPT" "$DIFF" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       else
-        printf '%s' "$PROMPT" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2>"$errf" | head -c "$LOG_MAX_BYTES" >> "$side"
+        printf '%s' "$PROMPT" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       fi; rc=${PIPESTATUS[1]};;
     antigravity)
       # No stdin producer here, so the agent is pipeline element 0, not 1.
       if [ "$MODE" = diff ]; then
-        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf" | head -c "$LOG_MAX_BYTES" >> "$side"
+        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       else
-        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$PROMPT" 2>"$errf" | head -c "$LOG_MAX_BYTES" >> "$side"
+        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       fi; rc=${PIPESTATUS[0]};;
     opencode)
       opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
-              "PR #$PR in $REPO ${PR_URL:+($PR_URL)}" "$errf" "$AGENT_TIMEOUT" | head -c "$LOG_MAX_BYTES" >> "$side"
+              "PR #$PR in $REPO ${PR_URL:+($PR_URL)}" "$errf" "$AGENT_TIMEOUT" | head -c "$LOG_CAP_PROBE" >> "$side"
       rc=${PIPESTATUS[0]};;
     grok)
       grok_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
-              "PR #$PR in $REPO ${PR_URL:+($PR_URL)}" "$errf" "$AGENT_TIMEOUT" | head -c "$LOG_MAX_BYTES" >> "$side"
+              "PR #$PR in $REPO ${PR_URL:+($PR_URL)}" "$errf" "$AGENT_TIMEOUT" | head -c "$LOG_CAP_PROBE" >> "$side"
       rc=${PIPESTATUS[0]};;
   esac
   _cap_errf
-  # When the bound fires, `head` closes the pipe and the agent dies of SIGPIPE (rc 141). Mark the
-  # body so the reader — and the posted comment — can see where it stops.
-  #
-  # The round is then NOT clean, and that is deliberate. An earlier version normalised this to rc 0
-  # on the reasoning that a merely long review should not fail a round; cross-review pointed out
-  # that this breaks the script's whole contract. A truncated review is an INCOMPLETE one: the
-  # findings that did not fit are indistinguishable from findings that do not exist, and exit 0
-  # means "every reviewer produced and posted a review", which would then be a lie. The relay is
-  # fail-closed everywhere else for exactly this reason. So the text is still posted (informative),
-  # the round reports 3, and you re-run with a bigger PR_RELAY_LOG_MAX_BYTES — the same treatment a
-  # reviewer that exits non-zero with output already gets, a few lines below.
-  TRUNCATED=0
-  if [ "$rc" = 141 ] && [ "$(wc -c < "$side" 2>/dev/null || echo 0)" -ge "$LOG_MAX_BYTES" ]; then
-    printf '\n[... truncated at %s bytes by PR_RELAY_LOG_MAX_BYTES — this review is INCOMPLETE, so the round is not clean; raise the limit and re-run ...]\n' "$LOG_MAX_BYTES" >> "$side"
+  # TRUNCATION IS DETECTED BY SIZE, NOT BY A SIGNAL. The first version keyed off the producer
+  # exiting 141 (SIGPIPE from `head` closing early). All three cross-reviewers rejected that, and
+  # they were right: SIGPIPE is not reliably reported as 141 on every runner (pr-review-distill
+  # already documents this), an agent can catch or ignore it, and one that writes past the cap and
+  # then exits 0 slips through — posting a capped, INCOMPLETE review on a round that reports clean.
+  # So we read one byte MORE than the cap: if the body came back longer than the cap, output was
+  # discarded, full stop. No exit code is consulted.
+  local _body; _body=$(( $(wc -c < "$side" 2>/dev/null || echo 0) - _hdr ))
+  [ "$_body" -lt 0 ] && _body=0
+  if [ "$_body" -gt "$LOG_MAX_BYTES" ]; then
     TRUNCATED=1
+    printf '\n[... truncated at %s bytes by PR_RELAY_LOG_MAX_BYTES — this review is INCOMPLETE, so the round is not clean; raise the limit and re-run ...]\n' "$LOG_MAX_BYTES" >> "$side"
+    # A cap hit usually also kills the producer with SIGPIPE. That is the bound working, not a
+    # reviewer fault, and the round is already failed by TRUNCATED below — so don't ALSO report a
+    # confusing "exited with code 141".
+    [ "$rc" = 141 ] && rc=0
   fi
   # Read the body back, dropping the header line we wrote above. This is the value the rest of the
   # function used to get straight out of the command substitution.
@@ -696,7 +708,9 @@ review_with() {
     rm -f "$errf"; return 0
   fi
   local unclean=0
-  if [ "$rc" -ne 0 ]; then
+  # TRUNCATED is checked alongside rc, not inside it: an agent that overflowed the cap and still
+  # exited 0 must fail the round too. Keying this off a non-zero exit was the hole.
+  if [ "$rc" -ne 0 ] || [ "$TRUNCATED" = 1 ]; then
     # Produced a review but the CLI exited non-zero: the review may be truncated,
     # so the round is NOT clean even though we still post what we got (informative).
     if [ "$TRUNCATED" = 1 ]; then

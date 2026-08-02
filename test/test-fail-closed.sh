@@ -1610,9 +1610,7 @@ _side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
 _sz=$(wc -c < "$_side" 2>/dev/null || echo 0)
 # A truncated review is an INCOMPLETE one, so the round must NOT be clean: the findings that did
 # not fit are indistinguishable from findings that do not exist, and exit 0 claims every reviewer
-# "produced and posted a review". An earlier version normalised the SIGPIPE to rc 0 to avoid failing
-# a round over a merely long review; cross-review pointed out that this breaks the fail-closed
-# contract the whole script rests on. The text is still posted, and the round reports 3.
+# "produced and posted a review". The text is still posted, and the round reports 3.
 [ "$_rc" = 3 ]; ok_if $? "an oversized (truncated) review makes the round NOT clean" "rc=$_rc"
 [ "$_sz" -le 6000 ]; ok_if $? "oversized review is bounded on disk by the write path" "size=$_sz"
 grep -q "truncated at 4096 bytes" "$_side" 2>/dev/null; ok_if $? "truncation is marked in the body" "-"
@@ -1673,6 +1671,7 @@ if ( set -m ) 2>/dev/null; then
       bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1 &
     _kid=$!
     _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
+    printf '%s' "$_pgid" > "$WORK/killed_pgid"
     # Wait, bounded, for the evidence we are about to assert on to exist — never a fixed sleep.
     # Wait for the sidecar's CONTENT, not merely its existence. The sidecar is created (header
     # first) before the agent is launched, so "the file is there" is true almost immediately and
@@ -1688,14 +1687,18 @@ if ( set -m ) 2>/dev/null; then
     while [ "$_w" -lt 100 ] && kill -0 "$_kid" 2>/dev/null; do sleep 0.1; _w=$((_w+1)); done
     wait "$_kid" 2>/dev/null
   )
+  _pgid=$(cat "$WORK/killed_pgid" 2>/dev/null)
   _log=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
   _side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
   [ -n "$_log" ] && grep -q " start pr=1 " "$_log" 2>/dev/null; ok_if $? "SIGKILL: the start line survived" "log=${_log:-<none>}"
   grep -q "state .* (written before dispatch)" "$_log" 2>/dev/null; ok_if $? "SIGKILL: the pre-dispatch state write survived" "-"
   [ -f "$SRF" ]; ok_if $? "SIGKILL: the round state file exists (the loop stays bounded)" "state=$(s_state)"
   [ -n "$_side" ] && grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "SIGKILL: the finished reviewer's output survived" "side=${_side:-<none>}"
-  # And no orphan is left behind to write after we asserted.
-  ! pgrep -f "SLEEP_KEYS" >/dev/null 2>&1; ok_if $? "SIGKILL: no orphaned agent left running" "-"
+  # And no orphan is left behind to write after we asserted. Scoped to the process GROUP we killed:
+  # `pgrep -f SLEEP_KEYS` scanned the whole machine and matched any unrelated process whose command
+  # line happened to contain that string — including the cross-review agents reading this very diff,
+  # which made the suite fail during review. A self-matching assertion is worse than none.
+  ! kill -0 -"$_pgid" 2>/dev/null; ok_if $? "SIGKILL: the whole process group is gone, no orphans" "pgid=$_pgid"
 else
   echo "  skip [-] SIGKILL test: no job control (set -m) available in this shell"
 fi
@@ -1714,6 +1717,63 @@ HERM="$WORK/hermetic"; rm -rf "$HERM"; mkdir -p "$HERM"
 _here=$(git -C "$HERM" log --oneline 2>/dev/null | grep -c "fixture-local")
 [ "$_here" = 1 ]; ok_if $? "a fixture's commit lands in the fixture repo" "found=$_here"
 unset _here
+
+# --- gaps round 2 asked for ---------------------------------------------------
+echo "round-2 coverage:"
+
+# Truncation must be caught by SIZE, with no SIGPIPE involved. This stub writes past the cap and
+# exits 0 of its own accord, which is exactly the case the old rc=141 check let through.
+BINQ="$WORK/binq"; mkdir -p "$BINQ"
+for t in gh codex; do ln -sf "$BIN/$t" "$BINQ/$t"; done
+ln -sf "$(command -v node)" "$BINQ/node" 2>/dev/null
+cat > "$BINQ/claude" <<'VB'
+#!/usr/bin/env bash
+# Write more than the cap, then exit 0 WITHOUT being killed: head has already taken what it wants.
+trap '' PIPE
+head -c 20000 /dev/zero | tr '\0' 'y' 2>/dev/null
+exit 0
+VB
+chmod +x "$BINQ/claude"
+s_reset
+_rc=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+[ "$_rc" = 3 ]; ok_if $? "overflow detected without SIGPIPE → round not clean" "rc=$_rc"
+grep -q "INCOMPLETE" "$_side" 2>/dev/null; ok_if $? "overflow without SIGPIPE is still marked" "-"
+
+# A cap exit must leave a verdict in the log, not just a return code.
+s_reset; s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=1 >/dev/null
+s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=1 >/dev/null
+_log=$(ls -t "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+grep -q "verdict exit=4 same-SHA cap" "$_log" 2>/dev/null; ok_if $? "an exit-4 cap hit logs its verdict" "$(tail -1 "$_log" 2>/dev/null)"
+
+# PR_RELAY_MAX_SAME_SHA=0: documented asymmetry — the same-SHA cap is only consulted once a SHA has
+# been seen before, so 0 still allows the first dispatch and blocks every retry.
+s_reset
+_r1=$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=0); _r2=$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=0)
+[ "$_r1" = 0 ] && [ "$_r2" = 4 ]; ok_if $? "MAX_SAME_SHA=0 allows the first dispatch, blocks retries" "r1=$_r1 r2=$_r2"
+
+# The GIT_CONFIG_* half of the hermeticity fix needs its own guard: deleting those exports would
+# otherwise leave the suite green here and hanging on a signing machine.
+[ "${GIT_CONFIG_COUNT:-0}" -ge 2 ]; ok_if $? "the git config override is exported" "count=${GIT_CONFIG_COUNT:-unset}"
+_sg=$( (cd "$WORK" && git config --get commit.gpgsign) 2>/dev/null )
+[ "$_sg" = "false" ]; ok_if $? "commit signing is forced off for every fixture git" "gpgsign=$_sg"
+
+# stderr is bounded on the write path too, not only stdout.
+cat > "$BINQ/claude" <<'VB'
+#!/usr/bin/env bash
+head -c 200000 /dev/zero | tr '\0' 'e' >&2 2>/dev/null
+echo "LGTM from claude."
+VB
+chmod +x "$BINQ/claude"
+s_reset
+env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+ok_if 0 "a reviewer with runaway stderr does not hang or crash the round" "-"
+
+unset _r1 _r2 _sg _log _side _rc
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
