@@ -601,12 +601,17 @@ review_with() {
   # cannot fill the disk" guarantee false: agents are chatty on stderr (progress, retries, stack
   # traces) and nothing limited it. Only the last LOG_MAX_BYTES are kept, because the diagnosis is
   # at the END of a transcript, and the reader only ever sees `tail -n 15` of it anyway.
-  # NOTE on the stderr bound at the call sites: it is `head -c N > "$errf"; cat >/dev/null`, and the
-  # drain is not decoration. Without it, `head` exits at the cap and the agent's NEXT write to
-  # stderr takes SIGPIPE — killing a perfectly healthy, merely chatty reviewer (progress bars,
-  # retries) that was producing a good review on stdout. Measured: rc 141 and the agent never
-  # reaches its final line. Stdout deliberately closes early, because there the excess IS the
-  # problem; stderr only needs to stop growing on disk, so we keep reading and throw it away.
+  # NOTE on the stderr bound at the call sites: it is `tail -c N > "$errf"`, and both halves of that
+  # matter.
+  #   * `tail`, not `head`: only the LAST N bytes are kept, because the diagnosis is at the end of a
+  #     transcript — and `tail -n 15` of it is all that is ever shown. Bounding with `head` kept the
+  #     opening banner and threw away the actual error, which is the one thing worth keeping.
+  #   * `tail` reads to EOF, so it never closes the pipe early. `head` does, and the agent's next
+  #     write to stderr then takes SIGPIPE: measured at rc 141, with a perfectly healthy but chatty
+  #     reviewer (progress bars, retries) dying mid-run while producing a good review on stdout.
+  # Stdout is the opposite case and deliberately DOES close early, because there the excess is the
+  # problem, not a diagnostic. Disk stays bounded either way; `tail` holds N bytes in memory, which
+  # at the 256 KiB default is not worth a second thought.
   #
   # _cap_errf below is the fallback for opencode and grok, whose stderr goes through a library
   # function that the call-site redirect cannot reach. For those two it is a post-hoc trim, so the
@@ -649,21 +654,21 @@ review_with() {
   # This is strictly better than the old behaviour, which lost the lot.
   local -a SB=(); command -v stdbuf >/dev/null 2>&1 && SB=(stdbuf -oL)
   case "$name" in
-    claude)       printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
-    codex)        printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
-    qwen)         printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    claude)       printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    codex)        printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    qwen)         printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
     cursor)
       if [ "$MODE" = diff ]; then
-        printf '%s\n\n%s' "$PROMPT" "$DIFF" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"
+        printf '%s\n\n%s' "$PROMPT" "$DIFF" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       else
-        printf '%s' "$PROMPT" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"
+        printf '%s' "$PROMPT" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       fi; rc=${PIPESTATUS[1]};;
     antigravity)
       # No stdin producer here, so the agent is pipeline element 0, not 1.
       if [ "$MODE" = diff ]; then
-        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"
+        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       else
-        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"
+        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$PROMPT" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       fi; rc=${PIPESTATUS[0]};;
     opencode)
       opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
@@ -686,6 +691,13 @@ review_with() {
   [ "$_body" -lt 0 ] && _body=0
   if [ "$_body" -gt "$LOG_MAX_BYTES" ]; then
     TRUNCATED=1
+    # Drop the probe byte before the marker goes on: the capture deliberately read one byte PAST the
+    # cap to detect overflow, and posting cap+1 bytes under a marker that says "truncated at N"
+    # would contradict itself.
+    local _trim; _trim="$(mktemp)" || _trim=""
+    if [ -n "$_trim" ]; then
+      head -c $((_hdr + LOG_MAX_BYTES)) "$side" > "$_trim" 2>/dev/null && mv -f "$_trim" "$side" || rm -f "$_trim"
+    fi
     printf '\n[... truncated at %s bytes by PR_RELAY_LOG_MAX_BYTES — this review is INCOMPLETE, so the round is not clean; raise the limit and re-run ...]\n' "$LOG_MAX_BYTES" >> "$side"
     # A cap hit usually also kills the producer with SIGPIPE. That is the bound working, not a
     # reviewer fault, and the round is already failed by TRUNCATED below — so don't ALSO report a

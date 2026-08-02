@@ -79,7 +79,7 @@ case "$1 $2" in
     fi ;;
   "repo view") echo "owner/repo" ;;
   "pr diff")   echo "diff --git a/x b/x"; echo "+change" ;;
-  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; exit 0 ;;
+  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted" >> "$GH_POST_LOG"; exit 0 ;;
   *) echo "" ;;
 esac
 exit 0
@@ -1785,6 +1785,43 @@ _rc=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$W
 _side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
 [ "$_rc" = 0 ]; ok_if $? "a chatty-stderr reviewer survives the cap and the round is clean" "rc=$_rc"
 grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "...and its review still arrived in full" "side=${_side:-<none>}"
+
+# The stderr cap keeps the LAST bytes, not the first: the diagnosis is at the end of a transcript,
+# and `tail -n 15` of it is all that is ever shown. Bounding with `head` kept the opening banner and
+# discarded the actual error — which cross-review caught by reading the comment against the code.
+cat > "$BINQ/claude" <<'VB'
+#!/usr/bin/env bash
+head -c 200000 /dev/zero | tr '\0' 'e' >&2 2>/dev/null
+echo "FINAL_DIAGNOSIS_MARKER" >&2
+exit 1
+VB
+chmod +x "$BINQ/claude"
+s_reset
+_err=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>&1 >/dev/null)
+grep -q "FINAL_DIAGNOSIS_MARKER" <<< "$_err"; ok_if $? "the END of a runaway stderr is what survives the cap" "${_err: -80}"
+
+# A truncated review must still be POSTED — that is the documented promise for this path, and the
+# other truncation tests only checked the exit code, the size and the marker.
+cat > "$BINQ/claude" <<'VB'
+#!/usr/bin/env bash
+trap '' PIPE
+head -c 20000 /dev/zero | tr '\0' 'y' 2>/dev/null
+exit 0
+VB
+chmod +x "$BINQ/claude"
+s_reset; : > "$WORK/posted.log"
+env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 GH_POST_LOG="$WORK/posted.log" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+[ -s "$WORK/posted.log" ]; ok_if $? "a truncated review is still posted to the PR" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+
+# The posted body must respect the advertised cap: the capture reads one byte PAST it to detect
+# overflow, and that probe byte must not survive into what gets posted.
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_tot=$(wc -c < "$_side" 2>/dev/null || echo 0)
+[ "$_tot" -le $((4096 + 400)) ]; ok_if $? "the probe byte is trimmed, body respects the stated cap" "total=$_tot"
 
 # The revert case is the whole subtlety of "SHA transitions, not distinct SHAs": going back to a SHA
 # already reviewed spends a THIRD slot, because only the last SHA is stored.
