@@ -474,7 +474,7 @@ if [ "$SAME_SHA" = 1 ] && [ "$SAME" -ge "$MAX_SAME_SHA" ]; then
   exit 4
 fi
 if [ "$NEXT_ROUND" -gt "$MAX_ROUNDS" ]; then
-  relay_log "verdict exit=4 round cap ($ROUND/$MAX_ROUNDS reviewed revisions)"
+  relay_log "verdict exit=4 round cap — persisted state stays at $ROUND/$MAX_ROUNDS (the run above logged the would-be slot $NEXT_ROUND)"
   echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS reviewed revisions)." >&2
   echo "   STOP the review loop: do NOT run the relay again on this PR. Address any" >&2
   echo "   remaining items manually, or pass --reset to force another round." >&2
@@ -601,11 +601,16 @@ review_with() {
   # cannot fill the disk" guarantee false: agents are chatty on stderr (progress, retries, stack
   # traces) and nothing limited it. Only the last LOG_MAX_BYTES are kept, because the diagnosis is
   # at the END of a transcript, and the reader only ever sees `tail -n 15` of it anyway.
-  # Bounded LIVE through a process substitution, not trimmed afterwards: trimming after the fact
-  # still lets a noisy agent fill the disk WHILE it runs, which is exactly the guarantee being
-  # claimed. `head` sees EOF and exits when the agent closes stderr. Kept for the reviewers whose
-  # stderr goes through a library function instead (opencode/grok), where the redirect above cannot
-  # reach — there it is still a post-hoc trim, and says so.
+  # NOTE on the stderr bound at the call sites: it is `head -c N > "$errf"; cat >/dev/null`, and the
+  # drain is not decoration. Without it, `head` exits at the cap and the agent's NEXT write to
+  # stderr takes SIGPIPE — killing a perfectly healthy, merely chatty reviewer (progress bars,
+  # retries) that was producing a good review on stdout. Measured: rc 141 and the agent never
+  # reaches its final line. Stdout deliberately closes early, because there the excess IS the
+  # problem; stderr only needs to stop growing on disk, so we keep reading and throw it away.
+  #
+  # _cap_errf below is the fallback for opencode and grok, whose stderr goes through a library
+  # function that the call-site redirect cannot reach. For those two it is a post-hoc trim, so the
+  # file can still grow while the agent runs — the README says so rather than claiming otherwise.
   _cap_errf() { [ -s "$errf" ] || return 0
     [ "$(wc -c < "$errf" 2>/dev/null || echo 0)" -le "$LOG_MAX_BYTES" ] && return 0
     local _t; _t="$(mktemp)" || return 0
@@ -620,6 +625,10 @@ review_with() {
     echo fail > "$STATUS_DIR/$skey"; rm -f "$errf"; return 0
   fi
   printf '=== %s review — started %s ===\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$side"
+  # A `>` redirect takes the caller's umask, so on a umask-022 machine the sidecar would be 644
+  # while the mktemp'd files beside it are 600. The mode-700 directory already keeps other users
+  # out; this closes the same-user gap, and these files hold full review text.
+  chmod 600 "$side" 2>/dev/null || true
   # Measured, not assumed: the body is sized on its own below, and the header length varies with the
   # reviewer's name and the timestamp.
   local _hdr; _hdr="$(wc -c < "$side" 2>/dev/null || echo 0)"
@@ -640,21 +649,21 @@ review_with() {
   # This is strictly better than the old behaviour, which lost the lot.
   local -a SB=(); command -v stdbuf >/dev/null 2>&1 && SB=(stdbuf -oL)
   case "$name" in
-    claude)       printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
-    codex)        printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
-    qwen)         printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    claude)       printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    codex)        printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    qwen)         printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
     cursor)
       if [ "$MODE" = diff ]; then
-        printf '%s\n\n%s' "$PROMPT" "$DIFF" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
+        printf '%s\n\n%s' "$PROMPT" "$DIFF" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"
       else
-        printf '%s' "$PROMPT" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
+        printf '%s' "$PROMPT" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask --model "$CURSOR_REVIEW_MODEL" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"
       fi; rc=${PIPESTATUS[1]};;
     antigravity)
       # No stdin producer here, so the agent is pipeline element 0, not 1.
       if [ "$MODE" = diff ]; then
-        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
+        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"
       else
-        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
+        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$PROMPT" 2> >(head -c "$LOG_MAX_BYTES" > "$errf"; cat >/dev/null) | head -c "$LOG_CAP_PROBE" >> "$side"
       fi; rc=${PIPESTATUS[0]};;
     opencode)
       opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \

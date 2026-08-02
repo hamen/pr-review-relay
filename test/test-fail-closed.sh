@@ -1698,7 +1698,13 @@ if ( set -m ) 2>/dev/null; then
   # `pgrep -f SLEEP_KEYS` scanned the whole machine and matched any unrelated process whose command
   # line happened to contain that string — including the cross-review agents reading this very diff,
   # which made the suite fail during review. A self-matching assertion is worse than none.
-  ! kill -0 -"$_pgid" 2>/dev/null; ok_if $? "SIGKILL: the whole process group is gone, no orphans" "pgid=$_pgid"
+  # Bounded wait, not an instant check: the group can briefly outlive its leader — `timeout` puts
+  # the agent in a group of its OWN (the relay's comments say so), so the group-kill does not reach
+  # it, and the stderr drain stays alive while anything still holds the write end. Both go away on
+  # their own within the stub's sleep. Asserting immediately made this flake.
+  _w=0
+  while [ "$_w" -lt 120 ] && kill -0 -"$_pgid" 2>/dev/null; do sleep 0.1; _w=$((_w+1)); done
+  ! kill -0 -"$_pgid" 2>/dev/null; ok_if $? "SIGKILL: the whole process group is gone, no orphans" "pgid=$_pgid waited=${_w}00ms"
 else
   echo "  skip [-] SIGKILL test: no job control (set -m) available in this shell"
 fi
@@ -1760,7 +1766,12 @@ _r1=$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=0); _r2=$(s_run "$SHA_A" PR_RELAY_MAX
 _sg=$( (cd "$WORK" && git config --get commit.gpgsign) 2>/dev/null )
 [ "$_sg" = "false" ]; ok_if $? "commit signing is forced off for every fixture git" "gpgsign=$_sg"
 
-# stderr is bounded on the write path too, not only stdout.
+# Runaway stderr must be bounded WITHOUT killing the reviewer. The stderr cap drains past the limit
+# rather than closing the pipe: closing it makes the agent's next write take SIGPIPE, which killed a
+# perfectly healthy, merely chatty reviewer that was producing a good review on stdout. The stub
+# below writes far past the cap on stderr and THEN produces its review, so it only passes if it
+# survived. (The previous version of this test was `ok_if 0 "..."` — hard-coded success, proving
+# nothing. Cross-review caught it.)
 cat > "$BINQ/claude" <<'VB'
 #!/usr/bin/env bash
 head -c 200000 /dev/zero | tr '\0' 'e' >&2 2>/dev/null
@@ -1768,10 +1779,33 @@ echo "LGTM from claude."
 VB
 chmod +x "$BINQ/claude"
 s_reset
-env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+_rc=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
-  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
-ok_if 0 "a reviewer with runaway stderr does not hang or crash the round" "-"
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+[ "$_rc" = 0 ]; ok_if $? "a chatty-stderr reviewer survives the cap and the round is clean" "rc=$_rc"
+grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "...and its review still arrived in full" "side=${_side:-<none>}"
+
+# The revert case is the whole subtlety of "SHA transitions, not distinct SHAs": going back to a SHA
+# already reviewed spends a THIRD slot, because only the last SHA is stored.
+s_reset
+s_run "$SHA_A" >/dev/null; s_run "$SHA_B" >/dev/null; s_run "$SHA_A" >/dev/null
+read -r _s _r _m < "$SRF" 2>/dev/null || true
+[ "$_r" = 3 ] && [ "$_s" = "$SHA_A" ]; ok_if $? "shaA→shaB→shaA spends three rounds (transitions, not distinct SHAs)" "state=$(s_state)"
+
+# The round cap must log its verdict too, matching the same-SHA cap's coverage.
+s_reset
+s_run "$SHA_A" -- --max-rounds 1 >/dev/null
+_rc=$(s_run "$SHA_B" -- --max-rounds 1)
+_log=$(ls -t "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+[ "$_rc" = 4 ] && grep -q "verdict exit=4 round cap" "$_log" 2>/dev/null
+ok_if $? "an exit-4 ROUND cap hit logs its verdict too" "rc=$_rc $(tail -1 "$_log" 2>/dev/null)"
+
+# MAX_ROUNDS=0 is documented as "always at cap": the first dispatch on a new SHA is refused, and
+# nothing is persisted.
+s_reset
+_rc=$(s_run "$SHA_A" PR_RELAY_MAX_ROUNDS=0)
+[ "$_rc" = 4 ] && [ ! -f "$SRF" ]; ok_if $? "MAX_ROUNDS=0 refuses the first dispatch and persists nothing" "rc=$_rc state=$(s_state)"
 
 unset _r1 _r2 _sg _log _side _rc
 
