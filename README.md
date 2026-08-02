@@ -206,14 +206,16 @@ Flags:
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
 | `--parallel` | Run the reviewers concurrently. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
-| `--max-rounds N` | Hard cap on review rounds per PR (default `3`, or `$PR_RELAY_MAX_ROUNDS`). |
-| `--reset` | Reset the round counter for this PR (force another round past the cap). |
+| `--max-rounds N` | Cap on **reviewed revisions** per PR — the counter advances when the head SHA changes, not on every invocation (default `3`, or `$PR_RELAY_MAX_ROUNDS`). See [Loop safety](#-loop-safety-no-runaway-iteration). |
+| `--reset` | Reset the counters for this PR (force another round past a cap). Also discards that PR's run logs and sidecars. |
 
 Environment:
 
 | Variable | Meaning |
 |----------|---------|
-| `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
+| `PR_RELAY_MAX_ROUNDS` | Default cap on reviewed revisions per PR (SHA transitions, not invocations). Default: `3`. `0` is accepted and means "always at cap". |
+| `PR_RELAY_MAX_SAME_SHA` | Cap on dispatches against one **unchanged** head SHA. Default: `6` — a 3-reviewer panel run one reviewer at a time, with a retry each. Exists because the round counter deliberately ignores same-SHA re-runs, and something still has to bound a re-run loop. Also exits `4`, with its own message. `0` is accepted, but note the asymmetry with `PR_RELAY_MAX_ROUNDS=0`: the same-SHA cap is only consulted once a SHA has been seen before, so `0` still allows the first dispatch on each SHA and blocks every retry. |
+| `PR_RELAY_LOG_MAX_BYTES` | Cap on a single reviewer's captured output, applied **on the write path** so a runaway agent cannot fill the disk, and on its captured stderr. Default: `262144` (256 KiB). A truncated review is marked as such and makes the round **not clean** (exit `3`) — the findings that did not fit are indistinguishable from findings that do not exist. Does **not** apply to the run log, which only holds short event lines. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. Also handed to `agy` as `--print-timeout`, because it enforces its own wait (default 5m) on top of ours — left unset, that inner limit wins whenever you raise this one, and the round dies with `timeout waiting for response` no matter how high you set it. The outer `timeout` gets a few seconds of grace so agy reaches its own limit first and gets to say so. Whether the other reviewers have internal waits of their own has not been checked. |
 | `CURSOR_REVIEW_MODEL` | Model for the `cursor` reviewer. Default: `composer-2.5` (Cursor's own model). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill` — hence no `PR_RELAY_` prefix. Change it if Cursor retires the id, or to pick another Cursor-pool model (`cursor-agent --list-models` shows what your account has); an unknown id makes `cursor-agent` exit 1 with empty output, which the relay reports as a failed reviewer. See [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned). |
 | `CODEX_REVIEW_MODEL` / `CODEX_REVIEW_EFFORT` | Model and reasoning effort for the `codex` reviewer. **Both default to empty, which means "use whatever `~/.codex/config.toml` says"** — the previous, and still normal, behaviour. Set them to review one PR with a specific model without editing that config, which every other use of the `codex` CLI shares. `CODEX_REVIEW_EFFORT` becomes `-c model_reasoning_effort=…`; note that an invalid model id fails the reviewer (e.g. `gpt-5.6` is rejected on a ChatGPT account, where the id is `gpt-5.6-sol`). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill`. |
@@ -495,11 +497,19 @@ This exists because relay runs do get killed mid-round, and every investigation 
 outside this script. It does not prevent that — it means the next occurrence leaves proof of which
 reviewers were dispatched, which finished, and what the one in flight had written.
 
-Two honest limits: partial capture is **best-effort**, because many CLIs block-buffer when stdout is
-not a terminal (`stdbuf` is used when available, never required); and a `SIGKILL` can always land
-between two writes. A reviewer's output is capped by `PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) on
-the write path, so a runaway agent cannot fill the disk — the cap does not apply to the run log
-itself, which only ever holds short event lines.
+Three honest limits. Partial capture is **best-effort**, because many CLIs block-buffer when stdout
+is not a terminal (`stdbuf` is used when available, never required). A `SIGKILL` can always land
+between two writes. And the sidecar-path symlink refusal is belt-and-braces that no test exercises:
+the path comes from a `mktemp` that created it `O_EXCL` moments earlier inside a mode-700 directory
+you own, so it provably did not exist — the real control is the directory, not the check.
+
+**Retention.** Every invocation leaves its own files, and they are only removed when that PR's state
+is discarded: by `--reset`, or by the 6h inactivity reset. A PR that is reviewed many times inside
+one session therefore accumulates one log plus one sidecar per reviewer per run, holding review text,
+until either of those fires. Output is capped by `PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) per
+reviewer, on the write path and for stderr too, so a single runaway agent cannot fill the disk; the
+cap does not apply to the run log itself, which only ever holds short event lines. If you want them
+gone sooner, `--reset` on the PR, or delete `<key>.run.*` from the state directory.
 
 ## 🔍 How it works
 

@@ -1608,25 +1608,57 @@ _rc=$(env PATH="$BINV:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$W
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
 _side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
 _sz=$(wc -c < "$_side" 2>/dev/null || echo 0)
-[ "$_rc" = 0 ] && [ "$_sz" -le 6000 ]; ok_if $? "oversized review is truncated on disk, round stays clean" "rc=$_rc size=$_sz"
+# A truncated review is an INCOMPLETE one, so the round must NOT be clean: the findings that did
+# not fit are indistinguishable from findings that do not exist, and exit 0 claims every reviewer
+# "produced and posted a review". An earlier version normalised the SIGPIPE to rc 0 to avoid failing
+# a round over a merely long review; cross-review pointed out that this breaks the fail-closed
+# contract the whole script rests on. The text is still posted, and the round reports 3.
+[ "$_rc" = 3 ]; ok_if $? "an oversized (truncated) review makes the round NOT clean" "rc=$_rc"
+[ "$_sz" -le 6000 ]; ok_if $? "oversized review is bounded on disk by the write path" "size=$_sz"
 grep -q "truncated at 4096 bytes" "$_side" 2>/dev/null; ok_if $? "truncation is marked in the body" "-"
+grep -q "INCOMPLETE" "$_side" 2>/dev/null; ok_if $? "the marker says the review is incomplete" "-"
 
 # --reset (and the 6h staleness path it shares) must clear the WHOLE family. A fresh counter next to
 # a stale transcript would make the forensics describe the wrong session.
+# Asserted by IDENTITY, not by counting: a --reset run creates a fresh log family of its own, so
+# "the file count did not grow" passes just as happily when nothing was deleted. Capture the old
+# run's actual path and require THAT to be gone.
 s_reset; s_run "$SHA_A" >/dev/null
-_before=$(ls "$SCACHE"/pr-review-relay/ 2>/dev/null | wc -l)
+_oldlog=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+_oldside=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
 env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --reset >/dev/null 2>&1
-# after --reset the only files present belong to the NEW run
-_old=$(ls "$SCACHE"/pr-review-relay/ 2>/dev/null | wc -l)
-[ "$_before" -gt 1 ] && [ "$_old" -le "$_before" ]; ok_if $? "--reset clears the previous run's log family" "before=$_before after=$_old"
+[ -n "$_oldlog" ] && [ ! -e "$_oldlog" ] && [ -n "$_oldside" ] && [ ! -e "$_oldside" ]
+ok_if $? "--reset removes the previous run's log AND sidecars (by path)" "log=${_oldlog:-<none>} side=${_oldside:-<none>}"
 
-# Defence in depth: a planted symlink where a sidecar will be written is refused rather than
-# followed. (The primary control is that the state dir is mode 700 and ours.)
-s_reset
+# The 6h staleness path shares relay_forget_key with --reset, so it must clear the same family.
+# Backdate the state file rather than waiting: the relay compares its mtime against 21600s.
+s_reset; s_run "$SHA_A" >/dev/null
+_oldlog=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+touch -d "8 hours ago" "$SRF" 2>/dev/null || touch -A -080000 "$SRF" 2>/dev/null
+s_run "$SHA_A" >/dev/null
+[ -n "$_oldlog" ] && [ ! -e "$_oldlog" ]; ok_if $? "6h staleness clears the old run family too" "log=${_oldlog:-<none>}"
+# ...and it really did start a fresh session rather than continuing the old counters.
+read -r _s _r _m < "$SRF" 2>/dev/null || true
+[ "$_r" = 1 ] && [ "$_m" = 1 ]; ok_if $? "6h staleness restarts the counters" "state=$(s_state)"
+
+# The atomic state write leaves <key>.state.XXXXXXXX temps if killed mid-write; --reset must sweep
+# those too, or they accumulate forever.
+s_reset; s_run "$SHA_A" >/dev/null
+: > "$SCACHE/pr-review-relay/owner_repo#1.state.DEADBEEF"
 env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
-  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
-if [ -d "$SCACHE/pr-review-relay" ]; then echo "  ok   [-] state dir created for the symlink check"; PASS=$((PASS+1)); else echo "  FAIL state dir missing"; FAIL=$((FAIL+1)); fi
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --reset >/dev/null 2>&1
+[ ! -e "$SCACHE/pr-review-relay/owner_repo#1.state.DEADBEEF" ]; ok_if $? "--reset sweeps orphaned state temps" "-"
+
+# NOTE ON WHAT IS *NOT* TESTED HERE. The relay refuses to write a sidecar whose path is already a
+# symlink. That check cannot be exercised honestly from this suite: the sidecar name is derived from
+# RUN_BASE, which mktemp created O_EXCL moments earlier inside a mode-700 directory we own, so the
+# path provably did not exist and no attacker could have planted anything at it. Reaching the branch
+# would need a test-only override in the script, i.e. production surface that exists solely to be
+# tested. An earlier version of this file claimed to cover it and merely asserted that the state
+# directory existed — it tested nothing, which cross-review caught. Better an acknowledged gap than
+# a green line that means nothing. The real control is the directory's ownership and mode, which is
+# enforced on every branch of the ROUND_DIR resolution.
 
 # --- the kill this feature exists for ----------------------------------------
 # SIGKILL the relay mid-round and assert the evidence survived. The relay runs in its OWN process
@@ -1642,9 +1674,12 @@ if ( set -m ) 2>/dev/null; then
     _kid=$!
     _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
     # Wait, bounded, for the evidence we are about to assert on to exist — never a fixed sleep.
+    # Wait for the sidecar's CONTENT, not merely its existence. The sidecar is created (header
+    # first) before the agent is launched, so "the file is there" is true almost immediately and
+    # the kill would race the reviewer that this case is meant to prove survives.
     _w=0
-    while [ "$_w" -lt 100 ]; do
-      [ -f "$SRF" ] && ls "$SCACHE"/pr-review-relay/*.k_claude.review >/dev/null 2>&1 && break
+    while [ "$_w" -lt 200 ]; do
+      [ -f "$SRF" ] && grep -q "LGTM from claude" "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null && break
       sleep 0.1; _w=$((_w+1))
     done
     [ -n "$_pgid" ] && kill -9 -- -"$_pgid" 2>/dev/null

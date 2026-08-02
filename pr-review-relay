@@ -324,16 +324,18 @@ if [ -n "$CONTEXT_FILE" ]; then
   echo "  context: $CONTEXT_FILE ($(wc -c < "$CONTEXT_FILE") bytes)"
 fi
 
-# --- Hard loop guard: cap the number of review rounds per PR ---------------
-# Prevents an endless read→fix→re-run cycle. Counter is per repo+PR, kept in a
-# cache file; auto-resets after 6h of inactivity (a fresh working session), or
-# manually with --reset. A round is only CONSUMED once at least one reviewer
-# actually ran (see end of file) — a misconfigured machine where nobody runs
-# won't march the counter to the cap without ever getting a review.
-# This is a best-effort SOFT guard, not a concurrency boundary: the counter is an
-# unlocked read-modify-write, so two relays launched on the same PR at the same
-# instant could both read the same value. Worst case the cap is exceeded by one —
-# one extra review round — which is harmless, so we don't pay for locking here.
+# --- Hard loop guard: cap the review rounds per PR --------------------------
+# Prevents an endless read→fix→re-run cycle. State is per repo+PR, kept in a cache file;
+# auto-resets after 6h of inactivity (a fresh working session), or manually with --reset.
+# A round is consumed once the panel is RESOLVED and about to be dispatched — the state is written
+# just before pass 2, further down, NOT at the end of the run. A machine where nobody is runnable
+# still consumes nothing, because that is gated on would_run. (This paragraph used to say the
+# opposite, "only once at least one reviewer actually ran (see end of file)"; that stopped being
+# true when the write moved ahead of dispatch to bound a kill→retry loop.)
+# This is a best-effort SOFT guard, not a concurrency boundary: the counters are an unlocked
+# read-modify-write, so two relays launched on the same PR at the same instant can lose an update
+# and UNDERCOUNT dispatches — which weakens both caps, rather than merely overshooting one. Don't
+# run concurrent relays on one PR and rely on the caps; we don't pay for locking here.
 # --max-rounds must be a non-negative integer, else the arithmetic below breaks and
 # silently bypasses the cap — reject it as a usage error instead.
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
@@ -383,7 +385,9 @@ fi
 # Discarding the round state and discarding this key's logs is ONE decision, never two: if they
 # drift apart you get a fresh counter next to a stale transcript (or the reverse), and the forensics
 # lie about which session they describe. relay_forget_key removes the whole <key>.* family.
-relay_forget_key() { rm -f "$ROUND_FILE" "$ROUND_DIR/$ROUND_KEY".run.* 2>/dev/null || true; }
+# Sweeps the state temps too: a kill between mktemp and the mv leaves a <key>.state.XXXXXXXX
+# behind, and a glob that only matched .run.* would let those accumulate forever.
+relay_forget_key() { rm -f "$ROUND_FILE" "$ROUND_DIR/$ROUND_KEY".run.* "$ROUND_DIR/$ROUND_KEY".state.* 2>/dev/null || true; }
 [ "$RESET" = 1 ] && relay_forget_key
 # mtime: GNU `stat -c %Y`, BSD/macOS `stat -f %m`.
 _round_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
@@ -427,31 +431,6 @@ SAME_SHA=0
 if [ "$SAME_SHA" = 1 ]; then         NEXT_ROUND="$ROUND"; NEXT_SAME=$((SAME + 1))
 elif [ "$_state_legacy" = 1 ]; then  NEXT_ROUND="$ROUND"; NEXT_SAME=1
 else                                 NEXT_ROUND=$((ROUND + 1)); NEXT_SAME=1; fi
-if [ "$_state_legacy" = 1 ] && [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
-  echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS)." >&2
-  echo "   STOP the review loop: do NOT run the relay again on this PR. Address any" >&2
-  echo "   remaining items manually, or pass --reset to force another round." >&2
-  exit 4
-fi
-
-if [ "$SAME_SHA" = 1 ] && [ "$SAME" -ge "$MAX_SAME_SHA" ]; then
-  echo "⛔ Same-SHA dispatch cap reached for $REPO#$PR ($SAME/$MAX_SAME_SHA on ${HEAD_SHA:0:7})." >&2
-  echo "   The reviewed code has not changed for $SAME dispatches. STOP: push a fix so there is" >&2
-  echo "   something new to review, raise PR_RELAY_MAX_SAME_SHA, or pass --reset." >&2
-  exit 4
-fi
-if [ "$NEXT_ROUND" -gt "$MAX_ROUNDS" ]; then
-  echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS reviewed revisions)." >&2
-  echo "   STOP the review loop: do NOT run the relay again on this PR. Address any" >&2
-  echo "   remaining items manually, or pass --reset to force another round." >&2
-  exit 4   # distinct code: not a clean pass — escalate, don't treat as consensus
-fi
-if [ "$SAME_SHA" = 1 ]; then
-  echo "  review round: $NEXT_ROUND/$MAX_ROUNDS — invocation $NEXT_SAME/$MAX_SAME_SHA on this SHA"
-else
-  echo "  review round: $NEXT_ROUND/$MAX_ROUNDS — new SHA, invocation 1/$MAX_SAME_SHA"
-fi
-
 # --- Run evidence: one log for this invocation, one sidecar per reviewer -----
 # ONE WRITER PER FILE. Under --parallel each reviewer runs in a background subshell, so a single
 # shared append target would interleave multi-line review bodies into garbage. The parent writes
@@ -462,6 +441,11 @@ fi
 # cannot be a planted symlink. Unique matters: a fixed <key>.<reviewer> name would hand the same
 # file to every retry, and a retry after a kill would overwrite the very evidence of the kill.
 # (`date +%s`-plus-$$ was the obvious alternative and is not collision-safe — PIDs get reused.)
+#
+# Created BEFORE the cap checks below, deliberately. It used to come after, which meant an exit-4
+# run — the one where an operator most wants to know what the counters were and why it stopped —
+# left no log at all, while the README promised every invocation leaves evidence. All three
+# cross-reviewers caught that. The cost is one small file on a run that dispatches nobody.
 RUN_BASE="$(mktemp "$ROUND_DIR/$ROUND_KEY.run.XXXXXXXX" 2>/dev/null)" || {
   echo "cannot create run log in '$ROUND_DIR'" >&2; exit 1; }
 relay_log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$RUN_BASE"; }
@@ -474,10 +458,39 @@ relay_log "start reviewers=$REVIEWERS parallel=$PARALLEL dry=$DRY timeout=${AGEN
 # says what to look for. Every investigation so far has ended outside this script.
 relay_log "start pid=$$ pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ') round=$NEXT_ROUND/$MAX_ROUNDS same_sha=$NEXT_SAME/$MAX_SAME_SHA"
 
+if [ "$_state_legacy" = 1 ] && [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
+  relay_log "verdict exit=4 round cap (legacy state $ROUND/$MAX_ROUNDS)"
+  echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS)." >&2
+  echo "   STOP the review loop: do NOT run the relay again on this PR. Address any" >&2
+  echo "   remaining items manually, or pass --reset to force another round." >&2
+  exit 4
+fi
+
+if [ "$SAME_SHA" = 1 ] && [ "$SAME" -ge "$MAX_SAME_SHA" ]; then
+  relay_log "verdict exit=4 same-SHA cap ($SAME/$MAX_SAME_SHA on ${HEAD_SHA:0:7})"
+  echo "⛔ Same-SHA dispatch cap reached for $REPO#$PR ($SAME/$MAX_SAME_SHA on ${HEAD_SHA:0:7})." >&2
+  echo "   The reviewed code has not changed for $SAME dispatches. STOP: push a fix so there is" >&2
+  echo "   something new to review, raise PR_RELAY_MAX_SAME_SHA, or pass --reset." >&2
+  exit 4
+fi
+if [ "$NEXT_ROUND" -gt "$MAX_ROUNDS" ]; then
+  relay_log "verdict exit=4 round cap ($ROUND/$MAX_ROUNDS reviewed revisions)"
+  echo "⛔ Review round cap reached for $REPO#$PR ($ROUND/$MAX_ROUNDS reviewed revisions)." >&2
+  echo "   STOP the review loop: do NOT run the relay again on this PR. Address any" >&2
+  echo "   remaining items manually, or pass --reset to force another round." >&2
+  exit 4   # distinct code: not a clean pass — escalate, don't treat as consensus
+fi
+if [ "$SAME_SHA" = 1 ]; then
+  echo "  review round: $NEXT_ROUND/$MAX_ROUNDS — invocation $NEXT_SAME/$MAX_SAME_SHA on this SHA"
+else
+  echo "  review round: $NEXT_ROUND/$MAX_ROUNDS — new SHA, invocation 1/$MAX_SAME_SHA"
+fi
+
 # Fail-closed early (but AFTER the cap check above, so an at-cap PR still exits 4):
 # if we can't read the head SHA now, we can never prove HEAD stayed put — abort
 # before spending reviewer runs (a dry-run needs no SHA).
 if [ "$DRY" = 0 ] && [ -z "$HEAD_SHA" ]; then
+  relay_log "verdict exit=3 head sha unreadable at start"
   echo "✖ Could not read PR head SHA — cannot prove HEAD stability. Re-run." >&2; exit 3
 fi
 
@@ -576,12 +589,22 @@ fi
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; qwen) echo qwen;; grok) echo grok;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out="" feed="" rc=0 errf skey Name id side
+  # TRUNCATED is local: sequential mode reuses this function, and a leaked 1 from a previous
+  # reviewer would mislabel the next one's failure message.
+  local name="$1" out="" feed="" rc=0 errf skey Name id side TRUNCATED=0
   skey="$(status_key "$name")"
   # Capitalize first letter — Bash 3.2-safe (no ${name^}, which is Bash 4+).
   Name="$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}"
   errf="$(mktemp)"
   [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
+  # Cap the stderr capture as well. Bounding only stdout left the documented "a runaway reviewer
+  # cannot fill the disk" guarantee false: agents are chatty on stderr (progress, retries, stack
+  # traces) and nothing limited it. Only the last LOG_MAX_BYTES are kept, because the diagnosis is
+  # at the END of a transcript, and the reader only ever sees `tail -n 15` of it anyway.
+  _cap_errf() { [ -s "$errf" ] || return 0
+    [ "$(wc -c < "$errf" 2>/dev/null || echo 0)" -le "$LOG_MAX_BYTES" ] && return 0
+    local _t; _t="$(mktemp)" || return 0
+    tail -c "$LOG_MAX_BYTES" "$errf" > "$_t" 2>/dev/null && mv -f "$_t" "$errf" || rm -f "$_t"; }
   # This reviewer's sidecar. The name is derived from RUN_BASE (already unique and freshly created
   # by mktemp) and from status_key, the same sanitizer $STATUS_DIR uses — so a crafted --reviewers
   # value cannot escape $ROUND_DIR through this path either. The -L refusal is defence in depth:
@@ -631,13 +654,22 @@ review_with() {
               "PR #$PR in $REPO ${PR_URL:+($PR_URL)}" "$errf" "$AGENT_TIMEOUT" | head -c "$LOG_MAX_BYTES" >> "$side"
       rc=${PIPESTATUS[0]};;
   esac
-  # When the bound actually fires, `head` closes the pipe and the agent dies of SIGPIPE (rc 141).
-  # That is the guard working as designed, NOT a reviewer failure — reporting it as one would fail
-  # the whole round over a review that was merely long. So it is recorded as a truncated review and
-  # the marker goes into the body, where the reader (and the posted comment) can see it.
+  _cap_errf
+  # When the bound fires, `head` closes the pipe and the agent dies of SIGPIPE (rc 141). Mark the
+  # body so the reader — and the posted comment — can see where it stops.
+  #
+  # The round is then NOT clean, and that is deliberate. An earlier version normalised this to rc 0
+  # on the reasoning that a merely long review should not fail a round; cross-review pointed out
+  # that this breaks the script's whole contract. A truncated review is an INCOMPLETE one: the
+  # findings that did not fit are indistinguishable from findings that do not exist, and exit 0
+  # means "every reviewer produced and posted a review", which would then be a lie. The relay is
+  # fail-closed everywhere else for exactly this reason. So the text is still posted (informative),
+  # the round reports 3, and you re-run with a bigger PR_RELAY_LOG_MAX_BYTES — the same treatment a
+  # reviewer that exits non-zero with output already gets, a few lines below.
+  TRUNCATED=0
   if [ "$rc" = 141 ] && [ "$(wc -c < "$side" 2>/dev/null || echo 0)" -ge "$LOG_MAX_BYTES" ]; then
-    printf '\n[... truncated at %s bytes — raise PR_RELAY_LOG_MAX_BYTES for the full text ...]\n' "$LOG_MAX_BYTES" >> "$side"
-    rc=0
+    printf '\n[... truncated at %s bytes by PR_RELAY_LOG_MAX_BYTES — this review is INCOMPLETE, so the round is not clean; raise the limit and re-run ...]\n' "$LOG_MAX_BYTES" >> "$side"
+    TRUNCATED=1
   fi
   # Read the body back, dropping the header line we wrote above. This is the value the rest of the
   # function used to get straight out of the command substitution.
@@ -667,7 +699,11 @@ review_with() {
   if [ "$rc" -ne 0 ]; then
     # Produced a review but the CLI exited non-zero: the review may be truncated,
     # so the round is NOT clean even though we still post what we got (informative).
-    echo "  ! $name: exited with code $rc — review may be truncated (round not clean)" >&2
+    if [ "$TRUNCATED" = 1 ]; then
+      echo "  ! $name: review exceeded PR_RELAY_LOG_MAX_BYTES ($LOG_MAX_BYTES) and was truncated — INCOMPLETE, round not clean" >&2
+    else
+      echo "  ! $name: exited with code $rc — review may be truncated (round not clean)" >&2
+    fi
     unclean=1
   fi
   rm -f "$errf"

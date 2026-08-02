@@ -24,8 +24,13 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   - Every terminal path logs its verdict, including the failure paths (HEAD moved, dirty checkout,
     reviewer failed). A log that only recorded successes would go quiet exactly when it matters.
   - `PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) bounds a reviewer's captured output **on the write
-    path**, so a runaway agent cannot fill the disk. Truncation is marked in the body and is not
-    treated as a reviewer failure.
+    path**, and its captured stderr, so a runaway agent cannot fill the disk. A truncated review is
+    marked as such and makes the round **not clean** (exit `3`): the findings that did not fit are
+    indistinguishable from findings that do not exist, and `0` claims every reviewer produced and
+    posted a review. The text is still posted, as it already is for a reviewer that exits non-zero
+    with output.
+  - The run log is created **before** the cap checks, so an `exit 4` run — the one where you most
+    want to know what the counters said — leaves evidence too.
 
 ### Fixed
 
