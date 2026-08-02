@@ -206,14 +206,16 @@ Flags:
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
 | `--parallel` | Run the reviewers concurrently. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
-| `--max-rounds N` | Hard cap on review rounds per PR (default `3`, or `$PR_RELAY_MAX_ROUNDS`). |
-| `--reset` | Reset the round counter for this PR (force another round past the cap). |
+| `--max-rounds N` | Cap on **reviewed revisions** per PR — the counter advances when the head SHA changes, not on every invocation (default `3`, or `$PR_RELAY_MAX_ROUNDS`). See [Loop safety](#-loop-safety-no-runaway-iteration). |
+| `--reset` | Reset the counters for this PR (force another round past a cap). Also discards that PR's run logs and sidecars. |
 
 Environment:
 
 | Variable | Meaning |
 |----------|---------|
-| `PR_RELAY_MAX_ROUNDS` | Default max review rounds per PR. |
+| `PR_RELAY_MAX_ROUNDS` | Default cap on reviewed revisions per PR (SHA transitions, not invocations). Default: `3`. `0` is accepted and means "always at cap". |
+| `PR_RELAY_MAX_SAME_SHA` | Cap on dispatches against one **unchanged** head SHA. Default: `6` — a 3-reviewer panel run one reviewer at a time, with a retry each. Exists because the round counter deliberately ignores same-SHA re-runs, and something still has to bound a re-run loop. Also exits `4`, with its own message. `0` is accepted, but note the asymmetry with `PR_RELAY_MAX_ROUNDS=0`: the same-SHA cap is only consulted once a SHA has been seen before, so `0` still allows the first dispatch on each SHA and blocks every retry. |
+| `PR_RELAY_LOG_MAX_BYTES` | Cap on a single reviewer's captured output, applied **on the write path** so a runaway agent cannot fill the disk, and on its captured stderr. The stderr bound keeps reading past the cap and discards the excess, rather than closing the pipe — closing it would make a merely chatty reviewer die of `SIGPIPE` mid-review. **Exception:** `opencode` and `grok` route stderr through a library function the call-site redirect cannot reach, so for those two the trim happens after the agent exits and the file can still grow while it runs. Default: `262144` (256 KiB). A truncated review is marked as such and makes the round **not clean** (exit `3`) — the findings that did not fit are indistinguishable from findings that do not exist. Does **not** apply to the run log, which only holds short event lines. |
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. Also handed to `agy` as `--print-timeout`, because it enforces its own wait (default 5m) on top of ours — left unset, that inner limit wins whenever you raise this one, and the round dies with `timeout waiting for response` no matter how high you set it. The outer `timeout` gets a few seconds of grace so agy reaches its own limit first and gets to say so. Whether the other reviewers have internal waits of their own has not been checked. |
 | `CURSOR_REVIEW_MODEL` | Model for the `cursor` reviewer. Default: `composer-2.5` (Cursor's own model). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill` — hence no `PR_RELAY_` prefix. Change it if Cursor retires the id, or to pick another Cursor-pool model (`cursor-agent --list-models` shows what your account has); an unknown id makes `cursor-agent` exit 1 with empty output, which the relay reports as a failed reviewer. See [Why the Cursor model is pinned](#-why-the-cursor-model-is-pinned). |
 | `CODEX_REVIEW_MODEL` / `CODEX_REVIEW_EFFORT` | Model and reasoning effort for the `codex` reviewer. **Both default to empty, which means "use whatever `~/.codex/config.toml` says"** — the previous, and still normal, behaviour. Set them to review one PR with a specific model without editing that config, which every other use of the `codex` CLI shares. `CODEX_REVIEW_EFFORT` becomes `-c model_reasoning_effort=…`; note that an invalid model id fails the reviewer (e.g. `gpt-5.6` is rejected on a ChatGPT account, where the id is `gpt-5.6-sol`). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill`. |
@@ -302,9 +304,12 @@ A typical agent instruction to make this a loop:
 > After opening a PR, run `pr-review-relay --author <self>`. **Branch on its exit code — only `0` is a
 > clean round** (every reviewer actually ran and posted, PR head unchanged). On `3` the round is not
 > trustworthy (a reviewer failed / the SHA couldn't be confirmed / HEAD moved) — **don't act on the
-> posted reviews, re-run against the current head**. On `4` the round cap is hit — stop and escalate.
+> posted reviews, re-run against the current head**. On `4` a loop cap is hit — read the message: the
+> **round** cap (3 reviewed revisions) means stop and escalate; the **same-SHA** cap means you have
+> re-run the panel on unchanged code and should push a fix instead.
 > On a clean `0`, read the reviews it prints, address every **Blocker** and **Should-fix**, commit and
-> push, then run it again. Repeat until no blockers remain (max ~3 rounds), then summarize what you changed.
+> push, then run it again. Repeat until no blockers remain (~3 revisions), then summarize what you changed.
+> If a run is interrupted, its log path was printed at startup — the reviewers that finished are in it.
 >
 > When reviewers agree on what still matters, save a **consensus work card** (only agreed Blockers /
 > Should-fix / Nits) and run `pr-review-consensus --consensus-file path.md` so the PR description
@@ -447,11 +452,64 @@ printed the error on stdout would surface it as a (clearly broken-looking) revie
 Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 
 - **Soft:** the agent is told to stop once there are no Blockers/Should-fix left.
-- **Hard:** the relay enforces a **per-PR round cap** (default 3). Once hit, it refuses to run
-  reviewers, prints a clear ⛔ STOP message, and **exits `4`** so the agent ends the loop instead of
-  mistaking it for a pass. The counter lives in `$XDG_CACHE_HOME/pr-review-relay/`, **auto-resets after
-  6h** of inactivity (a fresh session), and can be cleared with `--reset`. Tune with `--max-rounds N` or
-  `PR_RELAY_MAX_ROUNDS`.
+- **Hard:** two counters, both exiting `4` with a ⛔ STOP message that says which one fired, so the
+  agent ends the loop instead of mistaking it for a pass.
+
+| Counter | Advances when | Default | Tune with |
+|---|---|---|---|
+| **Round** | the PR head **SHA changes** | 3 | `--max-rounds N`, `PR_RELAY_MAX_ROUNDS` |
+| **Same-SHA dispatches** | every dispatch on an **unchanged** SHA | 6 | `PR_RELAY_MAX_SAME_SHA` |
+
+The round counter is what bounds a real read→fix→re-run cycle, and a real cycle always involves a
+push — so it counts **reviewed revisions**, not invocations. Splitting a panel across several
+invocations on one commit (`--reviewers codex`, then `cursor`, then `grok`) therefore costs **no
+rounds at all**, which is what you need when the relay keeps dying mid-round and you have to run the
+reviewers one at a time. The same-SHA counter is what keeps that from becoming an unbounded loop; its
+default of 6 covers a 3-reviewer panel run singly with one retry each.
+
+Strictly the round counter counts **SHA transitions**: only the last SHA is stored, so
+`shaA → shaB → shaA` spends three rounds. That is intended — a revert-and-retry loop should cost.
+
+State lives in `$XDG_CACHE_HOME/pr-review-relay/` (or `$HOME/.cache/…`), **auto-resets after 6h** of
+inactivity, and can be cleared with `--reset`. Both discard the run logs for that PR at the same
+time, so you never read a fresh counter next to a stale transcript.
+
+> **Concurrency:** the counters are an unlocked read-modify-write. Two relays racing on the same PR
+> can lose an update and therefore **undercount** dispatches, weakening *both* guards. Don't run
+> concurrent relays on one PR and rely on the caps.
+
+## 🔦 Evidence and forensics
+
+Every run writes, under the same state directory:
+
+- `<key>.run.XXXXXXXX` — the **run log**: timestamped start (PR, SHA, reviewer list, PID, PGID), each
+  dispatch, the state decision, each reviewer's outcome, and the final verdict — including the
+  failure verdicts, which are the ones worth reading.
+- `<key>.run.XXXXXXXX.k_<reviewer>.review` — one **sidecar per reviewer**, carrying that reviewer's
+  output as the CLI produces it.
+
+The path is printed at **startup**, not just at the end — a run that is killed never reaches the
+closing banner, and that is exactly the run you want the log for. Each file has a single writer, so
+nothing interleaves under `--parallel`; the name is unique per invocation, so a retry never
+overwrites the evidence of the attempt that died.
+
+This exists because relay runs do get killed mid-round, and every investigation so far has ended
+outside this script. It does not prevent that — it means the next occurrence leaves proof of which
+reviewers were dispatched, which finished, and what the one in flight had written.
+
+Three honest limits. Partial capture is **best-effort**, because many CLIs block-buffer when stdout
+is not a terminal (`stdbuf` is used when available, never required). A `SIGKILL` can always land
+between two writes. And the sidecar-path symlink refusal is belt-and-braces that no test exercises:
+the path comes from a `mktemp` that created it `O_EXCL` moments earlier inside a mode-700 directory
+you own, so it provably did not exist — the real control is the directory, not the check.
+
+**Retention.** Every invocation leaves its own files, and they are only removed when that PR's state
+is discarded: by `--reset`, or by the 6h inactivity reset. A PR that is reviewed many times inside
+one session therefore accumulates one log plus one sidecar per reviewer per run, holding review text,
+until either of those fires. Output is capped by `PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) per
+reviewer, on the write path and for stderr too, so a single runaway agent cannot fill the disk; the
+cap does not apply to the run log itself, which only ever holds short event lines. If you want them
+gone sooner, `--reset` on the PR, or delete `<key>.run.*` from the state directory.
 
 ## 🔍 How it works
 
@@ -482,7 +540,7 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
 |------|---------|------------|
 | `0` | Every reviewer that ran produced **and posted** a review, and the PR head didn't move. | Everyone *ran* — not that it's approved. Read the reviews, resolve every Blocker/Should-fix, then merge. |
 | `3` | Not a clean round: a reviewer returned empty / timed out / exited non-zero / failed to post, **or** an explicitly-requested reviewer was missing, **or** no reviewer ran, **or** HEAD moved mid-round (reviews now describe stale code). | Fix the cause and re-run; don't treat as reviewed. |
-| `4` | Review-round cap reached. | Stop looping; escalate to a human. |
+| `4` | A loop cap was reached — either the **round** cap (`--max-rounds`, counted per reviewed SHA) or the **same-SHA dispatch** cap (`PR_RELAY_MAX_SAME_SHA`). The message says which. | Stop looping; escalate to a human. On the same-SHA cap, pushing a fix is what unblocks it. |
 | `1`/`2` | Usage/precondition error (no `gh`, no PR, empty diff, bad arg). | Fix the invocation. |
 
 A missing CLI from the **default** reviewer set is a tolerated skip (users have different agents
@@ -492,8 +550,14 @@ review's footer records the **reviewed SHA** so you can tell whether a review pr
 > **Note:** reviews are posted as they complete, *before* the end-of-round SHA re-check. So a round that
 > ends in `3` (a reviewer failed, or HEAD moved mid-round) may still have left comments on the PR — tagged
 > with the SHA they reviewed. Trust the **exit code**, not the mere presence of comments: on `3`, re-run
-> and read the fresh round. A round that actually dispatched reviewers **consumes one cap slot even when it
-> ends in `3`** (a persistently flaky reviewer must still hit the cap) — a round where *nobody* ran does not.
+> and read the fresh round.
+>
+> **What a round costs.** The state is recorded **before** reviewers are dispatched, so an
+> interrupted run has already accounted for itself — that is what bounds a kill→retry loop. A
+> dispatch on a **new** SHA spends one round even if it ends in `3` or is killed (a persistently
+> flaky reviewer must still hit the cap). A dispatch on an **unchanged** SHA spends **no round**,
+> only one same-SHA slot. A run where *nobody* was dispatched (`--reviewers bogus`, everything
+> skipped, `--dry-run`) spends nothing at all.
 
 ### A note on `PATH`
 

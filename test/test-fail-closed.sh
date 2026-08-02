@@ -8,7 +8,38 @@
 #   4  review-round cap reached
 #
 # No network, no real agents. Run: bash test/test-fail-closed.sh
+#
 set -uo pipefail
+
+# HERMETICITY. This suite builds throwaway git repos under $WORK and must operate on THOSE and
+# nothing else. Two separate ways it used to escape, both of which corrupted the repository the
+# suite was launched from:
+#
+# 1. INHERITED GIT ENVIRONMENT. git exports GIT_DIR (and friends) to its hooks, and those variables
+#    outrank the working directory: with GIT_DIR set, `cd "$RLREPO" && git init && git commit`
+#    commits to the HOST repo and the fixture repo stays empty. Run from a pre-push hook this suite
+#    therefore wrote junk commits (base/change/i/c) and stray files onto the branch being pushed,
+#    and then failed ~16 assertions because the fixture repos had no content — which reads
+#    convincingly as a defect in the code under test. Reproduce the old behaviour with
+#    `GIT_DIR=$(git rev-parse --absolute-git-dir) bash test/test-fail-closed.sh`.
+#    Consequence worth stating: while this was broken, the pre-push gate could never pass, so it
+#    was gating nothing.
+#
+# 2. INHERITED GIT CONFIG. The fixtures inherit ~/.gitconfig, and on a machine with
+#    `commit.gpgsign = true` plus an agent-backed signer (e.g. 1Password's op-ssh-sign) every
+#    fixture `git commit` either blocks on a signing prompt that never comes — the suite hangs
+#    forever, no output, on a fixture that has nothing to do with signing — or fails outright.
+#
+# Both are fixed with PROCESS-SCOPED settings that write nothing to disk. In particular the config
+# is imposed with GIT_CONFIG_*, never with `git config`: a `git config` line inside a fixture whose
+# `git init` failed quietly writes into the host repo's config instead (it set user.name=t and
+# turned commit signing off in this very repository while that version was being tried).
+# The same reasoning applies to any fixture added later, which is why this is set once, here.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
+export GIT_CONFIG_KEY_1=tag.gpgsign    GIT_CONFIG_VALUE_1=false
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RELAY="$HERE/../pr-review-relay"
@@ -33,6 +64,11 @@ case "$1 $2" in
         end)   [ "$c" -ge 2 ] && exit 0 ;;
         both)  exit 0 ;;
       esac
+      # A per-RUN pin. GH_SHA_DRIFT changes the SHA *within* one round (to test staleness); the
+      # per-SHA round counter needs the opposite — a SHA that is stable inside a run but differs
+      # BETWEEN runs. Without this knob those tests would silently all use the same SHA and assert
+      # nothing.
+      if [ -n "${GH_FIXED_SHA:-}" ]; then echo "$GH_FIXED_SHA"; exit 0; fi
       if [ -n "${GH_SHA_DRIFT:-}" ]; then
         [ "$c" -le 1 ] && echo "aaaaaaa1111111111111111111111111111111111" || echo "bbbbbbb2222222222222222222222222222222222"
       else
@@ -43,7 +79,7 @@ case "$1 $2" in
     fi ;;
   "repo view") echo "owner/repo" ;;
   "pr diff")   echo "diff --git a/x b/x"; echo "+change" ;;
-  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; exit 0 ;;
+  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted" >> "$GH_POST_LOG"; exit 0 ;;
   *) echo "" ;;
 esac
 exit 0
@@ -215,7 +251,14 @@ rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
 env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" FAIL_EMPTY=codex \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
 rf="$WORK/cache/pr-review-relay/owner_repo#1.round"
-if [ -f "$rf" ] && [ "$(cat "$rf")" = 1 ]; then echo "  ok   [-] failed round (reviewers ran) consumes a slot"; PASS=$((PASS+1)); else echo "  FAIL failed round did not consume a slot"; FAIL=$((FAIL+1)); fi
+# State is "<sha> <rounds> <same-sha-invocations>" (it used to be a bare integer). The INTENT of
+# this assertion is unchanged: a round that actually dispatched reviewers records itself even when
+# the round then fails, so a persistently flaky reviewer still marches toward the cap.
+read -r _sha _rounds _same _junk < "$rf" 2>/dev/null || true
+if [ -f "$rf" ] && [ -n "${_sha:-}" ] && [ "${_rounds:-}" = 1 ] && [ "${_same:-}" = 1 ] && [ -z "${_junk:-}" ]; then
+  echo "  ok   [-] failed round (reviewers ran) consumes a slot"; PASS=$((PASS+1))
+else echo "  FAIL failed round did not consume a slot (state: $(cat "$rf" 2>/dev/null || echo '<missing>'))"; FAIL=$((FAIL+1)); fi
+unset _sha _rounds _same _junk
 
 # wrapper (node) failure → reviewer recorded as failed → exit 3 (not posted as ok)
 BIN4="$WORK/bin4"; mkdir -p "$BIN4"
@@ -1400,6 +1443,408 @@ env PATH="$BIN:$PATH" HOME="$WORK/home" \
   bash "$RELAY" --pr 1 --author codex --reviewers grok >/dev/null 2>&1
 pr_criteria "grok prompt" "$GK_PROMPT"
 pr_assert "grok prompt does NOT ask for conventions" "$GK_PROMPT" 'AGENTS.md' hasnot
+
+# =============================================================================
+# Per-SHA round accounting, and the run-evidence files.
+#
+# These share ONE cache across calls on purpose — the whole point is what carries over between
+# invocations — so they use their own helpers rather than run()/runx(), which wipe it every time.
+# =============================================================================
+echo "per-SHA round accounting:"
+SCACHE="$WORK/scache"
+SRF="$SCACHE/pr-review-relay/owner_repo#1.round"
+s_reset() { rm -rf "$SCACHE"; mkdir -p "$SCACHE/pr-review-relay"; rm -f "$WORK/sha_counter"; }
+s_run() { # s_run <sha> [extra env...] -- [relay args...]; echoes the exit code
+  local sha="$1"; shift
+  local -a envs=() args=()
+  while [ $# -gt 0 ]; do case "$1" in --) shift; args=("$@"); break;; *) envs+=("$1"); shift;; esac; done
+  rm -f "$WORK/sha_counter"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+    GH_FIXED_SHA="$sha" ${envs[@]+"${envs[@]}"} \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex \
+      ${args[@]+"${args[@]}"} >/dev/null 2>&1
+  echo $?
+}
+s_state() { cat "$SRF" 2>/dev/null || echo "<missing>"; }
+ok_if() { # ok_if <cond-result 0/1> <desc> <detail>
+  if [ "$1" = 0 ]; then echo "  ok   [-] $2"; PASS=$((PASS+1)); else echo "  FAIL $2 ($3)"; FAIL=$((FAIL+1)); fi
+}
+
+SHA_A=1111111111111111111111111111111111111111
+SHA_B=2222222222222222222222222222222222222222
+SHA_C=3333333333333333333333333333333333333333
+
+# Same SHA twice: the round counter must NOT move; only the same-SHA counter does. This is the
+# whole point of the change — splitting a panel across invocations must be free.
+s_reset; rc1=$(s_run "$SHA_A"); rc2=$(s_run "$SHA_A")
+read -r _s _r _m < "$SRF" 2>/dev/null || true
+[ "$_r" = 1 ] && [ "$_m" = 2 ] && [ "$_s" = "$SHA_A" ]; ok_if $? "same SHA twice → rounds stay 1, same-SHA goes 2" "state=$(s_state) rc=$rc1/$rc2"
+
+# A new SHA is a new round, and the same-SHA counter restarts.
+rc3=$(s_run "$SHA_B")
+read -r _s _r _m < "$SRF" 2>/dev/null || true
+[ "$_r" = 2 ] && [ "$_m" = 1 ] && [ "$_s" = "$SHA_B" ]; ok_if $? "new SHA → round 2, same-SHA resets to 1" "state=$(s_state) rc=$rc3"
+
+# The same-SHA cap fires with its OWN message, and only after the allowance is spent.
+s_reset
+rcs=""; for _i in 1 2 3; do rcs="$rcs$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=2)"; done
+[ "$rcs" = "004" ]; ok_if $? "same-SHA cap → exit 4 on the 3rd dispatch (cap 2)" "rcs=$rcs state=$(s_state)"
+s_reset; s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=1 >/dev/null
+_msg=$(env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_MAX_SAME_SHA=1 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex 2>&1 >/dev/null)
+grep -q "Same-SHA dispatch cap" <<< "$_msg"; ok_if $? "same-SHA cap names itself (not the round cap)" "msg=${_msg:0:80}"
+
+# A head that MOVED must not be refused by the same-SHA cap: the predicate has to be conditional on
+# the stored SHA still matching. Written as a bare "same >= max" this is where it breaks, and it
+# would block a genuine fix push.
+_rc=$(s_run "$SHA_B" PR_RELAY_MAX_SAME_SHA=1)
+[ "$_rc" = 0 ]; ok_if $? "new SHA is NOT blocked by a spent same-SHA allowance" "rc=$_rc state=$(s_state)"
+
+# Distinct SHAs still hit the round cap, with the round-cap message.
+s_reset
+rcs=""; for _sha in "$SHA_A" "$SHA_B" "$SHA_C"; do rcs="$rcs$(s_run "$_sha" -- --max-rounds 2)"; done
+[ "$rcs" = "004" ]; ok_if $? "3 distinct SHAs with --max-rounds 2 → exit 4 on the 3rd" "rcs=$rcs state=$(s_state)"
+
+# Legacy state (a bare integer, what every pre-upgrade cache holds).
+s_reset; printf '2' > "$SRF"
+_rc=$(s_run "$SHA_A" -- --max-rounds 3)
+read -r _s _r _m < "$SRF" 2>/dev/null || true
+[ "$_rc" = 0 ] && [ "$_r" = 2 ] && [ "$_m" = 1 ] && [ "$_s" = "$SHA_A" ]; ok_if $? "legacy below cap → adopts the SHA WITHOUT spending a round" "rc=$_rc state=$(s_state)"
+# ...and the retries it was upgraded to keep actually work (the point of not incrementing).
+_rc=$(s_run "$SHA_A" -- --max-rounds 3)
+[ "$_rc" = 0 ]; ok_if $? "legacy at max-1 still allows same-SHA retries after upgrade" "rc=$_rc state=$(s_state)"
+# A legacy file already AT the cap keeps its old meaning: stop.
+s_reset; printf '3' > "$SRF"
+_rc=$(s_run "$SHA_A" -- --max-rounds 3)
+[ "$_rc" = 4 ]; ok_if $? "legacy already at the cap → still exit 4" "rc=$_rc"
+
+# Corrupt state must fail SAFE (treated as zero), never crash the relay.
+s_reset; printf 'garbage here\n' > "$SRF"
+_rc=$(s_run "$SHA_A")
+[ "$_rc" = 0 ]; ok_if $? "corrupt state (2 tokens) → treated as zero, run proceeds" "rc=$_rc state=$(s_state)"
+s_reset; printf '%s notanumber 1\n' "$SHA_A" > "$SRF"
+_rc=$(s_run "$SHA_A")
+[ "$_rc" = 0 ]; ok_if $? "corrupt state (non-numeric counter) → treated as zero" "rc=$_rc state=$(s_state)"
+
+# Env validation, matching --max-rounds exactly: it ACCEPTS 0 (always at cap), rejects non-numeric.
+s_reset; _rc=$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=nope)
+[ "$_rc" = 2 ]; ok_if $? "non-numeric PR_RELAY_MAX_SAME_SHA → usage error" "rc=$_rc"
+s_reset; _rc=$(s_run "$SHA_A" PR_RELAY_LOG_MAX_BYTES=nope)
+[ "$_rc" = 2 ]; ok_if $? "non-numeric PR_RELAY_LOG_MAX_BYTES → usage error" "rc=$_rc"
+s_reset; _rc=$(s_run "$SHA_A" PR_RELAY_LOG_MAX_BYTES=0)
+[ "$_rc" = 2 ]; ok_if $? "zero PR_RELAY_LOG_MAX_BYTES → usage error (a 0-byte cap captures nothing)" "rc=$_rc"
+
+# A preflight-only failure still advances nothing — the two-pass split has to preserve this, which
+# the old single loop got for free by writing the state late.
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers bogus >/dev/null 2>&1
+[ ! -f "$SRF" ]; ok_if $? "preflight-only failure still advances no state" "state=$(s_state)"
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --dry-run >/dev/null 2>&1
+[ ! -f "$SRF" ]; ok_if $? "dry run advances no state" "state=$(s_state)"
+
+echo "run evidence:"
+# The run log and the per-reviewer sidecars.
+s_reset; s_run "$SHA_A" >/dev/null
+_log=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+[ -n "$_log" ] && [ -s "$_log" ]; ok_if $? "a run log is created" "log=${_log:-<none>}"
+grep -q "^.* start pr=1 " "$_log" 2>/dev/null; ok_if $? "run log records the start line" "$(head -1 "$_log" 2>/dev/null)"
+grep -q "pgid=" "$_log" 2>/dev/null; ok_if $? "run log records pid/pgid for kill forensics" "-"
+grep -q "state .* (written before dispatch)" "$_log" 2>/dev/null; ok_if $? "run log records the pre-dispatch state write" "-"
+grep -q "dispatch claude" "$_log" 2>/dev/null && grep -q "dispatch codex" "$_log" 2>/dev/null; ok_if $? "run log records one dispatch line per reviewer" "-"
+grep -q "verdict exit=0" "$_log" 2>/dev/null; ok_if $? "run log records the final verdict" "$(tail -1 "$_log" 2>/dev/null)"
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "the reviewer's body is in its own sidecar" "side=${_side:-<none>}"
+
+# The kill case this whole feature exists for: the review is on disk BEFORE the post is attempted,
+# so a failure (or a kill) between the two still leaves the text.
+s_reset; s_run "$SHA_A" GH_POST_FAIL=1 >/dev/null
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "sidecar holds the review even when posting fails" "side=${_side:-<none>}"
+
+# Every terminal path logs a verdict, including the failure ones — a log that only recorded
+# successes would be silent exactly when someone needs it.
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_SHA_DRIFT=1 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1
+_log=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+grep -q "verdict exit=3 head moved" "$_log" 2>/dev/null; ok_if $? "a post-dispatch exit-3 path logs its verdict" "$(tail -1 "$_log" 2>/dev/null)"
+
+# Under --parallel each reviewer owns its own file, so nothing interleaves. Distinct sidecars, each
+# containing exactly its own reviewer's output, is what proves it.
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex,qwen --parallel >/dev/null 2>&1
+_n=$(ls "$SCACHE"/pr-review-relay/*.review 2>/dev/null | wc -l)
+_bad=0
+for _f in "$SCACHE"/pr-review-relay/*.review; do
+  _key=$(basename "$_f" | sed 's/.*\.k_\(.*\)\.review/\1/')
+  grep -q "LGTM from $_key" "$_f" || _bad=1
+  # no other reviewer's text may appear in this file
+  for _o in claude codex qwen; do
+    [ "$_o" = "$_key" ] && continue
+    grep -q "LGTM from $_o" "$_f" && _bad=1
+  done
+done
+[ "$_n" = 3 ] && [ "$_bad" = 0 ]; ok_if $? "--parallel: 3 sidecars, no cross-contamination" "n=$_n bad=$_bad"
+
+# Truncation is a bound on the WRITE path (a runaway agent must not fill the disk), and it must not
+# be mistaken for a reviewer failure — a merely long review would otherwise fail the round.
+cat > "$BIN2/verbose-claude" <<'VB'
+#!/usr/bin/env bash
+head -c 200000 /dev/zero | tr '\0' 'x'
+VB
+chmod +x "$BIN2/verbose-claude" 2>/dev/null
+BINV="$WORK/binv"; mkdir -p "$BINV"
+for t in gh codex; do ln -sf "$BIN/$t" "$BINV/$t"; done
+ln -sf "$(command -v node)" "$BINV/node" 2>/dev/null
+cp "$BIN2/verbose-claude" "$BINV/claude"
+s_reset
+_rc=$(env PATH="$BINV:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_sz=$(wc -c < "$_side" 2>/dev/null || echo 0)
+# A truncated review is an INCOMPLETE one, so the round must NOT be clean: the findings that did
+# not fit are indistinguishable from findings that do not exist, and exit 0 claims every reviewer
+# "produced and posted a review". The text is still posted, and the round reports 3.
+[ "$_rc" = 3 ]; ok_if $? "an oversized (truncated) review makes the round NOT clean" "rc=$_rc"
+[ "$_sz" -le 6000 ]; ok_if $? "oversized review is bounded on disk by the write path" "size=$_sz"
+grep -q "truncated at 4096 bytes" "$_side" 2>/dev/null; ok_if $? "truncation is marked in the body" "-"
+grep -q "INCOMPLETE" "$_side" 2>/dev/null; ok_if $? "the marker says the review is incomplete" "-"
+
+# --reset (and the 6h staleness path it shares) must clear the WHOLE family. A fresh counter next to
+# a stale transcript would make the forensics describe the wrong session.
+# Asserted by IDENTITY, not by counting: a --reset run creates a fresh log family of its own, so
+# "the file count did not grow" passes just as happily when nothing was deleted. Capture the old
+# run's actual path and require THAT to be gone.
+s_reset; s_run "$SHA_A" >/dev/null
+_oldlog=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+_oldside=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --reset >/dev/null 2>&1
+[ -n "$_oldlog" ] && [ ! -e "$_oldlog" ] && [ -n "$_oldside" ] && [ ! -e "$_oldside" ]
+ok_if $? "--reset removes the previous run's log AND sidecars (by path)" "log=${_oldlog:-<none>} side=${_oldside:-<none>}"
+
+# The 6h staleness path shares relay_forget_key with --reset, so it must clear the same family.
+# Backdate the state file rather than waiting: the relay compares its mtime against 21600s.
+s_reset; s_run "$SHA_A" >/dev/null
+_oldlog=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+touch -d "8 hours ago" "$SRF" 2>/dev/null || touch -A -080000 "$SRF" 2>/dev/null
+s_run "$SHA_A" >/dev/null
+[ -n "$_oldlog" ] && [ ! -e "$_oldlog" ]; ok_if $? "6h staleness clears the old run family too" "log=${_oldlog:-<none>}"
+# ...and it really did start a fresh session rather than continuing the old counters.
+read -r _s _r _m < "$SRF" 2>/dev/null || true
+[ "$_r" = 1 ] && [ "$_m" = 1 ]; ok_if $? "6h staleness restarts the counters" "state=$(s_state)"
+
+# The atomic state write leaves <key>.state.XXXXXXXX temps if killed mid-write; --reset must sweep
+# those too, or they accumulate forever.
+s_reset; s_run "$SHA_A" >/dev/null
+: > "$SCACHE/pr-review-relay/owner_repo#1.state.DEADBEEF"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --reset >/dev/null 2>&1
+[ ! -e "$SCACHE/pr-review-relay/owner_repo#1.state.DEADBEEF" ]; ok_if $? "--reset sweeps orphaned state temps" "-"
+
+# NOTE ON WHAT IS *NOT* TESTED HERE. The relay refuses to write a sidecar whose path is already a
+# symlink. That check cannot be exercised honestly from this suite: the sidecar name is derived from
+# RUN_BASE, which mktemp created O_EXCL moments earlier inside a mode-700 directory we own, so the
+# path provably did not exist and no attacker could have planted anything at it. Reaching the branch
+# would need a test-only override in the script, i.e. production surface that exists solely to be
+# tested. An earlier version of this file claimed to cover it and merely asserted that the state
+# directory existed — it tested nothing, which cross-review caught. Better an acknowledged gap than
+# a green line that means nothing. The real control is the directory's ownership and mode, which is
+# enforced on every branch of the ROUND_DIR resolution.
+
+# --- the kill this feature exists for ----------------------------------------
+# SIGKILL the relay mid-round and assert the evidence survived. The relay runs in its OWN process
+# group and the GROUP is killed: killing only the parent leaves the sleeping agent stub as an orphan
+# that can still write, race these assertions, or hang the suite's EXIT trap.
+# `set -m` gives the background job its own PGID and works where `setsid` is absent (macOS).
+s_reset
+if ( set -m ) 2>/dev/null; then
+  ( set -m
+    env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_FIXED_SHA="$SHA_A" SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=60 \
+      bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1 &
+    _kid=$!
+    _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
+    printf '%s' "$_pgid" > "$WORK/killed_pgid"
+    # Wait, bounded, for the evidence we are about to assert on to exist — never a fixed sleep.
+    # Wait for the sidecar's CONTENT, not merely its existence. The sidecar is created (header
+    # first) before the agent is launched, so "the file is there" is true almost immediately and
+    # the kill would race the reviewer that this case is meant to prove survives.
+    _w=0
+    while [ "$_w" -lt 200 ]; do
+      [ -f "$SRF" ] && grep -q "LGTM from claude" "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null && break
+      sleep 0.1; _w=$((_w+1))
+    done
+    [ -n "$_pgid" ] && kill -9 -- -"$_pgid" 2>/dev/null
+    # ...and bounded-wait for the group to actually be gone before asserting.
+    _w=0
+    while [ "$_w" -lt 100 ] && kill -0 "$_kid" 2>/dev/null; do sleep 0.1; _w=$((_w+1)); done
+    wait "$_kid" 2>/dev/null
+  )
+  _pgid=$(cat "$WORK/killed_pgid" 2>/dev/null)
+  _log=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+  _side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+  [ -n "$_log" ] && grep -q " start pr=1 " "$_log" 2>/dev/null; ok_if $? "SIGKILL: the start line survived" "log=${_log:-<none>}"
+  grep -q "state .* (written before dispatch)" "$_log" 2>/dev/null; ok_if $? "SIGKILL: the pre-dispatch state write survived" "-"
+  [ -f "$SRF" ]; ok_if $? "SIGKILL: the round state file exists (the loop stays bounded)" "state=$(s_state)"
+  [ -n "$_side" ] && grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "SIGKILL: the finished reviewer's output survived" "side=${_side:-<none>}"
+  # And no orphan is left behind to write after we asserted. Scoped to the process GROUP we killed:
+  # `pgrep -f SLEEP_KEYS` scanned the whole machine and matched any unrelated process whose command
+  # line happened to contain that string — including the cross-review agents reading this very diff,
+  # which made the suite fail during review. A self-matching assertion is worse than none.
+  # Bounded wait, not an instant check: the group can briefly outlive its leader — `timeout` puts
+  # the agent in a group of its OWN (the relay's comments say so), so the group-kill does not reach
+  # it, and the stderr drain stays alive while anything still holds the write end. Both go away on
+  # their own within the stub's sleep. Asserting immediately made this flake.
+  _w=0
+  while [ "$_w" -lt 120 ] && kill -0 -"$_pgid" 2>/dev/null; do sleep 0.1; _w=$((_w+1)); done
+  ! kill -0 -"$_pgid" 2>/dev/null; ok_if $? "SIGKILL: the whole process group is gone, no orphans" "pgid=$_pgid waited=${_w}00ms"
+else
+  echo "  skip [-] SIGKILL test: no job control (set -m) available in this shell"
+fi
+unset _s _r _m _rc _log _side _sz _n _bad _key _o _f _before _old _msg _i _sha _w _kid _pgid rcs rc1 rc2 rc3
+
+# --- hermeticity, asserted rather than assumed --------------------------------
+# The header unsets the inherited git environment. If someone deletes those lines, everything here
+# still passes when run by hand and quietly corrupts the repo when run from a hook — which is the
+# exact history of this file. So check the invariant, and check the property it exists for.
+echo "hermeticity:"
+[ -z "${GIT_DIR:-}${GIT_WORK_TREE:-}${GIT_INDEX_FILE:-}" ]; ok_if $? "the inherited git environment is cleared" "GIT_DIR=${GIT_DIR:-} GIT_WORK_TREE=${GIT_WORK_TREE:-}"
+# The property: a fixture's commits land in the FIXTURE, not in whatever repo we were launched from.
+HERM="$WORK/hermetic"; rm -rf "$HERM"; mkdir -p "$HERM"
+( cd "$HERM" && git init -q . && echo x > x.txt && git add x.txt \
+    && git -c user.email=t@t -c user.name=t commit -qm "fixture-local" ) >/dev/null 2>&1
+_here=$(git -C "$HERM" log --oneline 2>/dev/null | grep -c "fixture-local")
+[ "$_here" = 1 ]; ok_if $? "a fixture's commit lands in the fixture repo" "found=$_here"
+unset _here
+
+# --- gaps round 2 asked for ---------------------------------------------------
+echo "round-2 coverage:"
+
+# Truncation must be caught by SIZE, with no SIGPIPE involved. This stub writes past the cap and
+# exits 0 of its own accord, which is exactly the case the old rc=141 check let through.
+BINQ="$WORK/binq"; mkdir -p "$BINQ"
+for t in gh codex; do ln -sf "$BIN/$t" "$BINQ/$t"; done
+ln -sf "$(command -v node)" "$BINQ/node" 2>/dev/null
+cat > "$BINQ/claude" <<'VB'
+#!/usr/bin/env bash
+# Write more than the cap, then exit 0 WITHOUT being killed: head has already taken what it wants.
+trap '' PIPE
+head -c 20000 /dev/zero | tr '\0' 'y' 2>/dev/null
+exit 0
+VB
+chmod +x "$BINQ/claude"
+s_reset
+_rc=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+[ "$_rc" = 3 ]; ok_if $? "overflow detected without SIGPIPE → round not clean" "rc=$_rc"
+grep -q "INCOMPLETE" "$_side" 2>/dev/null; ok_if $? "overflow without SIGPIPE is still marked" "-"
+
+# A cap exit must leave a verdict in the log, not just a return code.
+s_reset; s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=1 >/dev/null
+s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=1 >/dev/null
+_log=$(ls -t "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+grep -q "verdict exit=4 same-SHA cap" "$_log" 2>/dev/null; ok_if $? "an exit-4 cap hit logs its verdict" "$(tail -1 "$_log" 2>/dev/null)"
+
+# PR_RELAY_MAX_SAME_SHA=0: documented asymmetry — the same-SHA cap is only consulted once a SHA has
+# been seen before, so 0 still allows the first dispatch and blocks every retry.
+s_reset
+_r1=$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=0); _r2=$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=0)
+[ "$_r1" = 0 ] && [ "$_r2" = 4 ]; ok_if $? "MAX_SAME_SHA=0 allows the first dispatch, blocks retries" "r1=$_r1 r2=$_r2"
+
+# The GIT_CONFIG_* half of the hermeticity fix needs its own guard: deleting those exports would
+# otherwise leave the suite green here and hanging on a signing machine.
+[ "${GIT_CONFIG_COUNT:-0}" -ge 2 ]; ok_if $? "the git config override is exported" "count=${GIT_CONFIG_COUNT:-unset}"
+_sg=$( (cd "$WORK" && git config --get commit.gpgsign) 2>/dev/null )
+[ "$_sg" = "false" ]; ok_if $? "commit signing is forced off for every fixture git" "gpgsign=$_sg"
+
+# Runaway stderr must be bounded WITHOUT killing the reviewer. The stderr cap drains past the limit
+# rather than closing the pipe: closing it makes the agent's next write take SIGPIPE, which killed a
+# perfectly healthy, merely chatty reviewer that was producing a good review on stdout. The stub
+# below writes far past the cap on stderr and THEN produces its review, so it only passes if it
+# survived. (The previous version of this test was `ok_if 0 "..."` — hard-coded success, proving
+# nothing. Cross-review caught it.)
+cat > "$BINQ/claude" <<'VB'
+#!/usr/bin/env bash
+head -c 200000 /dev/zero | tr '\0' 'e' >&2 2>/dev/null
+echo "LGTM from claude."
+VB
+chmod +x "$BINQ/claude"
+s_reset
+_rc=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+[ "$_rc" = 0 ]; ok_if $? "a chatty-stderr reviewer survives the cap and the round is clean" "rc=$_rc"
+grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "...and its review still arrived in full" "side=${_side:-<none>}"
+
+# The stderr cap keeps the LAST bytes, not the first: the diagnosis is at the end of a transcript,
+# and `tail -n 15` of it is all that is ever shown. Bounding with `head` kept the opening banner and
+# discarded the actual error — which cross-review caught by reading the comment against the code.
+cat > "$BINQ/claude" <<'VB'
+#!/usr/bin/env bash
+head -c 200000 /dev/zero | tr '\0' 'e' >&2 2>/dev/null
+echo "FINAL_DIAGNOSIS_MARKER" >&2
+exit 1
+VB
+chmod +x "$BINQ/claude"
+s_reset
+_err=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>&1 >/dev/null)
+grep -q "FINAL_DIAGNOSIS_MARKER" <<< "$_err"; ok_if $? "the END of a runaway stderr is what survives the cap" "${_err: -80}"
+
+# A truncated review must still be POSTED — that is the documented promise for this path, and the
+# other truncation tests only checked the exit code, the size and the marker.
+cat > "$BINQ/claude" <<'VB'
+#!/usr/bin/env bash
+trap '' PIPE
+head -c 20000 /dev/zero | tr '\0' 'y' 2>/dev/null
+exit 0
+VB
+chmod +x "$BINQ/claude"
+s_reset; : > "$WORK/posted.log"
+env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 GH_POST_LOG="$WORK/posted.log" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+[ -s "$WORK/posted.log" ]; ok_if $? "a truncated review is still posted to the PR" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+
+# The posted body must respect the advertised cap: the capture reads one byte PAST it to detect
+# overflow, and that probe byte must not survive into what gets posted.
+_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_tot=$(wc -c < "$_side" 2>/dev/null || echo 0)
+[ "$_tot" -le $((4096 + 400)) ]; ok_if $? "the probe byte is trimmed, body respects the stated cap" "total=$_tot"
+
+# The revert case is the whole subtlety of "SHA transitions, not distinct SHAs": going back to a SHA
+# already reviewed spends a THIRD slot, because only the last SHA is stored.
+s_reset
+s_run "$SHA_A" >/dev/null; s_run "$SHA_B" >/dev/null; s_run "$SHA_A" >/dev/null
+read -r _s _r _m < "$SRF" 2>/dev/null || true
+[ "$_r" = 3 ] && [ "$_s" = "$SHA_A" ]; ok_if $? "shaA→shaB→shaA spends three rounds (transitions, not distinct SHAs)" "state=$(s_state)"
+
+# The round cap must log its verdict too, matching the same-SHA cap's coverage.
+s_reset
+s_run "$SHA_A" -- --max-rounds 1 >/dev/null
+_rc=$(s_run "$SHA_B" -- --max-rounds 1)
+_log=$(ls -t "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+[ "$_rc" = 4 ] && grep -q "verdict exit=4 round cap" "$_log" 2>/dev/null
+ok_if $? "an exit-4 ROUND cap hit logs its verdict too" "rc=$_rc $(tail -1 "$_log" 2>/dev/null)"
+
+# MAX_ROUNDS=0 is documented as "always at cap": the first dispatch on a new SHA is refused, and
+# nothing is persisted.
+s_reset
+_rc=$(s_run "$SHA_A" PR_RELAY_MAX_ROUNDS=0)
+[ "$_rc" = 4 ] && [ ! -f "$SRF" ]; ok_if $? "MAX_ROUNDS=0 refuses the first dispatch and persists nothing" "rc=$_rc state=$(s_state)"
+
+unset _r1 _r2 _sg _log _side _rc
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
