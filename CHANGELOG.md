@@ -6,7 +6,71 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Every run leaves evidence, so an interrupted round is no longer a black hole.** Relay runs do get
+  killed mid-round; every investigation of *why* has ended outside this script, so this makes the
+  next one survivable and diagnosable rather than pretending to prevent it.
+  - A timestamped **run log** per invocation under the state directory, plus **one sidecar per
+    reviewer**. The path is printed at **startup**, not just in the closing banner — a killed run
+    never reaches the banner, and that is precisely the run you want the log for.
+  - Each reviewer's stdout now **streams into its sidecar as the CLI produces it**, instead of being
+    buffered whole in a command substitution. A kill mid-reviewer used to lose everything that
+    reviewer had written; now the partial text is on disk. Best-effort: many CLIs block-buffer when
+    stdout is not a TTY (`stdbuf` is used when present, never required).
+  - One writer per file — the parent writes only the run log, each reviewer only its own sidecar —
+    so nothing interleaves under `--parallel` and no locking is needed. Names are unique per
+    invocation, so a retry after a kill cannot overwrite the evidence of the attempt that died.
+  - Every terminal path logs its verdict, including the failure paths (HEAD moved, dirty checkout,
+    reviewer failed). A log that only recorded successes would go quiet exactly when it matters.
+  - `PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) bounds a reviewer's captured output **on the write
+    path**, so a runaway agent cannot fill the disk. Truncation is marked in the body and is not
+    treated as a reviewer failure.
+
+### Fixed
+
+- **The test suite corrupted the repository it was run from, whenever it was run from a git hook.**
+  git exports `GIT_DIR` to its hooks, and that variable outranks the working directory: with it
+  set, a fixture's `cd "$repo" && git init && git commit` commits to the **host** repo and leaves
+  the fixture empty. Run from the `pre-push` gate, the suite therefore wrote junk commits
+  (`base`/`change`/`i`/`c`) and stray files onto the branch being pushed, and then failed ~16
+  assertions because its fixture repos had no content — failures that read convincingly as a defect
+  in `review-local` rather than in the harness. **Consequence: while this was broken the pre-push
+  gate could never pass, so from the day CI was disabled (2026-08-01) this repository had no
+  working test gate at all.** The inherited git environment is now cleared once, at the top of the
+  suite, and two tests assert both the invariant and the property it protects. Reproduce the old
+  behaviour with `GIT_DIR=$(git rev-parse --absolute-git-dir) bash test/test-fail-closed.sh`.
+- **The suite also inherited the developer's git config**, so on a machine with
+  `commit.gpgsign = true` and an agent-backed signer every fixture commit either hung on a signing
+  prompt that never comes — no output, forever — or failed outright. Now imposed process-scoped via
+  `GIT_CONFIG_*`, which writes nothing: a `git config` line inside a fixture whose `git init` failed
+  quietly writes into the **host** repo's config instead, and while that approach was being tried it
+  set `user.name=t` and turned commit signing off in this repository.
+
+### Changed
+
+- **Review rounds are counted per reviewed SHA, not per invocation.** Three single-reviewer runs on
+  one commit used to burn the whole cap — punishing the exact workaround you are forced into when
+  the relay keeps dying mid-round. Now a new head SHA spends a round; anything on an unchanged SHA
+  does not. It counts SHA *transitions* (only the last SHA is stored), so `shaA → shaB → shaA` costs
+  three — a revert-and-retry loop should cost.
+- **New `PR_RELAY_MAX_SAME_SHA` (default 6)** bounds dispatches on one unchanged SHA, so the more
+  permissive round counter cannot become an unbounded loop. It also exits `4`, and the ⛔ message
+  says which of the two caps fired. 6 covers a 3-reviewer panel run one at a time with a retry each.
+- **The round state is written before reviewers are dispatched**, not after the round completes, and
+  is replaced atomically via `mktemp` + `mv`. Writing late meant a killed run recorded nothing, so a
+  kill→retry loop was unbounded; writing non-atomically in the kill window could leave a truncated
+  file that the corrupt-state rule reads as zero, silently resetting both caps. Consequence, stated
+  plainly: a dispatch on a **new** SHA now spends that round even if it is killed a moment later.
+- **The state directory's ownership/mode/symlink validation now runs on every branch**, not only on
+  the `/tmp` fallback. It was defensible while the directory held one integer; it now holds review
+  text, and a group-writable `~/.cache` would leak it.
+- Existing state files (a bare integer) are read without error. A file **below** the cap adopts the
+  current SHA *without* spending a round, so anyone mid-loop when they upgrade keeps their retries;
+  one already **at** the cap still exits `4`, exactly as before.
+- `README.md`: new "Evidence and forensics" section, and the loop-safety text, exit-code table and
+  agent-loop instructions all corrected — they described `4` as the round cap only, and said a
+  dispatched round always burns a slot, both of which are now wrong.
 
 ## [1.4.0] — 2026-08-01
 
