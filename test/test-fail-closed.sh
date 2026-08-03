@@ -11,35 +11,10 @@
 #
 set -uo pipefail
 
-# HERMETICITY. This suite builds throwaway git repos under $WORK and must operate on THOSE and
-# nothing else. Two separate ways it used to escape, both of which corrupted the repository the
-# suite was launched from:
-#
-# 1. INHERITED GIT ENVIRONMENT. git exports GIT_DIR (and friends) to its hooks, and those variables
-#    outrank the working directory: with GIT_DIR set, `cd "$RLREPO" && git init && git commit`
-#    commits to the HOST repo and the fixture repo stays empty. Run from a pre-push hook this suite
-#    therefore wrote junk commits (base/change/i/c) and stray files onto the branch being pushed,
-#    and then failed ~16 assertions because the fixture repos had no content — which reads
-#    convincingly as a defect in the code under test. Reproduce the old behaviour with
-#    `GIT_DIR=$(git rev-parse --absolute-git-dir) bash test/test-fail-closed.sh`.
-#    Consequence worth stating: while this was broken, the pre-push gate could never pass, so it
-#    was gating nothing.
-#
-# 2. INHERITED GIT CONFIG. The fixtures inherit ~/.gitconfig, and on a machine with
-#    `commit.gpgsign = true` plus an agent-backed signer (e.g. 1Password's op-ssh-sign) every
-#    fixture `git commit` either blocks on a signing prompt that never comes — the suite hangs
-#    forever, no output, on a fixture that has nothing to do with signing — or fails outright.
-#
-# Both are fixed with PROCESS-SCOPED settings that write nothing to disk. In particular the config
-# is imposed with GIT_CONFIG_*, never with `git config`: a `git config` line inside a fixture whose
-# `git init` failed quietly writes into the host repo's config instead (it set user.name=t and
-# turned commit signing off in this very repository while that version was being tried).
-# The same reasoning applies to any fixture added later, which is why this is set once, here.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
-export GIT_CONFIG_COUNT=2
-export GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
-export GIT_CONFIG_KEY_1=tag.gpgsign    GIT_CONFIG_VALUE_1=false
+# Git isolation lives in test/lib-hermetic.sh, sourced below once WORK exists. It used to be an
+# inline block here with a hand-written variable list; that list named 8 of the 15 entries git
+# actually reports, and it never cleared GIT_CONFIG_PARAMETERS, which OVERRIDES the values it set.
+# The library documents the whole failure mode.
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RELAY="$HERE/../pr-review-relay"
@@ -47,6 +22,11 @@ WORK="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
 [ -n "$WORK" ] && [ -d "$WORK" ] || { echo "no temp dir" >&2; exit 1; }
 BIN="$WORK/bin"; mkdir -p "$BIN"
 trap 'rm -rf "$WORK"' EXIT
+
+# shellcheck source=lib-hermetic.sh
+. "$HERE/lib-hermetic.sh"
+relay_require_git_2_31
+relay_isolate_git "$WORK"
 
 # --- stub: gh ----------------------------------------------------------------
 cat > "$BIN/gh" <<'GH'
@@ -1916,14 +1896,130 @@ unset _s _r _m _rc _log _side _sz _n _bad _key _o _f _before _old _msg _i _sha _
 # still passes when run by hand and quietly corrupts the repo when run from a hook — which is the
 # exact history of this file. So check the invariant, and check the property it exists for.
 echo "hermeticity:"
-[ -z "${GIT_DIR:-}${GIT_WORK_TREE:-}${GIT_INDEX_FILE:-}" ]; ok_if $? "the inherited git environment is cleared" "GIT_DIR=${GIT_DIR:-} GIT_WORK_TREE=${GIT_WORK_TREE:-}"
-# The property: a fixture's commits land in the FIXTURE, not in whatever repo we were launched from.
-HERM="$WORK/hermetic"; rm -rf "$HERM"; mkdir -p "$HERM"
-( cd "$HERM" && git init -q . && echo x > x.txt && git add x.txt \
-    && git -c user.email=t@t -c user.name=t commit -qm "fixture-local" ) >/dev/null 2>&1
-_here=$(git -C "$HERM" log --oneline 2>/dev/null | grep -c "fixture-local")
-[ "$_here" = 1 ]; ok_if $? "a fixture's commit lands in the fixture repo" "found=$_here"
-unset _here
+# Every case PLANTS the hostility, proves the plant is LIVE, then isolates and asserts. The two
+# checks these replace asserted the state AFTER isolation on a machine where nothing was hostile —
+# measured: with the isolation removed the suite still reported PASS=276 FAIL=0. They only ever
+# failed when a hostile environment was exported by hand during verification, which is not coverage.
+# Each runs in a subshell so a plant cannot leak back into the suite.
+
+# 1. A planted ambient commit.gpgsign is defeated, asserted at COMMIT level as exactly %G? = N.
+#    Not "not G": a signature that fails verification reports E/B/R, which would slip past a
+#    denylist while still meaning isolation failed.
+( H="$WORK/herm1"; mkdir -p "$H"; cd "$H" || exit 1
+  git init -q . 2>/dev/null
+  export GIT_CONFIG_PARAMETERS="'commit.gpgsign=true'"
+  [ "$(git config --get commit.gpgsign 2>/dev/null)" = "true" ] || { echo PLANT_DEAD; exit 3; }
+  relay_isolate_git "$WORK"
+  git commit -q --allow-empty -m one 2>/dev/null || { echo COMMIT_DEAD; exit 4; }
+  git log -1 --format='%G?' 2>/dev/null | tail -1 ) > "$WORK/herm1.out" 2>/dev/null
+hr=$?; hv="$(tail -1 "$WORK/herm1.out" 2>/dev/null)"
+[ "$hr" = 0 ] && [ "$hv" = "N" ] \
+  && { echo "  ok   [-] a planted ambient commit.gpgsign is defeated (%G? = N)"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: planted signing survived (rc=$hr out='$hv')"; FAIL=$((FAIL+1)); }
+
+# 2. GIT_CONFIG_PARAMETERS OVERRIDES GIT_CONFIG_COUNT, so the clearing must come first. Deleting the
+#    unset loop while keeping the exports is the regression this pins.
+( cd "$WORK" || exit 1
+  export GIT_CONFIG_PARAMETERS="'commit.gpgsign=true'"
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
+  [ "$(git config --get commit.gpgsign 2>/dev/null)" = "true" ] || { echo PLANT_DEAD; exit 3; }
+  relay_isolate_git "$WORK"
+  [ -z "${GIT_CONFIG_PARAMETERS:-}" ] || { echo STILL_SET; exit 4; }
+  git config --get commit.gpgsign 2>/dev/null | tail -1 ) > "$WORK/herm2.out" 2>/dev/null
+hr=$?; hv="$(tail -1 "$WORK/herm2.out" 2>/dev/null)"
+[ "$hr" = 0 ] && [ "$hv" = "false" ] \
+  && { echo "  ok   [-] GIT_CONFIG_PARAMETERS is cleared before the controlled values are set"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: GIT_CONFIG_PARAMETERS override survived (rc=$hr out='$hv')"; FAIL=$((FAIL+1)); }
+
+# 3. The one that corrupted this repository: a planted GIT_DIR outranks the `cd`, so a fixture's
+#    commit lands in the decoy. The control proves the decoy really would have taken it.
+( DECOY="$WORK/decoy"; FIX="$WORK/fixt"; rm -rf "$DECOY" "$FIX"; mkdir -p "$DECOY" "$FIX"
+  git init -q "$DECOY" 2>/dev/null; git init -q "$FIX" 2>/dev/null
+  before=$(git -C "$DECOY" rev-list --all --count 2>/dev/null || echo 0)
+  ( cd "$FIX" && GIT_DIR="$DECOY/.git" GIT_WORK_TREE="$DECOY" git commit -q --allow-empty -m captured 2>/dev/null )
+  mid=$(git -C "$DECOY" rev-list --all --count 2>/dev/null || echo 0)
+  [ "$mid" -gt "$before" ] || { echo PLANT_DEAD; exit 3; }
+  ( cd "$FIX" && export GIT_DIR="$DECOY/.git" GIT_WORK_TREE="$DECOY" \
+    && relay_isolate_git "$WORK" && git commit -q --allow-empty -m isolated 2>/dev/null )
+  after=$(git -C "$DECOY" rev-list --all --count 2>/dev/null || echo 0)
+  fixn=$(git -C "$FIX" rev-list --all --count 2>/dev/null || echo 0)
+  [ "$after" = "$mid" ] && [ "$fixn" -ge 1 ] && echo OK || echo "LEAKED:$mid->$after fixture=$fixn" ) > "$WORK/herm3.out" 2>/dev/null
+[ "$(tail -1 "$WORK/herm3.out" 2>/dev/null)" = "OK" ] \
+  && { echo "  ok   [-] a planted GIT_DIR cannot capture a fixture's commit"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: GIT_DIR capture ($(tail -1 "$WORK/herm3.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
+
+# 4. core.excludesFile: a global ignore rule makes a fixture's file invisible to `git add`, and the
+#    test that needed it then fails for a reason nobody would guess.
+( H="$WORK/herm4"; IG="$WORK/herm4.ignore"; mkdir -p "$H"; cd "$H" || exit 1
+  printf '*.dat\n' > "$IG"
+  export GIT_CONFIG_PARAMETERS="'core.excludesFile=$IG'"
+  git init -q . 2>/dev/null; : > payload.dat
+  git add payload.dat 2>/dev/null
+  git diff --cached --name-only 2>/dev/null | grep -q payload.dat && { echo PLANT_DEAD; exit 3; }
+  relay_isolate_git "$WORK"
+  git add payload.dat 2>/dev/null
+  git diff --cached --name-only 2>/dev/null | grep -q payload.dat || { echo STILL_IGNORED; exit 4; }
+  echo OK ) > "$WORK/herm4.out" 2>/dev/null
+[ "$(tail -1 "$WORK/herm4.out" 2>/dev/null)" = "OK" ] \
+  && { echo "  ok   [-] a planted core.excludesFile cannot hide a fixture's file"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: excludesFile ($(tail -1 "$WORK/herm4.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
+
+# 5. core.hooksPath: unlike tag.gpgsign/fsmonitor/color.ui it HAS an observable effect here, so it
+#    gets a plant rather than a config assertion. The hook prints a marker, so the control proves
+#    the commit failed BECAUSE of the hook and not for some unrelated reason.
+( H="$WORK/herm5"; HK="$WORK/herm5hooks"; mkdir -p "$H" "$HK"; cd "$H" || exit 1
+  printf '#!/bin/sh\necho RELAY_HOOK_MARKER >&2\nexit 1\n' > "$HK/pre-commit"; chmod +x "$HK/pre-commit"
+  git init -q . 2>/dev/null
+  export GIT_CONFIG_PARAMETERS="'core.hooksPath=$HK'"
+  cerr=$(git commit --allow-empty -m blocked 2>&1); [ $? != 0 ] || { echo PLANT_DEAD; exit 3; }
+  case "$cerr" in *RELAY_HOOK_MARKER*) ;; *) echo PLANT_NOT_THE_HOOK; exit 3;; esac
+  relay_isolate_git "$WORK"
+  git commit -q --allow-empty -m allowed 2>/dev/null || { echo STILL_BLOCKED; exit 4; }
+  echo OK ) > "$WORK/herm5.out" 2>/dev/null
+[ "$(tail -1 "$WORK/herm5.out" 2>/dev/null)" = "OK" ] \
+  && { echo "  ok   [-] a planted core.hooksPath cannot block a fixture commit"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: hooksPath ($(tail -1 "$WORK/herm5.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
+
+# 6. The remaining three keys have no observable effect on these suites, which is exactly why they
+#    would rot unnoticed — and why asserting them post-isolation was not enough: on a machine that
+#    already has them false, deleting the exports leaves this green. Plant them true first.
+( cd "$WORK" || exit 1
+  export GIT_CONFIG_PARAMETERS="'tag.gpgsign=true' 'core.fsmonitor=true' 'color.ui=always'"
+  [ "$(git config --get tag.gpgsign 2>/dev/null)" = "true" ] || { echo PLANT_DEAD; exit 3; }
+  relay_isolate_git "$WORK"
+  printf '%s|%s|%s' "$(git config --get tag.gpgsign 2>/dev/null)" \
+                    "$(git config --get core.fsmonitor 2>/dev/null)" \
+                    "$(git config --get color.ui 2>/dev/null)" ) > "$WORK/herm6.out" 2>/dev/null
+hr=$?; hv="$(tail -1 "$WORK/herm6.out" 2>/dev/null)"
+[ "$hr" = 0 ] && [ "$hv" = "false|false|false" ] \
+  && { echo "  ok   [-] planted tag.gpgsign, fsmonitor and color.ui are all neutralised"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: tag.gpgsign/fsmonitor/color.ui (rc=$hr got '$hv')"; FAIL=$((FAIL+1)); }
+
+# 6b. The --allow-hooks branch had no coverage at all: a regression that set core.hooksPath there
+#     would break every gate test, and nothing here pinned it. It must leave hooksPath OUT of the
+#     controlled keys so a fixture's own `git config core.hooksPath` still wins.
+( cd "$WORK" || exit 1
+  relay_isolate_git "$WORK" --allow-hooks
+  [ "${GIT_CONFIG_COUNT:-0}" = 5 ] || { echo "COUNT=${GIT_CONFIG_COUNT:-unset}"; exit 3; }
+  for i in 0 1 2 3 4; do
+    v="GIT_CONFIG_KEY_$i"
+    [ "${!v}" = "core.hooksPath" ] && { echo "hooksPath still set at $i"; exit 4; }
+  done
+  echo OK ) > "$WORK/herm6b.out" 2>/dev/null
+[ "$(tail -1 "$WORK/herm6b.out" 2>/dev/null)" = "OK" ] \
+  && { echo "  ok   [-] --allow-hooks leaves core.hooksPath to the caller"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: --allow-hooks ($(tail -1 "$WORK/herm6b.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
+
+# 7. The invariant, planted: a hostile git environment is actually cleared, not merely absent.
+( cd "$WORK" || exit 1
+  export GIT_DIR="$WORK/decoy/.git" GIT_INDEX_FILE="$WORK/decoy/idx"
+  [ -n "${GIT_DIR:-}" ] || { echo PLANT_DEAD; exit 3; }
+  relay_isolate_git "$WORK"
+  [ -z "${GIT_DIR:-}${GIT_WORK_TREE:-}${GIT_INDEX_FILE:-}" ] && echo OK || echo "STILL_SET" ) > "$WORK/herm7.out" 2>/dev/null
+[ "$(tail -1 "$WORK/herm7.out" 2>/dev/null)" = "OK" ] \
+  && { echo "  ok   [-] a planted git environment is cleared"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: env not cleared ($(tail -1 "$WORK/herm7.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
+unset hr hv
 
 # --- gaps round 2 asked for ---------------------------------------------------
 echo "round-2 coverage:"
@@ -1963,7 +2059,9 @@ _r1=$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=0); _r2=$(s_run "$SHA_A" PR_RELAY_MAX
 
 # The GIT_CONFIG_* half of the hermeticity fix needs its own guard: deleting those exports would
 # otherwise leave the suite green here and hanging on a signing machine.
-[ "${GIT_CONFIG_COUNT:-0}" -ge 2 ]; ok_if $? "the git config override is exported" "count=${GIT_CONFIG_COUNT:-unset}"
+# 6 by default, 5 under --allow-hooks. The old threshold was -ge 2, left over from when the
+# block set two keys; it stayed green while saying nothing about the current intent.
+[ "${GIT_CONFIG_COUNT:-0}" = 6 ]; ok_if $? "the git config override is exported (all six keys)" "count=${GIT_CONFIG_COUNT:-unset}"
 _sg=$( (cd "$WORK" && git config --get commit.gpgsign) 2>/dev/null )
 [ "$_sg" = "false" ]; ok_if $? "commit signing is forced off for every fixture git" "gpgsign=$_sg"
 

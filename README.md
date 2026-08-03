@@ -76,6 +76,9 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
 ## 📦 Requirements
 
 - [`gh`](https://cli.github.com/) (GitHub CLI), authenticated (`gh auth login`).
+- **git 2.31+** to run the test suites. They isolate their fixtures from your git environment with
+  `GIT_CONFIG_COUNT`, which arrived in 2.31; on an older git they refuse to run rather than applying
+  half the isolation and reporting green. Using the tools themselves has no such floor.
 - [`jq`](https://jqlang.github.io/jq/) **1.7+** — `pr-review-distill` pipes the GitHub JSON through it,
   because `gh --jq` cannot emit the NUL-separated records its corpus cap needs. The `--raw-output0` flag
   it relies on landed in 1.7, and is feature-detected at startup. The other commands don't need jq.

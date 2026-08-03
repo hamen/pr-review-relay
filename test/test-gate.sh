@@ -19,24 +19,20 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 HOOK="$HERE/../.githooks/pre-push"
 [ -r "$HOOK" ] || { echo "cannot read $HOOK" >&2; exit 1; }
 
-# --- git isolation ------------------------------------------------------------
-# Same reasoning as test-fail-closed.sh, and it applies here more than anywhere: this file builds
-# git repos and runs a git hook, so it is exactly the shape that writes into the host repository
-# when git's repo-local environment leaks in. The list comes from git rather than being typed out;
-# GIT_CONFIG_COUNT is itself on that list, so the clearing must come first, and GIT_CONFIG_PARAMETERS
-# overrides GIT_CONFIG_COUNT, so leaving it set would defeat the values below.
-while IFS= read -r _v; do [ -n "$_v" ] && unset "$_v"; done < <(git rev-parse --local-env-vars)
-unset _v
-export GIT_CONFIG_COUNT=3
-export GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
-export GIT_CONFIG_KEY_1=tag.gpgsign    GIT_CONFIG_VALUE_1=false
-export GIT_CONFIG_KEY_2=color.ui       GIT_CONFIG_VALUE_2=false
-export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com
-export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
-
 WORK="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
 [ -n "$WORK" ] && [ -d "$WORK" ] || { echo "no temp dir" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
+
+# Git isolation: shared with test-fail-closed.sh so the two cannot drift. It matters here more than
+# anywhere — this file builds git repos AND runs a real git hook, which is precisely the shape that
+# writes into the host repository when git's repo-local environment leaks in.
+# shellcheck source=lib-hermetic.sh
+. "$HERE/lib-hermetic.sh"
+relay_require_git_2_31
+# --allow-hooks: this suite RUNS a hook, and env config outranks a repo's own core.hooksPath, so the
+# default neutralisation would disable the thing under test and make every refusal case pass for
+# nothing. Each fixture points hooksPath at its own copy, so ambient hooks still cannot reach us.
+relay_isolate_git "$WORK" --allow-hooks
 
 PASS=0; FAIL=0
 ok()   { echo "  ok   [-] $1"; PASS=$((PASS+1)); }
@@ -55,6 +51,20 @@ setup() { # setup [ci-body]
     && echo base > file.txt && git add -A && git commit -qm base )
 }
 push() { ( cd "$WORK/w" && git push "$@" 2>&1 ); }
+
+# The isolation above is load-bearing here too, and until now nothing in this file checked it: the
+# lines could be deleted and every case would still pass on a clean machine — the failure mode this
+# whole change is about. A plant, and the guard that the shared library actually ran.
+( cd "$WORK" || exit 1
+  export GIT_DIR="$WORK/nope/.git" GIT_CONFIG_PARAMETERS="'commit.gpgsign=true'"
+  relay_isolate_git "$WORK" --allow-hooks
+  [ -z "${GIT_DIR:-}" ] || { echo GIT_DIR_SET; exit 3; }
+  [ -z "${GIT_CONFIG_PARAMETERS:-}" ] || { echo PARAMS_SET; exit 4; }
+  [ "$(git config --get commit.gpgsign 2>/dev/null)" = "false" ] || { echo SIGNING_ON; exit 5; }
+  echo OK ) > "$WORK/iso.out" 2>/dev/null
+[ "$(tail -1 "$WORK/iso.out" 2>/dev/null)" = "OK" ] \
+  && ok "the shared git isolation is in force here too" \
+  || bad "git isolation not applied ($(tail -1 "$WORK/iso.out" 2>/dev/null))"
 
 echo "push gate tests:"
 
