@@ -72,6 +72,18 @@ out=$(push origin HEAD~1:refs/heads/other); rc=$?
   && ok "a non-HEAD commit is refused, with the reason" \
   || bad "non-HEAD push not refused (rc=$rc): $(tail -1 <<< "$out")"
 
+# 2b. `git push --all` is the case the hook's own comment names and the one most likely to be typed
+#     by accident: several refs at once, only one of which is HEAD. The refusal must cover the WHOLE
+#     push, not just the offending ref — git offers no way to accept part of it, and a hook that let
+#     the good ref through would still be shipping the untested one.
+setup
+push origin HEAD:main >/dev/null 2>&1
+( cd "$WORK/w" && git branch stale HEAD && git commit -q --allow-empty -m ahead )
+out=$(push --all origin); rc=$?
+{ [ "$rc" != 0 ] && grep -q "not your checked-out HEAD" <<< "$out"; } \
+  && ok "a --all push containing a non-HEAD ref is refused entirely" \
+  || bad "--all with a mixed ref set not refused (rc=$rc): $(tail -1 <<< "$out")"
+
 # 3. A delete-only push carries no code, so the gate has nothing to vouch for. Blocking it on an
 #    unrelated dirty tree would be a gate blocking work it has no opinion on, which is how gates get
 #    routed around.

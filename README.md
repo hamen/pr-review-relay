@@ -717,7 +717,7 @@ bin/ci                                # the gate; run it before pushing
 **There is no CI.** The GitHub Actions workflow was disabled on 2026-08-01 and its file removed, so
 `bin/ci` is the only thing between a change and `main`. It runs a syntax check over every shell file
 the repo ships — including the libraries that are *sourced* at runtime, whose errors would otherwise
-surface only when a user selects that reviewer — a capability probe for `jq --raw-output0`, and both
+surface only when a user selects that reviewer — a capability probe for `jq --raw-output0`, and the three
 test suites.
 
 `.githooks/pre-push` runs `bin/ci` for you and refuses the push if it fails. Its own behaviour is

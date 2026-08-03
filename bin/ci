@@ -15,7 +15,7 @@
 #   2. A feature probe for `jq --raw-output0` (jq 1.7+). pr-review-distill refuses to run without
 #      it, so without this probe the distill suite fails with a confusing error instead of the
 #      actual reason.
-#   3. The two test suites.
+#   3. The three test suites.
 #
 # CI_MODE=push selects the fast path, per the portfolio hook contract. For this repo there is no
 # distinction: the suites ARE the gate, they need no device or simulator, and they finish in about
