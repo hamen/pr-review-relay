@@ -54,6 +54,7 @@ for f in \
   lib-grok.sh \
   bin/ci \
   .githooks/pre-push \
+  test/lib-hermetic.sh \
   test/test-gate.sh \
   test/test-fail-closed.sh \
   test/test-distill.sh

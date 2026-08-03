@@ -129,6 +129,28 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 - `bin/ci` probes for `node` as well as `jq`. The header called a missing `node` "the honest false
   alarm" and then did not check for it, so it failed mid-suite with an indirect message.
 
+### Fixed
+
+- **The suites' git isolation was weaker than it looked, and its own tests could not tell.** The
+  version that landed with the evidence work named 8 of the 15 variables `git rev-parse
+  --local-env-vars` reports, and never cleared `GIT_CONFIG_PARAMETERS` — which git sets for child
+  processes whenever anything up the tree ran `git -c …`, and which **overrides** `GIT_CONFIG_COUNT`.
+  So an ambient override defeated the isolation silently. Measured with the isolation removed
+  entirely, the suite still reported `PASS=276 FAIL=0`: the two hermeticity checks asserted the state
+  after isolation on a machine where nothing was hostile, so they proved nothing.
+  - Isolation now lives in `test/lib-hermetic.sh`, **sourced** by both suites rather than copied —
+    a copy keeps passing after the original is deleted, which is the same failure it exists to
+    prevent. The repo had drifted to two suites with two different isolation strengths.
+  - The variable list comes from git. Ordering is load-bearing: `GIT_CONFIG_COUNT` is itself on that
+    list, so the clearing must come first. A `git rev-parse` failure now aborts instead of leaving
+    the loop a silent no-op.
+  - Also neutralised: `core.hooksPath`, `core.excludesFile` (a global `*.dat` ignore rule makes a
+    fixture's file invisible to `git add`), `core.fsmonitor`, `color.ui`.
+  - Seven checks, each **planting** the hostility and proving the plant is live before asserting.
+    With the clearing removed, six of the seven fail; before this change, none did.
+  - git **2.31+** is required to run the suites and documented in the README; below it they refuse
+    rather than half-applying the isolation.
+
 ## [1.4.0] — 2026-08-01
 
 ### Added
