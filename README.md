@@ -481,7 +481,7 @@ no counter to reset; their leftovers expire on the same 6h clock — see **Reten
 
 ## 🔦 Evidence and forensics
 
-Every run writes, under the same state directory. The log is opened — and its path printed — as
+Every run writes the files below under the same state directory. The log is opened — and its path printed — as
 soon as the PR number and repository are known, which is **before** the head-SHA read and before
 `gh pr diff`: those are the calls that can hang, and a hang there used to leave nothing at all. It
 cannot be opened any earlier, because the file name is derived from the repository, and that itself
@@ -514,11 +514,17 @@ all (a dry run, one that resolves no reviewer, one killed before the pre-dispatc
 sweep that expires those leftovers on their own 6h clock. Expiry is by **family**: a log and its
 sidecars go together, so you never read a transcript whose log is gone.
 
-Two honest limits. The sweep is **lazy and per-PR**: it runs when that PR is relayed again, so a PR
-never touched again keeps its files indefinitely — `--reset` or a manual delete is the answer there.
-And a run that stays blocked for more than 6h without reaching the state write (a hung `gh pr diff`,
-say) can have its log swept by a later run while it is still alive; the alternative was a second,
-divergent notion of "stale", which is worse.
+Three honest limits, all following from one rule: **the sweep runs only when that PR has no `.round`
+file at all.** That is deliberate — a live session's first-round log is legitimately older than 6h,
+and age-deleting it would destroy the forensics of a run still in progress.
+
+- It is **lazy and per-PR**: it runs when that PR is relayed again, so a PR never touched again keeps
+  its files indefinitely. `--reset` or a manual delete is the answer there.
+- An orphan created **while a session is alive** is not collected on the 6h clock either — it waits
+  for `--reset`, or for the session's own state to go stale, which then clears the whole key.
+- A run blocked for more than 6h *before* it writes state (a hung `gh pr diff`, say) can have its log
+  swept by a later run while it is still alive — but only if no `.round` file exists for that PR.
+  The alternative was a second, divergent notion of "stale", which is worse.
 
 A PR reviewed many times inside one session accumulates one log plus one sidecar per reviewer per
 run, holding review text, until one of the above fires. Output is capped by

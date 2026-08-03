@@ -54,6 +54,7 @@ cat > "$BIN/gh" <<'GH'
 case "$1 $2" in
   "pr view")
     if printf '%s\n' "$@" | grep -q headRefOid; then
+      [ -n "${GH_SHA_HANG:-}" ] && sleep 600
       # Local-context tests pin the PR head to the test repo's real HEAD so the
       # LOCAL_CONTEXT gate (HEAD == PR head, clean tree) passes.
       if [ -n "${GH_LOCAL_HEAD:-}" ]; then echo "$GH_LOCAL_HEAD"; exit 0; fi
@@ -1689,6 +1690,19 @@ s_run "$SHA_A" >/dev/null
 [ -n "$_livelog" ] && [ -e "$_livelog" ]
 ok_if $? "a live session's own old log is NOT swept" "log=${_livelog:-<none>}"
 
+# The cost of that rule, asserted rather than left implicit: an orphan created WHILE a session is
+# alive is not collected either, because the sweep is gated on the state file being absent. It waits
+# for --reset or for the session itself to go stale. Documented in the README; pinned here so a
+# later "just always sweep by age" cannot quietly take the live-session guarantee away with it.
+s_reset; s_run "$SHA_A" >/dev/null          # a session with state
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --dry-run >/dev/null 2>&1
+_dryorphan=$(latest_log)
+touch -d "7 hours ago" "$_dryorphan" 2>/dev/null || touch -A -070000 "$_dryorphan" 2>/dev/null
+s_run "$SHA_A" >/dev/null
+[ -n "$_dryorphan" ] && [ -e "$_dryorphan" ]
+ok_if $? "an orphan born inside a live session waits for --reset (known limit)" "log=${_dryorphan:-<none>}"
+
 # --- the log exists before the network calls that can hang -------------------
 # `gh pr view` for the head SHA and `gh pr diff` both ran BEFORE the log was created, so a hang or a
 # kill during either left no evidence at all — while the README promised every run leaves some. The
@@ -1716,6 +1730,30 @@ if ( set -m ) 2>/dev/null; then
   ok_if $? "a run killed during \`gh pr diff\` still left its log" "log=${_hlog:-<none>}"
   grep -q "start pr=1 " "$_hlog" 2>/dev/null
   ok_if $? "that log already carries the start line" "$(head -1 "$_hlog" 2>/dev/null)"
+  # Proves the ORDER, not just the presence: the detailed start line quotes the head SHA, so its
+  # absence is what says the log was opened before that read rather than after it.
+  ! grep -q "start sha=" "$_hlog" 2>/dev/null
+  ok_if $? "and does NOT yet carry the head-SHA start line" "$(cat "$_hlog" 2>/dev/null | tr '\n' '|')"
+
+  # The other half of the promise. The head-SHA read runs before the diff, so hanging the diff
+  # alone never proved the log beats it.
+  ( set -m
+    s_reset
+    env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_SHA_HANG=1 \
+      bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1 &
+    _kid=$!
+    _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
+    _w=0
+    while [ "$_w" -lt 100 ] && [ -z "$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null)" ]; do
+      sleep 0.1; _w=$((_w+1))
+    done
+    kill -9 -"$_pgid" 2>/dev/null || kill -9 "$_kid" 2>/dev/null
+    wait "$_kid" 2>/dev/null || true
+  )
+  _slog2=$(latest_log)
+  [ -n "$_slog2" ] && grep -q "start pr=1 " "$_slog2" 2>/dev/null
+  ok_if $? "a run killed during the head-SHA read still left its log" "log=${_slog2:-<none>}"
 else
   echo "  skip [-] mid-diff kill test: no job control (set -m) available in this shell"
   SKIP=$((SKIP+1))
@@ -1738,6 +1776,18 @@ env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter
 _clog=$(latest_log)
 grep -q "verdict exit=1 context file not found" "$_clog" 2>/dev/null
 ok_if $? "a missing context file logs its verdict" "$(tail -1 "$_clog" 2>/dev/null)"
+
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  LINK_DIFF_FALLBACK_MAX_BYTES=notanumber \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1
+_blog=$(latest_log)
+grep -q "verdict exit=2 invalid LINK_DIFF_FALLBACK_MAX_BYTES" "$_blog" 2>/dev/null
+ok_if $? "a bad LINK_DIFF_FALLBACK_MAX_BYTES logs its verdict" "$(tail -1 "$_blog" 2>/dev/null)"
+# The three remaining post-log exits (both mktemp -d failures and the round-state write) are NOT
+# covered: reaching them needs a full or read-only temp filesystem, and faking that would mean a
+# test-only hook in production code. They carry their verdict line; this note is the honest record
+# that nothing asserts it.
 
 # The unreadable-SHA-at-start verdict was the one exit-3 path with no assertion on it, while its
 # sibling (`head moved`) had one.

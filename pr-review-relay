@@ -319,11 +319,16 @@ if [ ! -f "$ROUND_FILE" ]; then
     # No nullglob: an unmatched glob arrives as the literal pattern, and this branch is now the
     # common case (it fires whenever there is no state file at all).
     [ -e "$_orphan" ] || continue
-    if [ $(( $(date +%s) - $(_round_mtime "$_orphan") )) -gt 21600 ]; then
+    # _round_mtime prints 0 when it cannot stat. Treating that as the epoch would delete the
+    # file immediately, which is the wrong direction for evidence: an unreadable mtime is a
+    # reason to keep, not to collect.
+    _omt="$(_round_mtime "$_orphan")"
+    [ "$_omt" -gt 0 ] 2>/dev/null || continue
+    if [ $(( $(date +%s) - _omt )) -gt 21600 ]; then
       rm -f "$_orphan" "$_orphan".* 2>/dev/null || true
     fi
   done
-  unset _orphan
+  unset _orphan _omt
 fi
 
 # --- Run evidence: one log for this invocation, one sidecar per reviewer -----
@@ -367,7 +372,7 @@ echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-no
 # Per-reviewer outcome, written as files so it survives subshells under --parallel:
 # $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
 # hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
-STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
+STATUS_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create outcome temp dir"; echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
 # Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
 # trap already installed STATUS_DIR would be left behind.
 trap 'rm -rf "$STATUS_DIR"' EXIT
@@ -391,7 +396,7 @@ trap 'rm -rf "$STATUS_DIR"' EXIT
 # STATUS_DIR. Don't allocate (or widen the trap) when neither is selected.
 ATTACH_DIR=""
 if opencode_is_selected || grok_is_selected; then
-  ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
+  ATTACH_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create attachment temp dir"; echo "cannot create temp dir for attachments" >&2; exit 1; }
   trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
   relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
 fi
@@ -600,7 +605,7 @@ PROMPT="${CONTEXT_BLOCK}${BASE}"
 # set 0 to always omit).
 LINK_DIFF_FALLBACK_MAX_BYTES="${LINK_DIFF_FALLBACK_MAX_BYTES:-100000}"
 # Validated: a non-numeric value would blow up in the arithmetic below.
-case "$LINK_DIFF_FALLBACK_MAX_BYTES" in ''|*[!0-9]*) echo "invalid LINK_DIFF_FALLBACK_MAX_BYTES: '$LINK_DIFF_FALLBACK_MAX_BYTES' (want bytes)" >&2; exit 2;; esac
+case "$LINK_DIFF_FALLBACK_MAX_BYTES" in ''|*[!0-9]*) relay_log "verdict exit=2 invalid LINK_DIFF_FALLBACK_MAX_BYTES"; echo "invalid LINK_DIFF_FALLBACK_MAX_BYTES: '$LINK_DIFF_FALLBACK_MAX_BYTES' (want bytes)" >&2; exit 2;; esac
 if [ "$MODE" = link ]; then
   _diff_bytes=$(printf '%s' "$DIFF" | wc -c | tr -d ' ')
   if [ "$_diff_bytes" -le "$LINK_DIFF_FALLBACK_MAX_BYTES" ]; then
@@ -880,12 +885,12 @@ if [ "$DRY" = 0 ] && [ "$would_run" -gt 0 ]; then
   # and the rename are checked by hand — an unnoticed failure here would dispatch reviewers with no
   # durable state, which is the exact hole this block closes.
   _state_tmp="$(mktemp "$ROUND_DIR/$ROUND_KEY.state.XXXXXXXX" 2>/dev/null)" || {
-    echo "✖ cannot create round-state temp file in '$ROUND_DIR'" >&2; exit 1; }
+    relay_log "verdict exit=1 cannot create round-state temp"; echo "✖ cannot create round-state temp file in '$ROUND_DIR'" >&2; exit 1; }
   if ! printf '%s %s %s\n' "$HEAD_SHA" "$NEXT_ROUND" "$NEXT_SAME" > "$_state_tmp"; then
-    rm -f "$_state_tmp"; echo "✖ cannot write round state" >&2; exit 1
+    rm -f "$_state_tmp"; relay_log "verdict exit=1 cannot write round state"; echo "✖ cannot write round state" >&2; exit 1
   fi
   if ! mv -f "$_state_tmp" "$ROUND_FILE"; then
-    rm -f "$_state_tmp"; echo "✖ cannot install round state at '$ROUND_FILE'" >&2; exit 1
+    rm -f "$_state_tmp"; relay_log "verdict exit=1 cannot install round state"; echo "✖ cannot install round state at '$ROUND_FILE'" >&2; exit 1
   fi
   relay_log "state sha=${HEAD_SHA:0:7} round=$NEXT_ROUND same=$NEXT_SAME (written before dispatch)"
 else
