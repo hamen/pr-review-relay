@@ -572,8 +572,8 @@ ever holds short event lines. If you want them gone sooner, `--reset` on the PR,
 
 | Code | Meaning | What to do |
 |------|---------|------------|
-| `0` | Every reviewer that ran produced **and posted** a review, and the PR head didn't move. | Everyone *ran* — not that it's approved. Read the reviews, resolve every Blocker/Should-fix, then merge. |
-| `3` | Not a clean round: a reviewer returned empty / timed out / exited non-zero / failed to post, **or** an explicitly-requested reviewer was missing, **or** no reviewer ran, **or** HEAD moved mid-round (reviews now describe stale code). | Fix the cause and re-run; don't treat as reviewed. |
+| `0` | Every reviewer that ran produced **and posted** a review, and the PR head didn't move. May be a **PARTIAL** panel — a reviewer can be skipped (CLI not installed) or [benched](#-benched-reviewers-out-of-quota) (out of quota). The banner says which, and how many. | Everyone *ran* — not that it's approved. Read the reviews, resolve every Blocker/Should-fix, then merge. |
+| `3` | Not a clean round: a reviewer returned empty / timed out / exited non-zero / failed to post, **or** an explicitly-requested reviewer was missing (**except** when it is [benched](#-benched-reviewers-out-of-quota) for quota — that is the one carve-out, and the round can still exit `0` as PARTIAL), **or** no reviewer ran, **or** HEAD moved mid-round (reviews now describe stale code). | Fix the cause and re-run; don't treat as reviewed. |
 | `4` | A loop cap was reached — either the **round** cap (`--max-rounds`, counted per reviewed SHA) or the **same-SHA dispatch** cap (`PR_RELAY_MAX_SAME_SHA`). The message says which. | Stop looping; escalate to a human. On the same-SHA cap, pushing a fix is what unblocks it. |
 | `1`/`2` | Usage/precondition error (no `gh`, no PR, empty diff, bad arg). | Fix the invocation. |
 

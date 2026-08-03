@@ -8,6 +8,25 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Added
 
+- **An agent that is out of quota is benched instead of failing every round for days.** A
+  quota-exhausted reviewer used to fail on every repo until its quota reset — and because a failed
+  reviewer makes the round not clean, the verdict was worthless even when every other review had
+  arrived. The first run that sees the quota error now records the agent with an expiry parsed from
+  its own message ("Resets in 56h55m40s"), and later runs drop it until then. It expires by itself,
+  so nothing has to be remembered or undone.
+
+  **This changes a documented contract.** `--reviewers` normally makes a missing reviewer a hard
+  failure; a benched one is now the single exception, because `ship-feature` always passes
+  `--reviewers` and without the carve-out the bench would be inert. A named reviewer is dropped
+  **only** when out of quota, **only** until the time it reported, and **never silently**: it is
+  announced every round and the verdict reads `PARTIAL cross-review`. An empty panel is still
+  exit `3`, a timeout still fails the round, and a bench that cannot be persisted converts that
+  round's discoveries to failures rather than exiting clean with nothing recorded.
+
+  The bench is global and time-based, so **`--reset` does not clear it** — `--reset` forgets one
+  PR's round counter. To force a reviewer back early, delete its line from
+  `$XDG_CACHE_HOME/pr-review-relay/benched`.
+
 - **Every run leaves evidence, so an interrupted round is no longer a black hole.** Relay runs do get
   killed mid-round; every investigation of *why* has ended outside this script, so this makes the
   next one survivable and diagnosable rather than pretending to prevent it.
