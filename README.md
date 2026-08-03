@@ -472,7 +472,8 @@ Strictly the round counter counts **SHA transitions**: only the last SHA is stor
 
 State lives in `$XDG_CACHE_HOME/pr-review-relay/` (or `$HOME/.cache/…`), **auto-resets after 6h** of
 inactivity, and can be cleared with `--reset`. Both discard the run logs for that PR at the same
-time, so you never read a fresh counter next to a stale transcript.
+time, so you never read a fresh counter next to a stale transcript. Runs that never wrote state have
+no counter to reset; their leftovers expire on the same 6h clock — see **Retention** below.
 
 > **Concurrency:** the counters are an unlocked read-modify-write. Two relays racing on the same PR
 > can lose an update and therefore **undercount** dispatches, weakening *both* guards. Don't run
@@ -480,7 +481,11 @@ time, so you never read a fresh counter next to a stale transcript.
 
 ## 🔦 Evidence and forensics
 
-Every run writes, under the same state directory:
+Every run writes, under the same state directory. The log is opened — and its path printed — as
+soon as the PR number and repository are known, which is **before** the head-SHA read and before
+`gh pr diff`: those are the calls that can hang, and a hang there used to leave nothing at all. It
+cannot be opened any earlier, because the file name is derived from the repository, and that itself
+comes from `gh` — so a hang while resolving the PR still leaves no trace.
 
 - `<key>.run.XXXXXXXX` — the **run log**: timestamped start (PR, SHA, reviewer list, PID, PGID), each
   dispatch, the state decision, each reviewer's outcome, and the final verdict — including the
@@ -503,13 +508,24 @@ between two writes. And the sidecar-path symlink refusal is belt-and-braces that
 the path comes from a `mktemp` that created it `O_EXCL` moments earlier inside a mode-700 directory
 you own, so it provably did not exist — the real control is the directory, not the check.
 
-**Retention.** Every invocation leaves its own files, and they are only removed when that PR's state
-is discarded: by `--reset`, or by the 6h inactivity reset. A PR that is reviewed many times inside
-one session therefore accumulates one log plus one sidecar per reviewer per run, holding review text,
-until either of those fires. Output is capped by `PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) per
-reviewer, on the write path and for stderr too, so a single runaway agent cannot fill the disk; the
-cap does not apply to the run log itself, which only ever holds short event lines. If you want them
-gone sooner, `--reset` on the PR, or delete `<key>.run.*` from the state directory.
+**Retention.** Every invocation leaves its own files. They are removed when that PR's state is
+discarded — by `--reset` or by the 6h inactivity reset — and, for runs that never wrote any state at
+all (a dry run, one that resolves no reviewer, one killed before the pre-dispatch write), by a
+sweep that expires those leftovers on their own 6h clock. Expiry is by **family**: a log and its
+sidecars go together, so you never read a transcript whose log is gone.
+
+Two honest limits. The sweep is **lazy and per-PR**: it runs when that PR is relayed again, so a PR
+never touched again keeps its files indefinitely — `--reset` or a manual delete is the answer there.
+And a run that stays blocked for more than 6h without reaching the state write (a hung `gh pr diff`,
+say) can have its log swept by a later run while it is still alive; the alternative was a second,
+divergent notion of "stale", which is worse.
+
+A PR reviewed many times inside one session accumulates one log plus one sidecar per reviewer per
+run, holding review text, until one of the above fires. Output is capped by
+`PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) per reviewer, on the write path and for stderr too, so a
+single runaway agent cannot fill the disk; the cap does not apply to the run log itself, which only
+ever holds short event lines. If you want them gone sooner, `--reset` on the PR, or delete
+`<key>.run.*` from the state directory.
 
 ## 🔍 How it works
 

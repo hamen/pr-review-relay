@@ -78,7 +78,9 @@ case "$1 $2" in
     elif printf '%s\n' "$@" | grep -q number; then echo 1
     fi ;;
   "repo view") echo "owner/repo" ;;
-  "pr diff")   echo "diff --git a/x b/x"; echo "+change" ;;
+  # GH_DIFF_HANG makes the diff fetch block forever, so a test can kill the relay
+  # *during* the network call and assert what evidence already exists on disk.
+  "pr diff")   [ -n "${GH_DIFF_HANG:-}" ] && sleep 600; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0; echo "diff --git a/x b/x"; echo "+change" ;;
   "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted" >> "$GH_POST_LOG"; exit 0 ;;
   *) echo "" ;;
 esac
@@ -123,7 +125,7 @@ AG
 for a in claude codex cursor-agent agy opencode qwen grok; do make_agent "$a"; done
 
 # --- test harness ------------------------------------------------------------
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 # Assertions use `grep -q ... <<< "$var"`, never `printf ... | grep -q`. Under
 # `set -o pipefail`, grep -q exits as soon as it matches, printf takes SIGPIPE, and
 # the pipeline reports 141 — so a SUCCESSFUL match reads as a failed assertion. It
@@ -1466,6 +1468,14 @@ s_run() { # s_run <sha> [extra env...] -- [relay args...]; echoes the exit code
   echo $?
 }
 s_state() { cat "$SRF" 2>/dev/null || echo "<missing>"; }
+# Newest run log / sidecar for the shared cache, by MTIME.
+#
+# Plain `ls | head -1` is lexical, and mktemp's suffix is random, so which of two files it returns
+# is arbitrary. That is only harmless while exactly one exists — and s_reset does not run between
+# every pair of runs here, so more than one regularly does. Sorting by time makes "the run I just
+# made" unambiguous.
+latest_log()  { ls -t "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1; }
+latest_side() { ls -t "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1; }
 ok_if() { # ok_if <cond-result 0/1> <desc> <detail>
   if [ "$1" = 0 ]; then echo "  ok   [-] $2"; PASS=$((PASS+1)); else echo "  FAIL $2 ($3)"; FAIL=$((FAIL+1)); fi
 }
@@ -1549,20 +1559,20 @@ env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter
 echo "run evidence:"
 # The run log and the per-reviewer sidecars.
 s_reset; s_run "$SHA_A" >/dev/null
-_log=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+_log=$(latest_log)
 [ -n "$_log" ] && [ -s "$_log" ]; ok_if $? "a run log is created" "log=${_log:-<none>}"
 grep -q "^.* start pr=1 " "$_log" 2>/dev/null; ok_if $? "run log records the start line" "$(head -1 "$_log" 2>/dev/null)"
 grep -q "pgid=" "$_log" 2>/dev/null; ok_if $? "run log records pid/pgid for kill forensics" "-"
 grep -q "state .* (written before dispatch)" "$_log" 2>/dev/null; ok_if $? "run log records the pre-dispatch state write" "-"
 grep -q "dispatch claude" "$_log" 2>/dev/null && grep -q "dispatch codex" "$_log" 2>/dev/null; ok_if $? "run log records one dispatch line per reviewer" "-"
 grep -q "verdict exit=0" "$_log" 2>/dev/null; ok_if $? "run log records the final verdict" "$(tail -1 "$_log" 2>/dev/null)"
-_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_side=$(latest_side)
 grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "the reviewer's body is in its own sidecar" "side=${_side:-<none>}"
 
 # The kill case this whole feature exists for: the review is on disk BEFORE the post is attempted,
 # so a failure (or a kill) between the two still leaves the text.
 s_reset; s_run "$SHA_A" GH_POST_FAIL=1 >/dev/null
-_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_side=$(latest_side)
 grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "sidecar holds the review even when posting fails" "side=${_side:-<none>}"
 
 # Every terminal path logs a verdict, including the failure ones — a log that only recorded
@@ -1570,7 +1580,7 @@ grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "sidecar holds the rev
 s_reset
 env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_SHA_DRIFT=1 \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1
-_log=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+_log=$(latest_log)
 grep -q "verdict exit=3 head moved" "$_log" 2>/dev/null; ok_if $? "a post-dispatch exit-3 path logs its verdict" "$(tail -1 "$_log" 2>/dev/null)"
 
 # Under --parallel each reviewer owns its own file, so nothing interleaves. Distinct sidecars, each
@@ -1606,7 +1616,7 @@ s_reset
 _rc=$(env PATH="$BINV:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
-_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_side=$(latest_side)
 _sz=$(wc -c < "$_side" 2>/dev/null || echo 0)
 # A truncated review is an INCOMPLETE one, so the round must NOT be clean: the findings that did
 # not fit are indistinguishable from findings that do not exist, and exit 0 claims every reviewer
@@ -1622,8 +1632,8 @@ grep -q "INCOMPLETE" "$_side" 2>/dev/null; ok_if $? "the marker says the review 
 # "the file count did not grow" passes just as happily when nothing was deleted. Capture the old
 # run's actual path and require THAT to be gone.
 s_reset; s_run "$SHA_A" >/dev/null
-_oldlog=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
-_oldside=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_oldlog=$(latest_log)
+_oldside=$(latest_side)
 env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --reset >/dev/null 2>&1
 [ -n "$_oldlog" ] && [ ! -e "$_oldlog" ] && [ -n "$_oldside" ] && [ ! -e "$_oldside" ]
@@ -1632,7 +1642,7 @@ ok_if $? "--reset removes the previous run's log AND sidecars (by path)" "log=${
 # The 6h staleness path shares relay_forget_key with --reset, so it must clear the same family.
 # Backdate the state file rather than waiting: the relay compares its mtime against 21600s.
 s_reset; s_run "$SHA_A" >/dev/null
-_oldlog=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+_oldlog=$(latest_log)
 touch -d "8 hours ago" "$SRF" 2>/dev/null || touch -A -080000 "$SRF" 2>/dev/null
 s_run "$SHA_A" >/dev/null
 [ -n "$_oldlog" ] && [ ! -e "$_oldlog" ]; ok_if $? "6h staleness clears the old run family too" "log=${_oldlog:-<none>}"
@@ -1647,6 +1657,112 @@ s_reset; s_run "$SHA_A" >/dev/null
 env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --reset >/dev/null 2>&1
 [ ! -e "$SCACHE/pr-review-relay/owner_repo#1.state.DEADBEEF" ]; ok_if $? "--reset sweeps orphaned state temps" "-"
+
+# --- orphaned log families ---------------------------------------------------
+# The 6h path above is reached only when a ROUND_FILE exists. State is written only when
+# `DRY = 0 && would_run > 0`, so a dry run — or one that dispatches nobody, or one killed before the
+# pre-dispatch write — leaves a log family that NOTHING ever collects: no state file means no
+# staleness check, and the files sit there until someone passes --reset for that key.
+#
+# Expiry is per FAMILY, keyed on the log's own mtime, and it removes the sidecars with it. Per-FILE
+# expiry would break the same invariant relay_forget_key exists to protect: a surviving sidecar next
+# to a deleted log describes a session that no longer has a transcript.
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --dry-run >/dev/null 2>&1
+_orphan=$(latest_log)
+: > "$_orphan.k_claude.review"     # a sidecar of the same family, to prove both go together
+[ ! -f "$SRF" ]; ok_if $? "the orphan fixture really has no state file" "state=$(s_state)"
+touch -d "7 hours ago" "$_orphan" "$_orphan.k_claude.review" 2>/dev/null \
+  || touch -A -070000 "$_orphan" "$_orphan.k_claude.review" 2>/dev/null
+s_run "$SHA_A" >/dev/null
+[ -n "$_orphan" ] && [ ! -e "$_orphan" ] && [ ! -e "$_orphan.k_claude.review" ]
+ok_if $? "an orphaned log family expires after 6h, sidecars included" "log=${_orphan:-<none>}"
+
+# The other half of the rule, and the one a naive fix breaks: a session that IS alive keeps its
+# history. Round 1's log is legitimately older than 6h on a long session, and deleting it would
+# destroy the forensics of a run still in progress. Live is defined by the state file, not by age.
+s_reset; s_run "$SHA_A" >/dev/null
+_livelog=$(latest_log)
+touch -d "7 hours ago" "$_livelog" 2>/dev/null || touch -A -070000 "$_livelog" 2>/dev/null
+s_run "$SHA_A" >/dev/null
+[ -n "$_livelog" ] && [ -e "$_livelog" ]
+ok_if $? "a live session's own old log is NOT swept" "log=${_livelog:-<none>}"
+
+# --- the log exists before the network calls that can hang -------------------
+# `gh pr view` for the head SHA and `gh pr diff` both ran BEFORE the log was created, so a hang or a
+# kill during either left no evidence at all — while the README promised every run leaves some. The
+# relay now opens the log as soon as REPO and PR are known. Killing it mid-diff is the proof.
+# Same shape as the SIGKILL test below: own process group, bounded wait, reap.
+if ( set -m ) 2>/dev/null; then
+  ( set -m
+    s_reset
+    env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_FIXED_SHA="$SHA_A" GH_DIFF_HANG=1 \
+      bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1 &
+    _kid=$!
+    _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
+    # Wait for the log to appear rather than sleeping a fixed amount: on a slow box a fixed sleep
+    # either flakes or wastes seconds.
+    _w=0
+    while [ "$_w" -lt 100 ] && [ -z "$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null)" ]; do
+      sleep 0.1; _w=$((_w+1))
+    done
+    kill -9 -"$_pgid" 2>/dev/null || kill -9 "$_kid" 2>/dev/null
+    wait "$_kid" 2>/dev/null || true
+  )
+  _hlog=$(latest_log)
+  [ -n "$_hlog" ] && [ -s "$_hlog" ]
+  ok_if $? "a run killed during \`gh pr diff\` still left its log" "log=${_hlog:-<none>}"
+  grep -q "start pr=1 " "$_hlog" 2>/dev/null
+  ok_if $? "that log already carries the start line" "$(head -1 "$_hlog" 2>/dev/null)"
+else
+  echo "  skip [-] mid-diff kill test: no job control (set -m) available in this shell"
+  SKIP=$((SKIP+1))
+fi
+
+# --- every terminal path under an open log writes its verdict ----------------
+# Opening the log earlier put two more early exits underneath it. A log that stops mid-sentence is
+# the thing this feature exists to prevent, so both must say why they stopped.
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  GH_EMPTY_DIFF=1 bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1
+_elog=$(latest_log)
+grep -q "verdict exit=1 empty diff" "$_elog" 2>/dev/null
+ok_if $? "an empty diff logs its verdict" "$(tail -1 "$_elog" 2>/dev/null)"
+
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex \
+  --context-file "$WORK/no-such-context.md" >/dev/null 2>&1
+_clog=$(latest_log)
+grep -q "verdict exit=1 context file not found" "$_clog" 2>/dev/null
+ok_if $? "a missing context file logs its verdict" "$(tail -1 "$_clog" 2>/dev/null)"
+
+# The unreadable-SHA-at-start verdict was the one exit-3 path with no assertion on it, while its
+# sibling (`head moved`) had one.
+s_reset
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" GH_SHA_FAIL=start \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1
+_slog=$(latest_log)
+grep -q "verdict exit=3 head sha unreadable at start" "$_slog" 2>/dev/null
+ok_if $? "an unreadable head SHA at start logs its verdict" "$(tail -1 "$_slog" 2>/dev/null)"
+
+# --- the state directory is hardened on EVERY branch -------------------------
+# The ownership/mode checks used to run only on the shared /tmp fallback; PR #20 extended them to
+# every branch, but the suite only ever exercised them through /tmp. Pre-create the directory the
+# relay actually protects — $XDG_CACHE_HOME/pr-review-relay, not $XDG_CACHE_HOME — group/other
+# writable. `mkdir -m 700 -p` does NOT change the mode of a directory that already exists, so it is
+# the repair branch that has to fire. Pointing only the parent at 0777 would assert nothing: the
+# relay would create a fresh child already at 700 and the test would pass without testing.
+_hard="$WORK/hardcache"
+rm -rf "$_hard"; mkdir -p "$_hard/pr-review-relay"; chmod 0777 "$_hard/pr-review-relay"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$_hard" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1
+_hmode="$(stat -c %a "$_hard/pr-review-relay" 2>/dev/null || stat -f %Lp "$_hard/pr-review-relay" 2>/dev/null || echo '')"
+_hmode="${_hmode: -3}"
+[ "$_hmode" = "700" ]
+ok_if $? "a pre-existing state dir left 0777 is repaired to 700" "mode=${_hmode:-<unknown>}"
 
 # NOTE ON WHAT IS *NOT* TESTED HERE. The relay refuses to write a sidecar whose path is already a
 # symlink. That check cannot be exercised honestly from this suite: the sidecar name is derived from
@@ -1688,8 +1804,8 @@ if ( set -m ) 2>/dev/null; then
     wait "$_kid" 2>/dev/null
   )
   _pgid=$(cat "$WORK/killed_pgid" 2>/dev/null)
-  _log=$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
-  _side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+  _log=$(latest_log)
+  _side=$(latest_side)
   [ -n "$_log" ] && grep -q " start pr=1 " "$_log" 2>/dev/null; ok_if $? "SIGKILL: the start line survived" "log=${_log:-<none>}"
   grep -q "state .* (written before dispatch)" "$_log" 2>/dev/null; ok_if $? "SIGKILL: the pre-dispatch state write survived" "-"
   [ -f "$SRF" ]; ok_if $? "SIGKILL: the round state file exists (the loop stays bounded)" "state=$(s_state)"
@@ -1707,6 +1823,7 @@ if ( set -m ) 2>/dev/null; then
   ! kill -0 -"$_pgid" 2>/dev/null; ok_if $? "SIGKILL: the whole process group is gone, no orphans" "pgid=$_pgid waited=${_w}00ms"
 else
   echo "  skip [-] SIGKILL test: no job control (set -m) available in this shell"
+  SKIP=$((SKIP+1))
 fi
 unset _s _r _m _rc _log _side _sz _n _bad _key _o _f _before _old _msg _i _sha _w _kid _pgid rcs rc1 rc2 rc3
 
@@ -1744,7 +1861,7 @@ s_reset
 _rc=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
-_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_side=$(latest_side)
 [ "$_rc" = 3 ]; ok_if $? "overflow detected without SIGPIPE → round not clean" "rc=$_rc"
 grep -q "INCOMPLETE" "$_side" 2>/dev/null; ok_if $? "overflow without SIGPIPE is still marked" "-"
 
@@ -1782,7 +1899,7 @@ s_reset
 _rc=$(env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" PR_RELAY_LOG_MAX_BYTES=4096 \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1; echo $?)
-_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_side=$(latest_side)
 [ "$_rc" = 0 ]; ok_if $? "a chatty-stderr reviewer survives the cap and the round is clean" "rc=$_rc"
 grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "...and its review still arrived in full" "side=${_side:-<none>}"
 
@@ -1819,7 +1936,7 @@ env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sh
 
 # The posted body must respect the advertised cap: the capture reads one byte PAST it to detect
 # overflow, and that probe byte must not survive into what gets posted.
-_side=$(ls "$SCACHE"/pr-review-relay/*.k_claude.review 2>/dev/null | head -1)
+_side=$(latest_side)
 _tot=$(wc -c < "$_side" 2>/dev/null || echo 0)
 [ "$_tot" -le $((4096 + 400)) ]; ok_if $? "the probe byte is trimmed, body respects the stated cap" "total=$_tot"
 
@@ -1847,5 +1964,5 @@ _rc=$(s_run "$SHA_A" PR_RELAY_MAX_ROUNDS=0)
 unset _r1 _r2 _sg _log _side _rc
 
 echo "-------------------------------------------"
-echo "PASS=$PASS FAIL=$FAIL"
+echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ "$FAIL" = 0 ]
