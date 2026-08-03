@@ -45,6 +45,9 @@
 #   3  not a clean round: a reviewer returned empty / timed out / exited non-zero /
 #      failed to post, OR an explicitly-requested reviewer was missing, OR no
 #      reviewer ran, OR HEAD moved during the round (reviews now describe stale code).
+#      ONE exception to "explicitly-requested reviewer was missing": an agent that is out
+#      of quota is BENCHED, not failed — dropped until the reset time it reported, and
+#      announced on every round. See "The bench" below for why, and $BENCH_FILE to undo it.
 #   4  a loop cap was reached — stop looping and escalate to a human. TWO caps exit 4 and the
 #      message says which fired: the ROUND cap (--max-rounds, counted per reviewed SHA) and the
 #      SAME-SHA cap (PR_RELAY_MAX_SAME_SHA, dispatches on one unchanged SHA).
@@ -293,6 +296,94 @@ fi
 # Sweeps the state temps too: a kill between mktemp and the mv leaves a <key>.state.XXXXXXXX
 # behind, and a glob that only matched .run.* would let those accumulate forever.
 relay_forget_key() { rm -f "$ROUND_FILE" "$ROUND_DIR/$ROUND_KEY".run.* "$ROUND_DIR/$ROUND_KEY".state.* 2>/dev/null || true; }
+
+# ── The bench: agents that are out of quota ──────────────────────────────────────────────────
+#
+# An agent that has exhausted its quota fails EVERY round, on EVERY repo, for days — and because a
+# failed reviewer makes the round not clean, the verdict is worthless even when every other review
+# arrived. The human then either re-runs and pays again, or learns to ignore "not clean", which is
+# worse than never printing it.
+#
+# So the first run that SEES the quota error writes the agent down here, with the time it comes
+# back, and later runs leave it out of the panel. The error message carries the reset time
+# ("Resets in 56h55m40s"), which is what makes this self-healing: nobody has to remember to undo it.
+# A hand-edited flag would need that memory, and that is the part that already fails today.
+#
+# It lives beside the round state on purpose. It decides WHO REVIEWS and whether a round can be
+# clean, so it needs the same fail-closed ownership and 0700 treatment $ROUND_DIR already gets —
+# a group-writable copy of this file would let someone bench every reviewer and have an empty panel
+# report success. That also rules out $HOME/.config, which is 775 on a normal machine (and would
+# abort outright under `set -u` when HOME is unset — the reason $ROUND_DIR has a fallback chain).
+BENCH_FILE="$ROUND_DIR/benched"
+# The lock is a DIRECTORY, and a separate path from the file it guards. `mkdir` is atomic on POSIX
+# and needs no external tool: `flock` appears nowhere in this script, which targets Bash 3.2 and
+# hand-rolls BSD/macOS `stat`. Locking $BENCH_FILE itself would guard nothing, because the writer
+# replaces it by rename and the lock would follow the old inode into oblivion.
+BENCH_LOCK="$ROUND_DIR/benched.lock"
+BENCH_LOCK_STALE=120   # seconds; a lock older than this is assumed to be a crashed run
+
+# Take the lock, or give up quietly. Callers treat failure as "could not persist", never as "go
+# ahead anyway" — see the write path.
+bench_lock() {
+  local waited=0
+  while ! mkdir "$BENCH_LOCK" 2>/dev/null; do
+    local age; age=$(( $(date +%s) - $(_round_mtime "$BENCH_LOCK") ))
+    if [ "$age" -gt "$BENCH_LOCK_STALE" ]; then rm -rf "$BENCH_LOCK" 2>/dev/null || true; continue; fi
+    waited=$((waited + 1)); [ "$waited" -gt 50 ] && return 1
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  return 0
+}
+bench_unlock() { rm -rf "$BENCH_LOCK" 2>/dev/null || true; }
+
+# Prints the expiry epoch if $1 is benched and still out; prints nothing otherwise.
+# A malformed line is ignored and named — one bad line must never disable the whole bench.
+bench_until() {
+  [ -r "$BENCH_FILE" ] || return 0
+  local now; now=$(date +%s)
+  local agent until reason
+  while IFS=$'\t' read -r agent until reason; do
+    [ "$agent" = "$1" ] || continue
+    case "$until" in ''|*[!0-9]*) echo "  ! ignoring malformed bench line for '$agent'" >&2; return 0;; esac
+    [ "$until" -gt "$now" ] && { echo "$until"; return 0; }
+    return 0
+  done < "$BENCH_FILE"
+  return 0
+}
+
+# Drops expired lines. Cheap, and it keeps the file from growing forever.
+bench_prune() {
+  [ -r "$BENCH_FILE" ] || return 0
+  local now tmp; now=$(date +%s)
+  tmp="$(mktemp "$ROUND_DIR/benched.XXXXXXXX")" || return 1
+  local agent until reason
+  while IFS=$'\t' read -r agent until reason; do
+    case "$until" in ''|*[!0-9]*) continue;; esac
+    [ "$until" -gt "$now" ] && printf '%s\t%s\t%s\n' "$agent" "$until" "$reason" >> "$tmp"
+  done < "$BENCH_FILE"
+  mv -f "$tmp" "$BENCH_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# "Resets in 56h55m40s" → epoch. Anything unparseable falls back to +6h: a wrong guess should cost
+# an afternoon, not a week, and the next round rediscovers it anyway.
+bench_parse_reset() {
+  local text="$1" h m s spec
+  spec="$(printf '%s' "$text" | sed -n 's/.*[Rr]esets in \([0-9hms]*\).*/\1/p' | head -1)"
+  h="$(printf '%s' "$spec" | sed -n 's/.*[^0-9]*\([0-9]\{1,\}\)h.*/\1/p')"
+  m="$(printf '%s' "$spec" | sed -n 's/.*[^0-9]*\([0-9]\{1,\}\)m.*/\1/p')"
+  s="$(printf '%s' "$spec" | sed -n 's/.*[^0-9]*\([0-9]\{1,\}\)s.*/\1/p')"
+  if [ -z "$h$m$s" ]; then echo $(( $(date +%s) + 21600 )); return 0; fi
+  echo $(( $(date +%s) + ${h:-0} * 3600 + ${m:-0} * 60 + ${s:-0} ))
+}
+
+# Does this output say "out of quota"? Deliberately narrow: a timeout or a crash is NOT out of
+# quota — it is usually a big diff or a bad afternoon — and benching a merely slow agent would hide
+# a real regression instead of reporting it.
+bench_looks_like_quota() {
+  printf '%s' "$1" | grep -qiE 'quota (reached|exceeded)|out of quota|usage limit reached|rate limit exceeded.*upgrade'
+}
+
 [ "$RESET" = 1 ] && relay_forget_key
 # mtime: GNU `stat -c %Y`, BSD/macOS `stat -f %m`.
 _round_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
@@ -769,6 +860,25 @@ review_with() {
   # function used to get straight out of the command substitution.
   out="$(sed '1d' "$side" 2>/dev/null)"
   printf '=== %s finished rc=%s %s ===\n' "$name" "$rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$side"
+
+  # Out of quota? Decide BEFORE anything is posted, and look at BOTH streams.
+  #
+  # Checking only the empty-output branch below would miss the case this exists for: an agent that
+  # prints its quota error on STDOUT has non-empty output, sails past the empty check, and the
+  # error text gets published as if it were a review — an unclean round whose PR comment says
+  # "Please upgrade your subscription".
+  #
+  # The child does not touch the bench file. It records the finding beside its own status, exactly
+  # as it records pass/fail, and the parent merges after the wait. Two agents discovering quota in
+  # the same round would otherwise each rewrite the file and the second would erase the first:
+  # rename makes a write atomic, it does not make two writes composable.
+  if bench_looks_like_quota "$out$(cat "$errf" 2>/dev/null)"; then
+    local until; until="$(bench_parse_reset "$out$(cat "$errf" 2>/dev/null)")"
+    printf '%s\t%s\n' "$until" "out of quota" > "$STATUS_DIR/bench_$skey"
+    echo "  ⏸ $name: out of quota — benched until $(date -u -d "@$until" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -r "$until" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch $until")" >&2
+    echo bench > "$STATUS_DIR/$skey"
+    rm -f "$errf"; return 0
+  fi
   # Never fail silently: if the agent produced no review, say why in human terms
   # and show what it wrote on stderr. "Empty" means no non-whitespace content, so
   # a tab/newline-only reply doesn't slip through as a valid review.
@@ -853,6 +963,9 @@ IFS=',' read -ra LIST <<< "$REVIEWERS"
 # Space-delimited string, not an assoc array, so this stays Bash 3.2-safe (macOS).
 SEEN_LIST=""
 would_run=0; skipped=0   # reviewers that would run / were tolerated-skipped (default set)
+benched=0                # reviewers left out because they are out of quota (see the bench block)
+# Expired entries go now, so a stale line cannot keep an agent out after its quota is back.
+bench_prune || echo "  ! could not prune the bench file — continuing with what it says" >&2
 # Pass 1 RESOLVES the panel; pass 2 (further down) dispatches it. They are split so the round state
 # can be made durable in between — see the write block below. Everything with a side effect that the
 # dry-run and exit-3 paths depend on (author skip, dedupe, the `fail` files for an unknown or
@@ -871,6 +984,21 @@ for r in "${LIST[@]}"; do
   local_tool=$(tool_for "$r")
   if [ -z "$local_tool" ]; then
     if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! unknown reviewer '$r' (explicitly requested → fail)" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! unknown reviewer '$r' (skip)"; fi
+    continue
+  fi
+  # Benched? Out of the panel — even when explicitly requested.
+  #
+  # This is a deliberate change to the rule two lines below, which says an explicitly-requested
+  # reviewer never disappears quietly. It has to be: ship-feature always passes --reviewers (that is
+  # how it stops the quorum thinning by accident), so under the rule as written a benched agent
+  # would still fail every round and the bench would achieve nothing. The guarantee is replaced by a
+  # narrower one, and the README says so: a named reviewer is dropped ONLY when it is out of quota,
+  # only until a time the agent itself told us, and never silently — the line below prints on every
+  # round, and the verdict banner reports the panel as reduced.
+  _bench_until="$(bench_until "$r")"
+  if [ -n "$_bench_until" ]; then
+    echo "  ⏸ skip $r — benched until $(date -u -d "@$_bench_until" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -r "$_bench_until" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch $_bench_until") (out of quota)"
+    benched=$((benched + 1))
     continue
   fi
   if ! command -v "$local_tool" >/dev/null; then
@@ -931,11 +1059,61 @@ done
 
 # --- Fail-closed verdict -----------------------------------------------------
 # Tally per-reviewer outcomes recorded under $STATUS_DIR (pending/ok/fail).
-ran=0; failed=0; failed_names=""
+# Merge what the children found, under the lock, before the tally reads their statuses.
+#
+# If this cannot be persisted the discoveries are converted to `fail` below: a round that benched an
+# agent but could not write it down would exit clean with nothing durable to show for it — the quiet
+# clean result this whole design refuses everywhere else.
+bench_write_ok=1
+if ls "$STATUS_DIR"/bench_* >/dev/null 2>&1; then
+  if bench_lock; then
+    _btmp="$(mktemp "$ROUND_DIR/benched.XXXXXXXX")" || bench_write_ok=0
+    if [ "$bench_write_ok" = 1 ]; then
+      _now=$(date +%s)
+      # Keep every live entry that no child is replacing this round.
+      if [ -r "$BENCH_FILE" ]; then
+        while IFS=$'\t' read -r _a _u _r; do
+          case "$_u" in ''|*[!0-9]*) continue;; esac
+          [ "$_u" -le "$_now" ] && continue
+          [ -e "$STATUS_DIR/bench_$(status_key "$_a")" ] && continue
+          printf '%s\t%s\t%s\n' "$_a" "$_u" "$_r" >> "$_btmp"
+        done < "$BENCH_FILE"
+      fi
+      for _bf in "$STATUS_DIR"/bench_*; do
+        [ -e "$_bf" ] || continue
+        _key="${_bf##*/bench_}"
+        IFS=$'\t' read -r _u _r < "$_bf"
+        printf '%s\t%s\t%s\n' "$_key" "$_u" "$_r" >> "$_btmp"
+      done
+      mv -f "$_btmp" "$BENCH_FILE" 2>/dev/null || { rm -f "$_btmp"; bench_write_ok=0; }
+    fi
+    bench_unlock
+  else
+    bench_write_ok=0
+  fi
+  if [ "$bench_write_ok" = 0 ]; then
+    echo "  ! could not record the bench — treating this round's quota discoveries as failures" >&2
+    for _bf in "$STATUS_DIR"/bench_*; do
+      [ -e "$_bf" ] || continue
+      echo fail > "$STATUS_DIR/${_bf##*/bench_}"
+    done
+  fi
+  rm -f "$STATUS_DIR"/bench_* 2>/dev/null || true
+fi
+
+ran=0; failed=0; failed_names=""; benched_now=0
 for f in "$STATUS_DIR"/*; do
   [ -e "$f" ] || continue
-  ran=$((ran + 1))
   n="${f##*/}"; _outcome="$(cat "$f")"
+  # A benched agent neither posted nor failed. Leaving it in `ran` would make the banner's
+  # "$ran/$ran posted" a lie, and counting it as a failure would make the bench pointless — the
+  # round would still be unclean, which is the whole thing we are trying to stop.
+  if [ "$_outcome" = bench ]; then
+    benched_now=$((benched_now + 1)); benched=$((benched + 1))
+    relay_log "outcome ${n#k_}=bench"
+    continue
+  fi
+  ran=$((ran + 1))
   # Logged HERE, in the parent, after `wait` — never from review_with. A background subshell
   # appending to the shared run log is exactly the interleaving the sidecars exist to avoid.
   relay_log "outcome ${n#k_}=$_outcome"
@@ -980,9 +1158,12 @@ if [ "$LOCAL_CONTEXT" = 1 ] && ! local_context_ok; then
   exit 3
 fi
 
+# Unchanged on purpose, including when the panel emptied because everything is benched: a review
+# nobody performed is not a clean one, and an empty panel must never read as success.
 if [ "$ran" = 0 ]; then
-  relay_log "verdict exit=3 no reviewers ran"
+  relay_log "verdict exit=3 no reviewers ran (benched=$benched)"
   echo "✖ No reviewers ran — cannot form consensus from nobody. Check installed CLIs / --reviewers." >&2
+  [ "$benched" -gt 0 ] && echo "  ⏸ $benched reviewer(s) are benched (out of quota) — see $BENCH_FILE" >&2
   exit 3
 fi
 if [ "$failed" -gt 0 ]; then
@@ -990,10 +1171,16 @@ if [ "$failed" -gt 0 ]; then
   echo "✖ Relay round NOT clean: $failed/$ran reviewer(s) failed —$failed_names. Fix and re-run." >&2
   exit 3
 fi
-if [ "$skipped" -gt 0 ]; then
-  relay_log "verdict exit=0 partial: $ran posted, $skipped skipped"
-  echo "✔ Relay done (PARTIAL cross-review) — $ran/$ran reviewer(s) posted, $skipped skipped (not installed), reviewed sha ${HEAD_SHA:0:7}."
-  echo "  ⚠ $skipped default reviewer(s) were skipped — this was NOT a full cross-review." >&2
+if [ "$skipped" -gt 0 ] || [ "$benched" -gt 0 ]; then
+  # Benched and not-installed are reported apart, because they are different facts and lead to
+  # different actions: one comes back by itself, the other needs somebody to install a CLI.
+  _why=""
+  [ "$skipped" -gt 0 ] && _why="$skipped skipped (not installed)"
+  [ "$benched" -gt 0 ] && _why="${_why:+$_why, }$benched benched (out of quota)"
+  relay_log "verdict exit=0 partial: $ran posted, $_why"
+  echo "✔ Relay done (PARTIAL cross-review) — $ran/$ran reviewer(s) posted, $_why, reviewed sha ${HEAD_SHA:0:7}."
+  echo "  ⚠ This was NOT a full cross-review — $_why." >&2
+  [ "$benched" -gt 0 ] && echo "  ⏸ A benched reviewer returns on its own when its quota resets. To force it back now, delete its line from $BENCH_FILE" >&2
 else
   relay_log "verdict exit=0 clean: $ran/$ran posted"
   echo "✔ Relay done — $ran/$ran reviewer(s) posted, reviewed sha ${HEAD_SHA:0:7}."

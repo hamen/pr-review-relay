@@ -79,6 +79,11 @@ case ",\${SLEEP_KEYS:-}," in *",\$key,"*) sleep 5;; esac        # outlast a shor
 case ",\${FAIL_EMPTY:-}," in *",\$key,"*) exit 0;; esac      # empty output, rc 0 → "no review"
 case ",\${WS_ONLY:-}," in *",\$key,"*) printf '\t\n  \n';  exit 0;; esac  # whitespace-only "review"
 case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output but rc!=0
+# Out of quota. Two variants because they take DIFFERENT code paths: on stderr the relay's
+# empty-output branch sees it, on stdout it does not — and the stdout one used to be posted as
+# a review.
+case ",\${QUOTA_ERR:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s." >&2; exit 1;; esac
+case ",\${QUOTA_OUT:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s."; exit 1;; esac
 # Record our argv when asked, so a test can assert the command line the relay builds.
 # The bug this guards against is a flag silently going missing or being renamed, which
 # no output-shape assertion would ever notice.
@@ -134,6 +139,14 @@ run 3 "comment posting fails → not clean"               GH_POST_FAIL=1
 run 3 "whitespace-only review → not a valid review"     WS_ONLY=codex
 run 3 "reviewer times out → not clean"                  SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1
 
+# --- the bench: an agent that is out of quota ---------------------------------
+# Rationale in the "The bench" block of pr-review-relay. The short version: a quota-exhausted agent
+# fails every round for days, which makes every verdict worthless, so it is dropped for as long as
+# the agent itself said it would be out.
+run 0 "quota on stderr → benched, round still clean"    QUOTA_ERR=codex
+run 0 "quota on stdout → benched, not posted as review" QUOTA_OUT=codex
+run 3 "a timeout is NOT a quota → still fails the round" SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1
+
 # bespoke runs: <expected> <desc> -- <args...>  (custom --reviewers / --dry-run)
 runx() {
   local expect="$1" desc="$2"; shift 2
@@ -148,6 +161,49 @@ runx() {
 runx 3 "explicitly requested unknown reviewer → fail"   --reviewers claude,bogus --parallel
 runx 3 "malicious reviewer name is contained, still fails" --reviewers 'claude,../../PWNED' --parallel
 runx 0 "duplicate reviewer is deduped → clean pass"     --reviewers claude,claude --parallel
+
+# --- the bench, part 2: persistence, expiry, and the contract change ----------
+# bench_run <expected> <desc> <bench-file-contents> -- <relay args...>
+# Seeds the bench file the relay will read, so these assert what a LATER run sees — the whole point
+# of writing it down. The file lives beside the round state (XDG_CACHE_HOME), not in ~/.config.
+bench_run() {
+  local expect="$1" desc="$2" contents="$3"; shift 3
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"; rm -f "$WORK/sha_counter"
+  printf '%b' "$contents" > "$WORK/cache/pr-review-relay/benched"
+  local outf="$WORK/bench_out"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity "$@" > "$outf" 2>&1
+  local rc=$?
+  if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
+}
+_future=$(( $(date +%s) + 7200 ))
+_past=$(( $(date +%s) - 7200 ))
+
+bench_run 0 "a benched reviewer is dropped and the round is still clean" \
+  "codex\t$_future\tout of quota\n" --reviewers claude,codex --parallel
+grep -q '⏸ skip codex' "$WORK/bench_out" \
+  && { echo "  ok   [-] the drop is announced, never silent"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL [-] the drop is announced, never silent"; FAIL=$((FAIL+1)); }
+
+# The contract change decided on 2026-08-03: --reviewers normally makes a missing reviewer a hard
+# fail, and a benched one is the single exception. Without this the bench does nothing under
+# ship-feature, which always passes --reviewers.
+grep -q 'PARTIAL' "$WORK/bench_out" \
+  && { echo "  ok   [-] a reduced panel is reported as PARTIAL, not as a full cross-review"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL [-] a reduced panel is reported as PARTIAL, not as a full cross-review"; FAIL=$((FAIL+1)); }
+
+bench_run 0 "an expired bench line lets the reviewer back in" \
+  "codex\t$_past\tout of quota\n" --reviewers claude,codex --parallel
+grep -q '⏸ skip codex' "$WORK/bench_out" \
+  && { echo "  FAIL [-] an expired line must not keep anyone out"; FAIL=$((FAIL+1)); } \
+  || { echo "  ok   [-] an expired line must not keep anyone out"; PASS=$((PASS+1)); }
+
+bench_run 3 "every reviewer benched → empty panel is NOT clean" \
+  "claude\t$_future\tout of quota\ncodex\t$_future\tout of quota\n" --reviewers claude,codex --parallel
+
+bench_run 0 "a malformed line is ignored, the rest still parsed" \
+  "codex\tnot-a-number\tjunk\n" --reviewers claude,codex --parallel
 runx 0 "dry-run + valid explicit config → clean preflight" --reviewers claude,codex --dry-run
 runx 3 "dry-run + invalid explicit config → fail preflight" --reviewers claude,bogus --dry-run
 

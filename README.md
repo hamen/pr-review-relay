@@ -578,7 +578,34 @@ ever holds short event lines. If you want them gone sooner, `--reset` on the PR,
 | `1`/`2` | Usage/precondition error (no `gh`, no PR, empty diff, bad arg). | Fix the invocation. |
 
 A missing CLI from the **default** reviewer set is a tolerated skip (users have different agents
-installed); only reviewers named explicitly via `--reviewers` are required to be present. Each posted
+installed); only reviewers named explicitly via `--reviewers` are required to be present.
+
+### ⏸ Benched reviewers (out of quota)
+
+There is **one exception** to "explicitly requested must be present". An agent that reports having
+exhausted its quota is **benched**: dropped from the panel until the reset time it told us, and the
+round can still be clean without it.
+
+The reason is that the alternative is worse. A quota-exhausted agent fails *every* round, on *every*
+repo, for days — so every verdict reads "not clean" even when all the other reviews arrived. People
+then either re-run and pay for it again, or learn to ignore the verdict, which is worse than never
+printing one.
+
+The safeguards are what make this acceptable:
+
+- **It expires by itself.** The expiry comes from the agent's own message (`Resets in 56h55m40s`),
+  so the reviewer returns without anyone remembering to undo anything.
+- **It is announced on every round**, and the verdict says `PARTIAL cross-review` with the reason.
+  A thinner panel is never presented as a full one.
+- **Only an explicit quota message benches.** A timeout or a crash still fails the round — those are
+  usually a large diff or a bad afternoon, and hiding them would hide a regression.
+- **An empty panel is still exit 3.** If everything is benched, nothing was reviewed, and that is
+  never clean.
+
+To force a reviewer back before its reset, delete its line from the bench file (one tab-separated
+line per agent: name, expiry epoch, reason). It sits beside the round state — under
+`$XDG_CACHE_HOME/pr-review-relay/benched`, created `0700` and ownership-checked, because a file that
+decides who reviews is worth the same protection as the reviews themselves. Each posted
 review's footer records the **reviewed SHA** so you can tell whether a review predates a later push.
 
 > **Note:** reviews are posted as they complete, *before* the end-of-round SHA re-check. So a round that
