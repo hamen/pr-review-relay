@@ -242,6 +242,37 @@ fi
 # for that phrase is a review of quota-handling code, i.e. this very change.
 run 0 "a successful review mentioning quota does not bench" QUOTA_TEXT_OK=codex
 
+# Two agents out of quota in the SAME round must both survive the merge. This is the case that
+# forced the parent-side merge in the first place: if children wrote the file themselves, the
+# second would rename over the first and one bench would vanish.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" QUOTA_ERR=claude,codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+_n=$(grep -cE "^(claude|codex)	" "$WORK/cache/pr-review-relay/benched" 2>/dev/null || echo 0)
+if [ "$_n" = 2 ]; then
+  echo "  ok   [-] two agents benched in one round both survive the merge"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] two agents benched in one round both survive the merge (got $_n)"; FAIL=$((FAIL+1))
+fi
+
+# If the bench cannot be persisted, the round must NOT exit clean. A benched-but-unrecorded agent
+# would come back to the same wall next run with nothing written down to explain it — the quiet
+# clean pass this design refuses everywhere else. An undeletable lock directory simulates it.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"; rm -f "$WORK/sha_counter"
+mkdir -p "$WORK/cache/pr-review-relay/benched.lock"
+touch -t 203001010000 "$WORK/cache/pr-review-relay/benched.lock" 2>/dev/null || true
+chmod 500 "$WORK/cache/pr-review-relay" 2>/dev/null
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" QUOTA_ERR=codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+_rc=$?
+chmod 700 "$WORK/cache/pr-review-relay" 2>/dev/null
+if [ "$_rc" = 3 ]; then
+  echo "  ok   [-] a bench that cannot be persisted fails the round, not a quiet clean pass"; PASS=$((PASS+1))
+else
+  echo "  FAIL [got $_rc, want 3] a bench that cannot be persisted fails the round"; FAIL=$((FAIL+1))
+fi
+
+
 runx 0 "dry-run + valid explicit config → clean preflight" --reviewers claude,codex --dry-run
 runx 3 "dry-run + invalid explicit config → fail preflight" --reviewers claude,bogus --dry-run
 

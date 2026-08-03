@@ -602,6 +602,9 @@ The safeguards are what make this acceptable:
 - **An empty panel is still exit 3.** If everything is benched, nothing was reviewed, and that is
   never clean.
 
+`--reset` does **not** clear the bench — it forgets the round counter for one PR, while the bench is
+global and time-based. If you reset a PR and a reviewer is still skipped, that is why.
+
 To force a reviewer back before its reset, delete its line from the bench file (one tab-separated
 line per agent: name, expiry epoch, reason). It sits beside the round state — under
 `$XDG_CACHE_HOME/pr-review-relay/benched`, created `0700` and ownership-checked, because a file that
