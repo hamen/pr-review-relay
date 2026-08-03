@@ -720,7 +720,8 @@ the repo ships — including the libraries that are *sourced* at runtime, whose 
 surface only when a user selects that reviewer — a capability probe for `jq --raw-output0`, and both
 test suites.
 
-`.githooks/pre-push` runs `bin/ci` for you and refuses the push if it fails. It also refuses in
+`.githooks/pre-push` runs `bin/ci` for you and refuses the push if it fails. Its own behaviour is
+covered by `test/test-gate.sh`, which `bin/ci` runs — twelve cases against a throwaway remote. It also refuses in
 cases where a passing gate would be a lie: pushing a ref that is not your checked-out `HEAD` (the
 gate tests the working tree, so `git push origin HEAD~3:main` would ship something nobody tested), a
 dirty or untracked-file tree, and a gate run that modified tracked files or moved `HEAD` while

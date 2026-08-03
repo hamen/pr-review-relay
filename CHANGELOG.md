@@ -119,6 +119,15 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   separately.
 - `README.md` gains a **Developing this repo** section covering the gate, the honest limits of
   `core.hooksPath`, and how external PRs are tested without CI.
+- **`test/test-gate.sh`** — twelve cases covering the hook's own contract, run by `bin/ci`: a clean
+  push passes; a non-`HEAD` commit, a dirty tree, an untracked file, a red gate, a gate that rewrites
+  tracked files or creates untracked ones or moves `HEAD`, and a non-executable `bin/ci` are all
+  refused; delete-only pushes and an annotated tag pointing at `HEAD` pass. Everything runs against a
+  bare remote in a temp directory — a gate experiment against a live repository is how a sibling repo
+  got junk commits pushed to GitHub on 2026-08-02. `bin/ci` is stubbed, so a red or destructive gate
+  can be simulated.
+- `bin/ci` probes for `node` as well as `jq`. The header called a missing `node` "the honest false
+  alarm" and then did not check for it, so it failed mid-suite with an indirect message.
 
 ## [1.4.0] — 2026-08-01
 

@@ -30,6 +30,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Read and reported, but nothing branches on it today: every stage here is fast enough for the push
+# path, so full and push run the same checks. Kept so the shared hook's contract holds, and so the
+# first slow check added has an obvious place to be excluded from — a `case "$MODE"` around it.
 MODE="${CI_MODE:-full}"
 say() { printf '  %s\n' "$*" >&2; }
 
@@ -51,6 +54,7 @@ for f in \
   lib-grok.sh \
   bin/ci \
   .githooks/pre-push \
+  test/test-gate.sh \
   test/test-fail-closed.sh \
   test/test-distill.sh
 do
@@ -71,6 +75,15 @@ if ! jq --raw-output0 -n '""' >/dev/null 2>&1; then
   exit 1
 fi
 
+# node is needed by wrap-collapsed-pr-comment.mjs, which the fail-closed suite exercises. The header
+# used to call a missing node "the honest false alarm" and then not check for it — so it failed in
+# the middle of a suite with an indirect message, which is exactly what the jq probe exists to avoid.
+say "node capability"
+if ! command -v node >/dev/null 2>&1; then
+  echo "bin/ci: node not found; wrap-collapsed-pr-comment.mjs needs it and the suites exercise it" >&2
+  exit 1
+fi
+
 # --- 3. suites ---------------------------------------------------------------
 # Both run even when the first fails, so one invocation tells you everything that is broken. `set -e`
 # would stop at the first, which turns a single gate run into several. The exit code is still
@@ -85,6 +98,7 @@ run_suite() { # <label> <script>
     failed=1
   fi
 }
+run_suite "test-gate.sh"        "test/test-gate.sh"
 run_suite "test-fail-closed.sh" "test/test-fail-closed.sh"
 run_suite "test-distill.sh"     "test/test-distill.sh"
 
