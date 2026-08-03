@@ -487,9 +487,13 @@ soon as the PR number and repository are known, which is **before** the head-SHA
 cannot be opened any earlier, because the file name is derived from the repository, and that itself
 comes from `gh` — so a hang while resolving the PR still leaves no trace.
 
-- `<key>.run.XXXXXXXX` — the **run log**: timestamped start (PR, SHA, reviewer list, PID, PGID), each
-  dispatch, the state decision, each reviewer's outcome, and the final verdict — including the
-  failure verdicts, which are the ones worth reading.
+- `<key>.run.XXXXXXXX` — the **run log**: a timestamped start, each dispatch, the state decision,
+  each reviewer's outcome, and the final verdict — including the failure verdicts, which are the
+  ones worth reading. The start is written in three parts, as the facts become known: PR and
+  repository when the log opens, the reviewed SHA as soon as it is read, then the reviewer list,
+  PID, PGID and round counters once the round state is resolved. So a log that stops early still
+  tells you how far the run got — a kill during the diff fetch names the commit under review; one
+  during the SHA read cannot, and its absence is the tell.
 - `<key>.run.XXXXXXXX.k_<reviewer>.review` — one **sidecar per reviewer**, carrying that reviewer's
   output as the CLI produces it.
 
@@ -525,6 +529,9 @@ and age-deleting it would destroy the forensics of a run still in progress.
 - A run blocked for more than 6h *before* it writes state (a hung `gh pr diff`, say) can have its log
   swept by a later run while it is still alive — but only if no `.round` file exists for that PR.
   The alternative was a second, divergent notion of "stale", which is worse.
+
+The sweep covers the `<key>.state.XXXXXXXX` temps a killed state write leaves behind, on the same
+clock and under the same rule.
 
 A PR reviewed many times inside one session accumulates one log plus one sidecar per reviewer per
 run, holding review text, until one of the above fires. Output is capped by

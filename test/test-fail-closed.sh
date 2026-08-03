@@ -54,7 +54,7 @@ cat > "$BIN/gh" <<'GH'
 case "$1 $2" in
   "pr view")
     if printf '%s\n' "$@" | grep -q headRefOid; then
-      [ -n "${GH_SHA_HANG:-}" ] && sleep 600
+      if [ -n "${GH_SHA_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi
       # Local-context tests pin the PR head to the test repo's real HEAD so the
       # LOCAL_CONTEXT gate (HEAD == PR head, clean tree) passes.
       if [ -n "${GH_LOCAL_HEAD:-}" ]; then echo "$GH_LOCAL_HEAD"; exit 0; fi
@@ -81,7 +81,7 @@ case "$1 $2" in
   "repo view") echo "owner/repo" ;;
   # GH_DIFF_HANG makes the diff fetch block forever, so a test can kill the relay
   # *during* the network call and assert what evidence already exists on disk.
-  "pr diff")   [ -n "${GH_DIFF_HANG:-}" ] && sleep 600; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0; echo "diff --git a/x b/x"; echo "+change" ;;
+  "pr diff")   if [ -n "${GH_DIFF_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0; echo "diff --git a/x b/x"; echo "+change" ;;
   "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted" >> "$GH_POST_LOG"; exit 0 ;;
   *) echo "" ;;
 esac
@@ -1680,6 +1680,19 @@ s_run "$SHA_A" >/dev/null
 [ -n "$_orphan" ] && [ ! -e "$_orphan" ] && [ ! -e "$_orphan.k_claude.review" ]
 ok_if $? "an orphaned log family expires after 6h, sidecars included" "log=${_orphan:-<none>}"
 
+# The state temps have the same shape of leak: a kill between mktemp and the mv leaves a
+# <key>.state.XXXXXXXX behind, and relay_forget_key only ever runs with a .round file present.
+# A backdated one, with no .round file, must go the same way. A fresh one must not.
+s_reset
+: > "$SCACHE/pr-review-relay/owner_repo#1.state.OLDTEMP1"
+: > "$SCACHE/pr-review-relay/owner_repo#1.state.FRESHTMP"
+touch -d "7 hours ago" "$SCACHE/pr-review-relay/owner_repo#1.state.OLDTEMP1" 2>/dev/null \
+  || touch -A -070000 "$SCACHE/pr-review-relay/owner_repo#1.state.OLDTEMP1" 2>/dev/null
+s_run "$SHA_A" >/dev/null
+[ ! -e "$SCACHE/pr-review-relay/owner_repo#1.state.OLDTEMP1" ] \
+  && [ -e "$SCACHE/pr-review-relay/owner_repo#1.state.FRESHTMP" ]
+ok_if $? "an orphaned state temp expires after 6h, a fresh one survives" "-"
+
 # The other half of the rule, and the one a naive fix breaks: a session that IS alive keeps its
 # history. Round 1's log is legitimately older than 6h on a long session, and deleting it would
 # destroy the forensics of a run still in progress. Live is defined by the state file, not by age.
@@ -1710,18 +1723,18 @@ ok_if $? "an orphan born inside a live session waits for --reset (known limit)" 
 # Same shape as the SIGKILL test below: own process group, bounded wait, reap.
 if ( set -m ) 2>/dev/null; then
   ( set -m
-    s_reset
+    s_reset; rm -f "$WORK/hangmark"
     env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
-      GH_FIXED_SHA="$SHA_A" GH_DIFF_HANG=1 \
+      GH_FIXED_SHA="$SHA_A" GH_DIFF_HANG=1 GH_HANG_MARK="$WORK/hangmark" \
       bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1 &
     _kid=$!
     _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
     # Wait for the log to appear rather than sleeping a fixed amount: on a slow box a fixed sleep
     # either flakes or wastes seconds.
+    # Wait for the STUB to say it is inside the call, not merely for the log file to exist:
+    # mktemp creates the log before the start line is written, so the latter would race.
     _w=0
-    while [ "$_w" -lt 100 ] && [ -z "$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null)" ]; do
-      sleep 0.1; _w=$((_w+1))
-    done
+    while [ "$_w" -lt 200 ] && [ ! -e "$WORK/hangmark" ]; do sleep 0.1; _w=$((_w+1)); done
     kill -9 -"$_pgid" 2>/dev/null || kill -9 "$_kid" 2>/dev/null
     wait "$_kid" 2>/dev/null || true
   )
@@ -1730,30 +1743,35 @@ if ( set -m ) 2>/dev/null; then
   ok_if $? "a run killed during \`gh pr diff\` still left its log" "log=${_hlog:-<none>}"
   grep -q "start pr=1 " "$_hlog" 2>/dev/null
   ok_if $? "that log already carries the start line" "$(head -1 "$_hlog" 2>/dev/null)"
-  # Proves the ORDER, not just the presence: the detailed start line quotes the head SHA, so its
-  # absence is what says the log was opened before that read rather than after it.
-  ! grep -q "start sha=" "$_hlog" 2>/dev/null
-  ok_if $? "and does NOT yet carry the head-SHA start line" "$(cat "$_hlog" 2>/dev/null | tr '\n' '|')"
+  # By the time the diff is fetched the SHA is known and logged, so the evidence from a mid-diff
+  # kill names the commit under review — not just the PR.
+  grep -q "start sha=" "$_hlog" 2>/dev/null
+  ok_if $? "and already names the reviewed SHA" "$(cat "$_hlog" 2>/dev/null | tr '\n' '|')"
 
   # The other half of the promise. The head-SHA read runs before the diff, so hanging the diff
   # alone never proved the log beats it.
   ( set -m
-    s_reset
+    s_reset; rm -f "$WORK/hangmark"
     env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
-      GH_SHA_HANG=1 \
+      GH_SHA_HANG=1 GH_HANG_MARK="$WORK/hangmark" \
       bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1 &
     _kid=$!
     _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
+    # Wait for the STUB to say it is inside the call, not merely for the log file to exist:
+    # mktemp creates the log before the start line is written, so the latter would race.
     _w=0
-    while [ "$_w" -lt 100 ] && [ -z "$(ls "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null)" ]; do
-      sleep 0.1; _w=$((_w+1))
-    done
+    while [ "$_w" -lt 200 ] && [ ! -e "$WORK/hangmark" ]; do sleep 0.1; _w=$((_w+1)); done
     kill -9 -"$_pgid" 2>/dev/null || kill -9 "$_kid" 2>/dev/null
     wait "$_kid" 2>/dev/null || true
   )
   _slog2=$(latest_log)
   [ -n "$_slog2" ] && grep -q "start pr=1 " "$_slog2" 2>/dev/null
   ok_if $? "a run killed during the head-SHA read still left its log" "log=${_slog2:-<none>}"
+  # This is where the ORDER is pinned: the SHA line cannot exist yet, because the call that would
+  # produce it is the one being hung. Presence of the first line and absence of the second is the
+  # proof that the log is opened before that read, not after it.
+  ! grep -q "start sha=" "$_slog2" 2>/dev/null
+  ok_if $? "and cannot yet carry the SHA line — the log came first" "$(cat "$_slog2" 2>/dev/null | tr '\n' '|')"
 else
   echo "  skip [-] mid-diff kill test: no job control (set -m) available in this shell"
   SKIP=$((SKIP+1))
@@ -1784,10 +1802,12 @@ env PATH="$BIN:$PATH" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter
 _blog=$(latest_log)
 grep -q "verdict exit=2 invalid LINK_DIFF_FALLBACK_MAX_BYTES" "$_blog" 2>/dev/null
 ok_if $? "a bad LINK_DIFF_FALLBACK_MAX_BYTES logs its verdict" "$(tail -1 "$_blog" 2>/dev/null)"
-# The three remaining post-log exits (both mktemp -d failures and the round-state write) are NOT
-# covered: reaching them needs a full or read-only temp filesystem, and faking that would mean a
-# test-only hook in production code. They carry their verdict line; this note is the honest record
-# that nothing asserts it.
+# The remaining post-log exits are NOT covered: both mktemp -d failures and the round-state write
+# need a full or read-only temp filesystem to reach, and faking that would mean a test-only hook in
+# production code. They carry their verdict line; this note is the honest record that nothing
+# asserts it. Two more that never will: RUN_BASE's own mktemp failure cannot log (relay_log does not
+# exist until it succeeds), and `invalid --max-rounds` is validated deliberately BEFORE the log is
+# opened — a usage error should leave no file behind at all.
 
 # The unreadable-SHA-at-start verdict was the one exit-3 path with no assertion on it, while its
 # sibling (`head moved`) had one.

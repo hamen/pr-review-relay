@@ -328,6 +328,19 @@ if [ ! -f "$ROUND_FILE" ]; then
       rm -f "$_orphan" "$_orphan".* 2>/dev/null || true
     fi
   done
+  # The atomic state write leaves <key>.state.XXXXXXXX behind if it is killed between mktemp and
+  # the mv. relay_forget_key sweeps those, but it only ever runs with a .round file present — so
+  # without this they are the one leftover the orphan path would still miss.
+  for _orphan in "$ROUND_DIR/$ROUND_KEY".state.*; do
+    [ -e "$_orphan" ] || continue
+    _omt="$(_round_mtime "$_orphan")"
+    [ "$_omt" -gt 0 ] 2>/dev/null || continue
+    # `if`, not `[ … ] && rm`: under `set -e` a false test as the last command of a loop body
+    # takes the whole script down with it.
+    if [ $(( $(date +%s) - _omt )) -gt 21600 ]; then
+      rm -f "$_orphan" 2>/dev/null || true
+    fi
+  done
   unset _orphan _omt
 fi
 
@@ -365,6 +378,9 @@ relay_log "start pr=$PR repo=${REPO:-?}"
 # Reviewed SHA: bind every review to the exact PR head so a concurrent push can't
 # leave green reviews standing on stale code (checked again at the end).
 HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
+# Logged the moment it is known, not after the round-state block: a run killed during the diff
+# fetch would otherwise carry a log with no SHA in it, and the SHA is what ties a review to code.
+relay_log "start sha=${HEAD_SHA:-<unreadable>} mode=$MODE author=${AUTHOR:-none}"
 echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
 # (The fail-closed early-abort on an unreadable HEAD SHA lives AFTER the round-cap
 #  check below, so a PR already at the cap still reports exit 4, not 3.)
@@ -494,7 +510,6 @@ SAME_SHA=0
 if [ "$SAME_SHA" = 1 ]; then         NEXT_ROUND="$ROUND"; NEXT_SAME=$((SAME + 1))
 elif [ "$_state_legacy" = 1 ]; then  NEXT_ROUND="$ROUND"; NEXT_SAME=1
 else                                 NEXT_ROUND=$((ROUND + 1)); NEXT_SAME=1; fi
-relay_log "start sha=${HEAD_SHA:-<unreadable>} mode=$MODE author=${AUTHOR:-none}"
 relay_log "start reviewers=$REVIEWERS parallel=$PARALLEL dry=$DRY timeout=${AGENT_TIMEOUT}s"
 # PID and PGID are recorded so that the NEXT time something kills this process mid-round, the log
 # says what to look for. Every investigation so far has ended outside this script.
