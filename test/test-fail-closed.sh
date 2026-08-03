@@ -83,6 +83,7 @@ case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output b
 # empty-output branch sees it, on stdout it does not — and the stdout one used to be posted as
 # a review.
 case ",\${QUOTA_ERR:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s." >&2; exit 1;; esac
+case ",\${QUOTA_TEXT_OK:-}," in *",\$key,"*) echo "Looks good. Note the branch where quota reached is handled."; exit 0;; esac
 case ",\${QUOTA_OUT:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s."; exit 1;; esac
 # Record our argv when asked, so a test can assert the command line the relay builds.
 # The bug this guards against is a flag silently going missing or being renamed, which
@@ -204,6 +205,43 @@ bench_run 3 "every reviewer benched → empty panel is NOT clean" \
 
 bench_run 0 "a malformed line is ignored, the rest still parsed" \
   "codex\tnot-a-number\tjunk\n" --reviewers claude,codex --parallel
+
+# End-to-end: discovery in round 1 must actually stick for round 2. Asked for in cross-review, and
+# it earned its place immediately — it caught the bench being written under the STATUS KEY
+# (`k_codex`) while the panel looks it up by NAME (`codex`), so nothing matched and the feature was
+# inert across runs. Every earlier test missed it: the discovery ones only checked one round, and
+# the persistence ones hand-seeded the file with the right name already in place.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" QUOTA_ERR=codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+if grep -q "^codex	" "$WORK/cache/pr-review-relay/benched" 2>/dev/null; then
+  echo "  ok   [-] discovery writes the AGENT NAME, not the status key"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] discovery writes the AGENT NAME, not the status key"; FAIL=$((FAIL+1))
+fi
+# The stub says "Resets in 2h30m0s", so the expiry must land ~9000s out. A greedy parser read that
+# as 2h0m0s and brought the agent back 30 minutes early; on the real message (56h55m40s) it was a
+# whole day early. Assert the arithmetic, not merely that a number was written.
+_exp="$(awk -F'\t' '$1=="codex"{print $2}' "$WORK/cache/pr-review-relay/benched" 2>/dev/null)"
+_delta=$(( ${_exp:-0} - $(date +%s) ))
+if [ "$_delta" -gt 8900 ] && [ "$_delta" -lt 9100 ]; then
+  echo "  ok   [-] the reset time is parsed in full (2h30m, not 2h)"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] the reset time is parsed in full — got ${_delta}s, want ~9000s"; FAIL=$((FAIL+1))
+fi
+rm -f "$WORK/sha_counter" "$WORK/argv2"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" ARGV_LOG="$WORK/argv2" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel > "$WORK/round2_out" 2>&1
+if grep -q "skip codex" "$WORK/round2_out" && ! grep -q "^codex " "$WORK/argv2" 2>/dev/null; then
+  echo "  ok   [-] the next run drops it without invoking it"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] the next run drops it without invoking it"; FAIL=$((FAIL+1))
+fi
+
+# A review that merely MENTIONS quota, and succeeds, must not bench its author — the likeliest place
+# for that phrase is a review of quota-handling code, i.e. this very change.
+run 0 "a successful review mentioning quota does not bench" QUOTA_TEXT_OK=codex
+
 runx 0 "dry-run + valid explicit config → clean preflight" --reviewers claude,codex --dry-run
 runx 3 "dry-run + invalid explicit config → fail preflight" --reviewers claude,bogus --dry-run
 

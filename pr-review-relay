@@ -370,9 +370,16 @@ bench_prune() {
 bench_parse_reset() {
   local text="$1" h m s spec
   spec="$(printf '%s' "$text" | sed -n 's/.*[Rr]esets in \([0-9hms]*\).*/\1/p' | head -1)"
-  h="$(printf '%s' "$spec" | sed -n 's/.*[^0-9]*\([0-9]\{1,\}\)h.*/\1/p')"
-  m="$(printf '%s' "$spec" | sed -n 's/.*[^0-9]*\([0-9]\{1,\}\)m.*/\1/p')"
-  s="$(printf '%s' "$spec" | sed -n 's/.*[^0-9]*\([0-9]\{1,\}\)s.*/\1/p')"
+  # Anchored at the START, and each component stripped once consumed. A leading `.*` is greedy, so
+  # it eats the number and leaves the capture matching a single digit: `56h55m40s` parsed as
+  # `6h5m0s` and an agent came back roughly a day early. Cross-review caught it; the tests below
+  # now assert the arithmetic, not just that something was written.
+  local rest="$spec"
+  h="$(printf '%s' "$rest" | sed -n 's/^\([0-9][0-9]*\)h.*/\1/p')"
+  [ -n "$h" ] && rest="${rest#*h}"
+  m="$(printf '%s' "$rest" | sed -n 's/^\([0-9][0-9]*\)m.*/\1/p')"
+  [ -n "$m" ] && rest="${rest#*m}"
+  s="$(printf '%s' "$rest" | sed -n 's/^\([0-9][0-9]*\)s.*/\1/p')"
   if [ -z "$h$m$s" ]; then echo $(( $(date +%s) + 21600 )); return 0; fi
   echo $(( $(date +%s) + ${h:-0} * 3600 + ${m:-0} * 60 + ${s:-0} ))
 }
@@ -872,9 +879,16 @@ review_with() {
   # as it records pass/fail, and the parent merges after the wait. Two agents discovering quota in
   # the same round would otherwise each rewrite the file and the second would erase the first:
   # rename makes a write atomic, it does not make two writes composable.
-  if bench_looks_like_quota "$out$(cat "$errf" 2>/dev/null)"; then
+  # `rc -ne 0` is part of the condition, not decoration. Without it a SUCCESSFUL review that merely
+  # mentions "quota reached" is thrown away and its author benched — and the likeliest place for a
+  # review to contain that phrase is a PR about quota handling. This one.
+  if [ "$rc" -ne 0 ] && bench_looks_like_quota "$out$(cat "$errf" 2>/dev/null)"; then
     local until; until="$(bench_parse_reset "$out$(cat "$errf" 2>/dev/null)")"
-    printf '%s\t%s\n' "$until" "out of quota" > "$STATUS_DIR/bench_$skey"
+    # The agent NAME goes in the file, not the status key: status_key() prefixes with `k_`, and
+    # the panel looks the bench up by name. Deriving the name from the filename wrote `k_codex`
+    # where `codex` is read — the bench never matched and the feature was inert across runs. The
+    # tests missed it because they hand-seeded the file; cross-review did not.
+    printf '%s\t%s\t%s\n' "$name" "$until" "out of quota" > "$STATUS_DIR/bench_$skey"
     echo "  ⏸ $name: out of quota — benched until $(date -u -d "@$until" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -r "$until" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch $until")" >&2
     echo bench > "$STATUS_DIR/$skey"
     rm -f "$errf"; return 0
@@ -1081,9 +1095,8 @@ if ls "$STATUS_DIR"/bench_* >/dev/null 2>&1; then
       fi
       for _bf in "$STATUS_DIR"/bench_*; do
         [ -e "$_bf" ] || continue
-        _key="${_bf##*/bench_}"
-        IFS=$'\t' read -r _u _r < "$_bf"
-        printf '%s\t%s\t%s\n' "$_key" "$_u" "$_r" >> "$_btmp"
+        IFS=$'\t' read -r _n _u _r < "$_bf"
+        [ -n "$_n" ] && printf '%s\t%s\t%s\n' "$_n" "$_u" "$_r" >> "$_btmp"
       done
       mv -f "$_btmp" "$BENCH_FILE" 2>/dev/null || { rm -f "$_btmp"; bench_write_ok=0; }
     fi
@@ -1109,6 +1122,8 @@ for f in "$STATUS_DIR"/*; do
   # "$ran/$ran posted" a lie, and counting it as a failure would make the bench pointless — the
   # round would still be unclean, which is the whole thing we are trying to stop.
   if [ "$_outcome" = bench ]; then
+    # Counted here and NOT again anywhere else: an agent dropped at panel time already
+    # incremented `benched` there, and it cannot also produce a status file this round.
     benched_now=$((benched_now + 1)); benched=$((benched + 1))
     relay_log "outcome ${n#k_}=bench"
     continue
