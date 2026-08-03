@@ -4,3 +4,10 @@ pr-review-fetch text eol=lf
 pr-review-collapse-comments text eol=lf
 pr-review-consensus text eol=lf
 *.mjs text eol=lf
+
+# Added with the local gate: bin/ci and the hook are executed directly, and a CRLF shebang is not a
+# shebang. pr-review-distill was missing from the list above — it is executed the same way.
+pr-review-distill text eol=lf
+bin/ci text eol=lf
+.githooks/* text eol=lf
+*.sh text eol=lf

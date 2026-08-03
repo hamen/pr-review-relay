@@ -95,6 +95,31 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   agent-loop instructions all corrected — they described `4` as the round cap only, and said a
   dispatched round always burns a slot, both of which are now wrong.
 
+### Removed
+
+- **The GitHub Actions workflow file.** The workflow itself was disabled on 2026-08-01; the file
+  lingering in the tree still forced the `workflow` OAuth scope on every tag push, because for a new
+  ref the whole tree counts as introduced. Releases had to be made from the browser or after a
+  `gh auth refresh -s workflow`.
+
+### Added
+
+- **`bin/ci` and a versioned `.githooks/pre-push`** — the gate is now part of the repository instead
+  of living in one machine's `.git/hooks`, which is neither versioned nor cloned. Enable it per clone
+  with `git config core.hooksPath .githooks`; that is repo-local config, so a fresh clone has no gate
+  until someone runs it, and git deliberately does not activate repository-controlled hooks on clone.
+- The hook is the portfolio template (`app-tools/templates/githooks/pre-push`), which closes a hole
+  the previous local hook had: it ran the suites against the working tree and then allowed whatever
+  was being pushed, so `git push origin HEAD~3:main` passed the gate while shipping an untested
+  commit. It also refuses a dirty or untracked-file tree, and a gate run that modified tracked files
+  or moved `HEAD`. Annotated tags pointing at `HEAD` and delete-only pushes pass.
+- The hook scrubs git's repo-local environment (`git rev-parse --local-env-vars`, plus
+  `GIT_QUARANTINE_PATH`) before running the gate. That is a second, independent fix for the failure
+  that made the previous hook corrupt the repository it ran in — the suite-level fix landed
+  separately.
+- `README.md` gains a **Developing this repo** section covering the gate, the honest limits of
+  `core.hooksPath`, and how external PRs are tested without CI.
+
 ## [1.4.0] — 2026-08-01
 
 ### Added
