@@ -472,7 +472,8 @@ Strictly the round counter counts **SHA transitions**: only the last SHA is stor
 
 State lives in `$XDG_CACHE_HOME/pr-review-relay/` (or `$HOME/.cache/…`), **auto-resets after 6h** of
 inactivity, and can be cleared with `--reset`. Both discard the run logs for that PR at the same
-time, so you never read a fresh counter next to a stale transcript.
+time, so you never read a fresh counter next to a stale transcript. Runs that never wrote state have
+no counter to reset; their leftovers expire on the same 6h clock — see **Retention** below.
 
 > **Concurrency:** the counters are an unlocked read-modify-write. Two relays racing on the same PR
 > can lose an update and therefore **undercount** dispatches, weakening *both* guards. Don't run
@@ -480,11 +481,19 @@ time, so you never read a fresh counter next to a stale transcript.
 
 ## 🔦 Evidence and forensics
 
-Every run writes, under the same state directory:
+Every run writes the files below under the same state directory. The log is opened — and its path printed — as
+soon as the PR number and repository are known, which is **before** the head-SHA read and before
+`gh pr diff`: those are the calls that can hang, and a hang there used to leave nothing at all. It
+cannot be opened any earlier, because the file name is derived from the repository, and that itself
+comes from `gh` — so a hang while resolving the PR still leaves no trace.
 
-- `<key>.run.XXXXXXXX` — the **run log**: timestamped start (PR, SHA, reviewer list, PID, PGID), each
-  dispatch, the state decision, each reviewer's outcome, and the final verdict — including the
-  failure verdicts, which are the ones worth reading.
+- `<key>.run.XXXXXXXX` — the **run log**: a timestamped start, each dispatch, the state decision,
+  each reviewer's outcome, and the final verdict — including the failure verdicts, which are the
+  ones worth reading. The start is written in three parts, as the facts become known: PR and
+  repository when the log opens, the reviewed SHA as soon as it is read, then the reviewer list,
+  PID, PGID and round counters once the round state is resolved. So a log that stops early still
+  tells you how far the run got — a kill during the diff fetch names the commit under review; one
+  during the SHA read cannot, and its absence is the tell.
 - `<key>.run.XXXXXXXX.k_<reviewer>.review` — one **sidecar per reviewer**, carrying that reviewer's
   output as the CLI produces it.
 
@@ -503,18 +512,40 @@ between two writes. And the sidecar-path symlink refusal is belt-and-braces that
 the path comes from a `mktemp` that created it `O_EXCL` moments earlier inside a mode-700 directory
 you own, so it provably did not exist — the real control is the directory, not the check.
 
-**Retention.** Every invocation leaves its own files, and they are only removed when that PR's state
-is discarded: by `--reset`, or by the 6h inactivity reset. A PR that is reviewed many times inside
-one session therefore accumulates one log plus one sidecar per reviewer per run, holding review text,
-until either of those fires. Output is capped by `PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) per
-reviewer, on the write path and for stderr too, so a single runaway agent cannot fill the disk; the
-cap does not apply to the run log itself, which only ever holds short event lines. If you want them
-gone sooner, `--reset` on the PR, or delete `<key>.run.*` from the state directory.
+**Retention.** Every invocation that gets as far as opening a run log leaves its own files. They are removed when that PR's state is
+discarded — by `--reset` or by the 6h inactivity reset — and, for runs that never wrote any state at
+all (a dry run, one that resolves no reviewer, one killed before the pre-dispatch write), by a
+sweep that expires those leftovers on their own 6h clock. Expiry is by **family**: a log and its
+sidecars go together, so you never read a transcript whose log is gone.
+
+Three honest limits, all following from one rule: **the sweep runs only when that PR has no `.round`
+file at all.** That is deliberate — a live session's first-round log is legitimately older than 6h,
+and age-deleting it would destroy the forensics of a run still in progress.
+
+- It is **lazy and per-PR**: it runs when that PR is relayed again, so a PR never touched again keeps
+  its files indefinitely. `--reset` or a manual delete is the answer there.
+- An orphan created **while a session is alive** is not collected on the 6h clock either — it waits
+  for `--reset`, or for the session's own state to go stale, which then clears the whole key.
+- A run blocked for more than 6h *before* it writes state (a hung `gh pr diff`, say) can have its log
+  swept by a later run while it is still alive — but only if no `.round` file exists for that PR.
+  The alternative was a second, divergent notion of "stale", which is worse.
+
+The sweep covers the `<key>.state.XXXXXXXX` temps a killed state write leaves behind, on the same
+clock and under the same rule.
+
+A PR reviewed many times inside one session accumulates one log plus one sidecar per reviewer per
+run, holding review text, until one of the above fires. Output is capped by
+`PR_RELAY_LOG_MAX_BYTES` (default 256 KiB) per reviewer, on the write path and for stderr too, so a
+single runaway agent cannot fill the disk; the cap does not apply to the run log itself, which only
+ever holds short event lines. If you want them gone sooner, `--reset` on the PR, or delete
+`<key>.run.*` from the state directory.
 
 ## 🔍 How it works
 
-1. Resolves the PR (current branch or `--pr`) and reads the diff with `gh pr diff` (used as a sanity
-   guard and for the line/byte summary).
+1. Resolves the PR (current branch or `--pr`), opens the run log (see
+   [Evidence and forensics](#-evidence-and-forensics) — it is opened here, before the calls that can
+   hang), then reads the diff with `gh pr diff` (used as a sanity guard and for the line/byte
+   summary).
 2. For each reviewer (except `--author`), runs the agent **headless** with a focused
    review prompt. By default (**`--link`**) the reviewer reads the changed files in context — so it
    reviews the *whole* PR, not just a diff snapshot. When the relay is run from the PR's own checkout and

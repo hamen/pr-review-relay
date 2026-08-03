@@ -34,6 +34,24 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Fixed
 
+- **Runs that never wrote state left log families nobody ever collected.** The 6h reset needs a
+  `.round` file to look at, and state is written only when a run actually dispatches someone — so a
+  dry run, a run that resolves no reviewer, or one killed before the pre-dispatch write left its log
+  and sidecars sitting in the state directory (holding review text) until somebody happened to pass
+  `--reset` for that exact key. The README said "6h or `--reset`" with no such exception. Those
+  leftovers now expire on the same 6h clock, **by family** — the log's mtime decides and its
+  sidecars go with it, so a transcript is never separated from its log. The sweep runs only when
+  there is no `.round` file, so a live session keeps its first round's log however old it gets; the
+  README now spells out the three limits that rule implies.
+
+- **A hang or a kill in `gh pr view` or `gh pr diff` left no evidence at all.** Both ran before the
+  run log existed, which is the exact class of incident the evidence trail was added for. The state
+  directory and the log are now opened as soon as the PR number and repository are known — before
+  the head-SHA read and before the diff. It cannot be earlier than that (the file name derives from
+  the repository, which itself comes from `gh`), and the README says so rather than promising more.
+  Two early exits that now sit under an open log — an empty diff and a missing context file — record
+  their verdict instead of ending the log mid-sentence.
+
 - **The test suite corrupted the repository it was run from, whenever it was run from a git hook.**
   git exports `GIT_DIR` to its hooks, and that variable outranks the working directory: with it
   set, a fixture's `cd "$repo" && git init && git commit` commits to the **host** repo and leaves

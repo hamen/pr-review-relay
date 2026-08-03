@@ -241,101 +241,6 @@ opencode_is_selected && opencode_resolve_bin
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-# Reviewed SHA: bind every review to the exact PR head so a concurrent push can't
-# leave green reviews standing on stale code (checked again at the end).
-HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
-echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
-# (The fail-closed early-abort on an unreadable HEAD SHA lives AFTER the round-cap
-#  check below, so a PR already at the cap still reports exit 4, not 3.)
-
-# Per-reviewer outcome, written as files so it survives subshells under --parallel:
-# $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
-# hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
-STATUS_DIR="$(mktemp -d)" || { echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
-# Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
-# trap already installed STATUS_DIR would be left behind.
-trap 'rm -rf "$STATUS_DIR"' EXIT
-# Prompt attachments (the opencode reviewer gets the diff as a file) live in their
-# OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs "$STATUS_DIR"/*
-# and treats every file there as a reviewer outcome, so an attachment dropped in
-# there would be counted as a failed reviewer and poison the verdict.
-# Both are mktemp -d (mode 700) and both are removed by the EXIT trap, which does
-# run on SIGTERM — a per-function RETURN trap does not, and would leave the full
-# PR diff behind in /tmp.
-#
-# EXIT alone is deliberate; do NOT add `INT TERM HUP` handlers here. Bash defers a
-# trapped signal until the running foreground command finishes, so trapping TERM
-# would make the relay sit through the rest of `timeout $AGENT_TIMEOUT <agent>` —
-# minutes — before cleaning, whereas an untrapped TERM kills bash immediately and
-# the EXIT trap fires right then. Verified in three shapes (plain child, child in a
-# command substitution, backgrounded subshells as under --parallel): all cleaned on
-# SIGTERM, and adding a TERM handler measurably delayed it. SIGKILL leaks, but no
-# trap of any kind can prevent that.
-# opencode (diff attach) and grok (prompt-file + isolated cwd) need a temp dir outside
-# STATUS_DIR. Don't allocate (or widen the trap) when neither is selected.
-ATTACH_DIR=""
-if opencode_is_selected || grok_is_selected; then
-  ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
-  trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
-  relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
-fi
-# Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
-# "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
-# prefix also guarantees the key is never a dotfile (which the tally glob "*"
-# would silently skip) or "."/".." — either would reopen a fail-open hole.
-status_key() { printf 'k_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
-
-# The DIFF always comes from `gh pr diff` — it is authoritative (matches what GitHub shows,
-# handles fork PRs, never fooled by a stale/rebased local base), and it is a single cheap
-# subprocess, NOT an agent tool call.
-DIFF=$(gh pr diff "$PR" 2>/dev/null)
-[ -z "$DIFF" ] && { echo "Empty diff or cannot read PR #$PR."; exit 1; }
-# The speed win is separate: when the current checkout PROVABLY is this PR's head AND is
-# clean, we tell reviewers to read the changed files straight off disk instead of running
-# `gh` themselves. Each `gh` an agentic reviewer runs is a full LLM round-trip — the main
-# cause of slow-model timeouts — so removing them is the whole point.
-# local_context_ok() is the single eligibility gate — used both here and at the end of the
-# round, so the two invariants can't drift. It is FAIL-CLOSED: any git command that ERRORS
-# (not just prints) makes it false, so a broken/foreign/dirty checkout is never trusted.
-#   - inside a git work tree, and
-#   - HEAD is exactly the PR head, and
-#   - the tree is clean (no staged/unstaged/untracked changes).
-# When it's false, reviewers are told to fetch via `gh` as before. `gh` also still POSTS the
-# reviews (the consensus trail).
-local_context_ok() {
-  [ -n "$HEAD_SHA" ] || return 1
-  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
-  local _h _st
-  _h=$(git rev-parse HEAD 2>/dev/null) || return 1
-  [ "$_h" = "$HEAD_SHA" ] || return 1
-  _st=$(git status --porcelain 2>/dev/null) || return 1   # git status errored → not eligible
-  [ -z "$_st" ]                                            # any output → dirty → not eligible
-}
-LOCAL_CONTEXT=0
-local_context_ok && LOCAL_CONTEXT=1
-[ "$LOCAL_CONTEXT" = 1 ] && _ctx="reviewers read files locally" || _ctx="reviewers fetch via gh"
-echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes ($_ctx)"
-
-# --- Optional context document prepended to every reviewer's prompt ----------
-CONTEXT_BLOCK=""
-if [ -n "$CONTEXT_FILE" ]; then
-  [ -f "$CONTEXT_FILE" ] || { echo "context file not found: $CONTEXT_FILE" >&2; exit 1; }
-  CONTEXT_BLOCK=$(printf '## Provided context — read this and verify the PR against it\n\n%s\n\n---\n\n' "$(cat "$CONTEXT_FILE")")
-  echo "  context: $CONTEXT_FILE ($(wc -c < "$CONTEXT_FILE") bytes)"
-fi
-
-# --- Hard loop guard: cap the review rounds per PR --------------------------
-# Prevents an endless read→fix→re-run cycle. State is per repo+PR, kept in a cache file;
-# auto-resets after 6h of inactivity (a fresh working session), or manually with --reset.
-# A round is consumed once the panel is RESOLVED and about to be dispatched — the state is written
-# just before pass 2, further down, NOT at the end of the run. A machine where nobody is runnable
-# still consumes nothing, because that is gated on would_run. (This paragraph used to say the
-# opposite, "only once at least one reviewer actually ran (see end of file)"; that stopped being
-# true when the write moved ahead of dispatch to bound a kill→retry loop.)
-# This is a best-effort SOFT guard, not a concurrency boundary: the counters are an unlocked
-# read-modify-write, so two relays launched on the same PR at the same instant can lose an update
-# and UNDERCOUNT dispatches — which weakens both caps, rather than merely overshooting one. Don't
-# run concurrent relays on one PR and rely on the caps; we don't pay for locking here.
 # --max-rounds must be a non-negative integer, else the arithmetic below breaks and
 # silently bypasses the cap — reject it as a usage error instead.
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
@@ -391,9 +296,187 @@ relay_forget_key() { rm -f "$ROUND_FILE" "$ROUND_DIR/$ROUND_KEY".run.* "$ROUND_D
 [ "$RESET" = 1 ] && relay_forget_key
 # mtime: GNU `stat -c %Y`, BSD/macOS `stat -f %m`.
 _round_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+# NOTE: an unreadable mtime reads as 0 here, i.e. "ancient", so the whole key is forgotten. That is
+# the safe direction for the STATE (a fresh counter beats a counter nobody can date), and the
+# opposite of what the orphan sweep below does for logs, where the safe direction is to keep the
+# evidence. The asymmetry is deliberate, not an oversight.
 if [ -f "$ROUND_FILE" ] && [ $(( $(date +%s) - $(_round_mtime "$ROUND_FILE") )) -gt 21600 ]; then
   relay_forget_key   # stale (>6h): new session, start fresh — state AND transcripts
 fi
+# The staleness path above needs a ROUND_FILE to look at, and the state write is gated on
+# `DRY = 0 && would_run > 0`. So a dry run, a run that resolves nobody (--max-rounds 0,
+# --reviewers bogus), or one killed before that write leaves a log family that NOTHING collects:
+# no state file, no staleness check, and the files sit there until someone happens to pass --reset
+# for that exact key. The README promised "6h or --reset" with no such exception.
+#
+# Expire by FAMILY, keyed on the log's own mtime, and take the sidecars with it. Per-FILE expiry
+# would break the very invariant relay_forget_key exists to protect — a surviving sidecar beside a
+# deleted log describes a session with no transcript. Iterate over the eight-character log names
+# only: the `.run.*` glob also matches the sidecars hanging off them (<log>.k_claude.review), and a
+# loop over everything would try to age those independently.
+#
+# Runs BEFORE this invocation's own mktemp, so a wrong age computation can never eat the log we are
+# about to open. Same 21600s and same _round_mtime as the state check above: two notions of "stale"
+# that can drift apart would be worse than the gap being closed here.
+if [ ! -f "$ROUND_FILE" ]; then
+  for _orphan in "$ROUND_DIR/$ROUND_KEY".run.????????; do
+    # No nullglob: an unmatched glob arrives as the literal pattern, and this branch is now the
+    # common case (it fires whenever there is no state file at all).
+    [ -e "$_orphan" ] || continue
+    # _round_mtime prints 0 when it cannot stat. Treating that as the epoch would delete the
+    # file immediately, which is the wrong direction for evidence: an unreadable mtime is a
+    # reason to keep, not to collect.
+    _omt="$(_round_mtime "$_orphan")"
+    [ "$_omt" -gt 0 ] 2>/dev/null || continue
+    if [ $(( $(date +%s) - _omt )) -gt 21600 ]; then
+      rm -f "$_orphan" "$_orphan".* 2>/dev/null || true
+    fi
+  done
+  # The atomic state write leaves <key>.state.XXXXXXXX behind if it is killed between mktemp and
+  # the mv. relay_forget_key sweeps those, but it only ever runs with a .round file present — so
+  # without this they are the one leftover the orphan path would still miss.
+  for _orphan in "$ROUND_DIR/$ROUND_KEY".state.*; do
+    [ -e "$_orphan" ] || continue
+    _omt="$(_round_mtime "$_orphan")"
+    [ "$_omt" -gt 0 ] 2>/dev/null || continue
+    # `if`, not `[ … ] && rm`: under `set -e` a false test as the last command of a loop body
+    # takes the whole script down with it.
+    if [ $(( $(date +%s) - _omt )) -gt 21600 ]; then
+      rm -f "$_orphan" 2>/dev/null || true
+    fi
+  done
+  unset _orphan _omt
+fi
+
+# --- Run evidence: one log for this invocation, one sidecar per reviewer -----
+# ONE WRITER PER FILE. Under --parallel each reviewer runs in a background subshell, so a single
+# shared append target would interleave multi-line review bodies into garbage. The parent writes
+# only this log; each reviewer writes only its own sidecar. No locking, nothing to merge, and
+# therefore nothing that depends on the run reaching its end.
+#
+# The name is created with mktemp, which is O_EXCL and mode 600, so it is unique PER INVOCATION and
+# cannot be a planted symlink. Unique matters: a fixed <key>.<reviewer> name would hand the same
+# file to every retry, and a retry after a kill would overwrite the very evidence of the kill.
+# (`date +%s`-plus-$$ was the obvious alternative and is not collision-safe — PIDs get reused.)
+#
+# Created BEFORE the cap checks below, deliberately. It used to come after, which meant an exit-4
+# run — the one where an operator most wants to know what the counters were and why it stopped —
+# left no log at all, while the README promised every invocation leaves evidence. All three
+# cross-reviewers caught that. The cost is one small file on a run that dispatches nobody.
+#
+# And created before the SLOW calls too, which is the newer half of the same lesson: the head-SHA
+# read and `gh pr diff` used to run first, so a hang or a kill in either left nothing behind at all.
+# It cannot move earlier than this: ROUND_KEY is derived from REPO, and REPO itself comes from gh.
+# So the honest promise, and the one the README makes, is "as soon as REPO and PR are known, before
+# the head SHA and the diff" — NOT "before any network call".
+RUN_BASE="$(mktemp "$ROUND_DIR/$ROUND_KEY.run.XXXXXXXX" 2>/dev/null)" || {
+  echo "cannot create run log in '$ROUND_DIR'" >&2; exit 1; }
+relay_log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$RUN_BASE"; }
+# Printed NOW, not only in the closing banner: a killed run never reaches the banner, which is
+# exactly the run whose log someone will want.
+echo "  run log: $RUN_BASE"
+# The first line the log ever gets. The detailed start lines below need HEAD_SHA and the round
+# counters, which do not exist yet — writing them here would write them empty.
+relay_log "start pr=$PR repo=${REPO:-?}"
+
+# Reviewed SHA: bind every review to the exact PR head so a concurrent push can't
+# leave green reviews standing on stale code (checked again at the end).
+HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true)
+# Logged the moment it is known, not after the round-state block: a run killed during the diff
+# fetch would otherwise carry a log with no SHA in it, and the SHA is what ties a review to code.
+relay_log "start sha=${HEAD_SHA:-<unreadable>} mode=$MODE author=${AUTHOR:-none}"
+echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
+# (The fail-closed early-abort on an unreadable HEAD SHA lives AFTER the round-cap
+#  check below, so a PR already at the cap still reports exit 4, not 3.)
+
+# Per-reviewer outcome, written as files so it survives subshells under --parallel:
+# $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
+# hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
+STATUS_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create outcome temp dir"; echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
+# Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
+# trap already installed STATUS_DIR would be left behind.
+trap 'rm -rf "$STATUS_DIR"' EXIT
+# Prompt attachments (the opencode reviewer gets the diff as a file) live in their
+# OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs "$STATUS_DIR"/*
+# and treats every file there as a reviewer outcome, so an attachment dropped in
+# there would be counted as a failed reviewer and poison the verdict.
+# Both are mktemp -d (mode 700) and both are removed by the EXIT trap, which does
+# run on SIGTERM — a per-function RETURN trap does not, and would leave the full
+# PR diff behind in /tmp.
+#
+# EXIT alone is deliberate; do NOT add `INT TERM HUP` handlers here. Bash defers a
+# trapped signal until the running foreground command finishes, so trapping TERM
+# would make the relay sit through the rest of `timeout $AGENT_TIMEOUT <agent>` —
+# minutes — before cleaning, whereas an untrapped TERM kills bash immediately and
+# the EXIT trap fires right then. Verified in three shapes (plain child, child in a
+# command substitution, backgrounded subshells as under --parallel): all cleaned on
+# SIGTERM, and adding a TERM handler measurably delayed it. SIGKILL leaks, but no
+# trap of any kind can prevent that.
+# opencode (diff attach) and grok (prompt-file + isolated cwd) need a temp dir outside
+# STATUS_DIR. Don't allocate (or widen the trap) when neither is selected.
+ATTACH_DIR=""
+if opencode_is_selected || grok_is_selected; then
+  ATTACH_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create attachment temp dir"; echo "cannot create temp dir for attachments" >&2; exit 1; }
+  trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
+  relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
+fi
+# Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
+# "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
+# prefix also guarantees the key is never a dotfile (which the tally glob "*"
+# would silently skip) or "."/".." — either would reopen a fail-open hole.
+status_key() { printf 'k_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
+
+# The DIFF always comes from `gh pr diff` — it is authoritative (matches what GitHub shows,
+# handles fork PRs, never fooled by a stale/rebased local base), and it is a single cheap
+# subprocess, NOT an agent tool call.
+DIFF=$(gh pr diff "$PR" 2>/dev/null)
+[ -z "$DIFF" ] && { relay_log "verdict exit=1 empty diff or unreadable PR"; echo "Empty diff or cannot read PR #$PR."; exit 1; }
+# The speed win is separate: when the current checkout PROVABLY is this PR's head AND is
+# clean, we tell reviewers to read the changed files straight off disk instead of running
+# `gh` themselves. Each `gh` an agentic reviewer runs is a full LLM round-trip — the main
+# cause of slow-model timeouts — so removing them is the whole point.
+# local_context_ok() is the single eligibility gate — used both here and at the end of the
+# round, so the two invariants can't drift. It is FAIL-CLOSED: any git command that ERRORS
+# (not just prints) makes it false, so a broken/foreign/dirty checkout is never trusted.
+#   - inside a git work tree, and
+#   - HEAD is exactly the PR head, and
+#   - the tree is clean (no staged/unstaged/untracked changes).
+# When it's false, reviewers are told to fetch via `gh` as before. `gh` also still POSTS the
+# reviews (the consensus trail).
+local_context_ok() {
+  [ -n "$HEAD_SHA" ] || return 1
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  local _h _st
+  _h=$(git rev-parse HEAD 2>/dev/null) || return 1
+  [ "$_h" = "$HEAD_SHA" ] || return 1
+  _st=$(git status --porcelain 2>/dev/null) || return 1   # git status errored → not eligible
+  [ -z "$_st" ]                                            # any output → dirty → not eligible
+}
+LOCAL_CONTEXT=0
+local_context_ok && LOCAL_CONTEXT=1
+[ "$LOCAL_CONTEXT" = 1 ] && _ctx="reviewers read files locally" || _ctx="reviewers fetch via gh"
+echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -c) bytes ($_ctx)"
+
+# --- Optional context document prepended to every reviewer's prompt ----------
+CONTEXT_BLOCK=""
+if [ -n "$CONTEXT_FILE" ]; then
+  [ -f "$CONTEXT_FILE" ] || { relay_log "verdict exit=1 context file not found"; echo "context file not found: $CONTEXT_FILE" >&2; exit 1; }
+  CONTEXT_BLOCK=$(printf '## Provided context — read this and verify the PR against it\n\n%s\n\n---\n\n' "$(cat "$CONTEXT_FILE")")
+  echo "  context: $CONTEXT_FILE ($(wc -c < "$CONTEXT_FILE") bytes)"
+fi
+
+# --- Hard loop guard: cap the review rounds per PR --------------------------
+# Prevents an endless read→fix→re-run cycle. State is per repo+PR, kept in a cache file;
+# auto-resets after 6h of inactivity (a fresh working session), or manually with --reset.
+# A round is consumed once the panel is RESOLVED and about to be dispatched — the state is written
+# just before pass 2, further down, NOT at the end of the run. A machine where nobody is runnable
+# still consumes nothing, because that is gated on would_run. (This paragraph used to say the
+# opposite, "only once at least one reviewer actually ran (see end of file)"; that stopped being
+# true when the write moved ahead of dispatch to bound a kill→retry loop.)
+# This is a best-effort SOFT guard, not a concurrency boundary: the counters are an unlocked
+# read-modify-write, so two relays launched on the same PR at the same instant can lose an update
+# and UNDERCOUNT dispatches — which weakens both caps, rather than merely overshooting one. Don't
+# run concurrent relays on one PR and rely on the caps; we don't pay for locking here.
 
 # --- Round state: "<sha> <rounds> <same-sha-invocations>" --------------------
 # Why per-SHA. The old counter advanced once per INVOCATION, so splitting a panel across three
@@ -431,28 +514,6 @@ SAME_SHA=0
 if [ "$SAME_SHA" = 1 ]; then         NEXT_ROUND="$ROUND"; NEXT_SAME=$((SAME + 1))
 elif [ "$_state_legacy" = 1 ]; then  NEXT_ROUND="$ROUND"; NEXT_SAME=1
 else                                 NEXT_ROUND=$((ROUND + 1)); NEXT_SAME=1; fi
-# --- Run evidence: one log for this invocation, one sidecar per reviewer -----
-# ONE WRITER PER FILE. Under --parallel each reviewer runs in a background subshell, so a single
-# shared append target would interleave multi-line review bodies into garbage. The parent writes
-# only this log; each reviewer writes only its own sidecar. No locking, nothing to merge, and
-# therefore nothing that depends on the run reaching its end.
-#
-# The name is created with mktemp, which is O_EXCL and mode 600, so it is unique PER INVOCATION and
-# cannot be a planted symlink. Unique matters: a fixed <key>.<reviewer> name would hand the same
-# file to every retry, and a retry after a kill would overwrite the very evidence of the kill.
-# (`date +%s`-plus-$$ was the obvious alternative and is not collision-safe — PIDs get reused.)
-#
-# Created BEFORE the cap checks below, deliberately. It used to come after, which meant an exit-4
-# run — the one where an operator most wants to know what the counters were and why it stopped —
-# left no log at all, while the README promised every invocation leaves evidence. All three
-# cross-reviewers caught that. The cost is one small file on a run that dispatches nobody.
-RUN_BASE="$(mktemp "$ROUND_DIR/$ROUND_KEY.run.XXXXXXXX" 2>/dev/null)" || {
-  echo "cannot create run log in '$ROUND_DIR'" >&2; exit 1; }
-relay_log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$RUN_BASE"; }
-# Printed NOW, not only in the closing banner: a killed run never reaches the banner, which is
-# exactly the run whose log someone will want.
-echo "  run log: $RUN_BASE"
-relay_log "start pr=$PR repo=${REPO:-?} sha=${HEAD_SHA:-<unreadable>} mode=$MODE author=${AUTHOR:-none}"
 relay_log "start reviewers=$REVIEWERS parallel=$PARALLEL dry=$DRY timeout=${AGENT_TIMEOUT}s"
 # PID and PGID are recorded so that the NEXT time something kills this process mid-round, the log
 # says what to look for. Every investigation so far has ended outside this script.
@@ -563,7 +624,7 @@ PROMPT="${CONTEXT_BLOCK}${BASE}"
 # set 0 to always omit).
 LINK_DIFF_FALLBACK_MAX_BYTES="${LINK_DIFF_FALLBACK_MAX_BYTES:-100000}"
 # Validated: a non-numeric value would blow up in the arithmetic below.
-case "$LINK_DIFF_FALLBACK_MAX_BYTES" in ''|*[!0-9]*) echo "invalid LINK_DIFF_FALLBACK_MAX_BYTES: '$LINK_DIFF_FALLBACK_MAX_BYTES' (want bytes)" >&2; exit 2;; esac
+case "$LINK_DIFF_FALLBACK_MAX_BYTES" in ''|*[!0-9]*) relay_log "verdict exit=2 invalid LINK_DIFF_FALLBACK_MAX_BYTES"; echo "invalid LINK_DIFF_FALLBACK_MAX_BYTES: '$LINK_DIFF_FALLBACK_MAX_BYTES' (want bytes)" >&2; exit 2;; esac
 if [ "$MODE" = link ]; then
   _diff_bytes=$(printf '%s' "$DIFF" | wc -c | tr -d ' ')
   if [ "$_diff_bytes" -le "$LINK_DIFF_FALLBACK_MAX_BYTES" ]; then
@@ -843,12 +904,12 @@ if [ "$DRY" = 0 ] && [ "$would_run" -gt 0 ]; then
   # and the rename are checked by hand — an unnoticed failure here would dispatch reviewers with no
   # durable state, which is the exact hole this block closes.
   _state_tmp="$(mktemp "$ROUND_DIR/$ROUND_KEY.state.XXXXXXXX" 2>/dev/null)" || {
-    echo "✖ cannot create round-state temp file in '$ROUND_DIR'" >&2; exit 1; }
+    relay_log "verdict exit=1 cannot create round-state temp"; echo "✖ cannot create round-state temp file in '$ROUND_DIR'" >&2; exit 1; }
   if ! printf '%s %s %s\n' "$HEAD_SHA" "$NEXT_ROUND" "$NEXT_SAME" > "$_state_tmp"; then
-    rm -f "$_state_tmp"; echo "✖ cannot write round state" >&2; exit 1
+    rm -f "$_state_tmp"; relay_log "verdict exit=1 cannot write round state"; echo "✖ cannot write round state" >&2; exit 1
   fi
   if ! mv -f "$_state_tmp" "$ROUND_FILE"; then
-    rm -f "$_state_tmp"; echo "✖ cannot install round state at '$ROUND_FILE'" >&2; exit 1
+    rm -f "$_state_tmp"; relay_log "verdict exit=1 cannot install round state"; echo "✖ cannot install round state at '$ROUND_FILE'" >&2; exit 1
   fi
   relay_log "state sha=${HEAD_SHA:0:7} round=$NEXT_ROUND same=$NEXT_SAME (written before dispatch)"
 else
