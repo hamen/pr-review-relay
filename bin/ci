@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# bin/ci — the gate for this repository. Run it before pushing; the pre-push hook runs it for you.
+#
+# This repo has no GitHub Actions CI: the workflow was disabled on 2026-08-01 and its file removed
+# here. That makes this script the ONLY thing standing between a change and `main`, which is why it
+# is versioned, why the hook that calls it is versioned, and why nothing in it is optional.
+#
+# It runs three things, and each is here because leaving it out let something through before:
+#
+#   1. `bash -n` over every shell file — not just the entrypoints. `bash -n pr-review-relay` does
+#      NOT parse lib-opencode.sh or lib-grok.sh, which are sourced at runtime, so a syntax error in
+#      one of those would surface only when a user happens to select that reviewer. The list is
+#      explicit rather than a glob because the entrypoints have no extension: `*.sh` silently misses
+#      pr-review-relay itself, which is the file most worth checking.
+#   2. A feature probe for `jq --raw-output0` (jq 1.7+). pr-review-distill refuses to run without
+#      it, so without this probe the distill suite fails with a confusing error instead of the
+#      actual reason.
+#   3. The three test suites.
+#
+# CI_MODE=push selects the fast path, per the portfolio hook contract. For this repo there is no
+# distinction: the suites ARE the gate, they need no device or simulator, and they finish in about
+# two minutes. The variable is honoured so the shared hook's contract holds, and so a future slow
+# check has an obvious place to be excluded from.
+#
+# Do NOT reach for `--no-verify` when this fails. A failing gate is a finding. The one honest false
+# alarm is a checkout with no `node` on PATH — wrap-collapsed-pr-comment.mjs needs it — and the fix
+# is to install node, not to skip the gate.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+# Read and reported, but nothing branches on it today: every stage here is fast enough for the push
+# path, so full and push run the same checks. Kept so the shared hook's contract holds, and so the
+# first slow check added has an obvious place to be excluded from — a `case "$MODE"` around it.
+MODE="${CI_MODE:-full}"
+say() { printf '  %s\n' "$*" >&2; }
+
+printf '▶ bin/ci (%s) — %s\n' "$MODE" "$ROOT" >&2
+
+# --- 1. syntax ---------------------------------------------------------------
+# Extensionless entrypoints first, then the sourced libraries, then the suites. Keep this list in
+# sync with what the repo actually ships; a file that is shipped and not parsed here is a file whose
+# syntax errors reach users.
+say "syntax check"
+for f in \
+  pr-review-relay \
+  review-local \
+  pr-review-fetch \
+  pr-review-distill \
+  pr-review-collapse-comments \
+  pr-review-consensus \
+  lib-opencode.sh \
+  lib-grok.sh \
+  bin/ci \
+  .githooks/pre-push \
+  test/test-gate.sh \
+  test/test-fail-closed.sh \
+  test/test-distill.sh
+do
+  [ -f "$f" ] || { echo "bin/ci: expected shell file is missing: $f" >&2; exit 1; }
+  bash -n "$f" || { echo "bin/ci: syntax error in $f" >&2; exit 1; }
+done
+
+# --- 2. jq capability --------------------------------------------------------
+# Feature-detect exactly as pr-review-distill does, and fail with the reason rather than letting the
+# distill suite die of a symptom.
+say "jq capability"
+if ! command -v jq >/dev/null 2>&1; then
+  echo "bin/ci: jq not found; pr-review-distill needs jq 1.7+ (--raw-output0)" >&2
+  exit 1
+fi
+if ! jq --raw-output0 -n '""' >/dev/null 2>&1; then
+  echo "bin/ci: this jq ($(jq --version)) lacks --raw-output0; pr-review-distill needs jq 1.7+" >&2
+  exit 1
+fi
+
+# node is needed by wrap-collapsed-pr-comment.mjs, which the fail-closed suite exercises. The header
+# used to call a missing node "the honest false alarm" and then not check for it — so it failed in
+# the middle of a suite with an indirect message, which is exactly what the jq probe exists to avoid.
+say "node capability"
+if ! command -v node >/dev/null 2>&1; then
+  echo "bin/ci: node not found; wrap-collapsed-pr-comment.mjs needs it and the suites exercise it" >&2
+  exit 1
+fi
+
+# --- 3. suites ---------------------------------------------------------------
+# Both run even when the first fails, so one invocation tells you everything that is broken. `set -e`
+# would stop at the first, which turns a single gate run into several. The exit code is still
+# fail-closed: any red suite fails the gate.
+failed=0
+run_suite() { # <label> <script>
+  say "$1"
+  if bash "$2"; then
+    printf '  ✓ %s\n' "$1" >&2
+  else
+    printf '  ✗ %s FAILED\n' "$1" >&2
+    failed=1
+  fi
+}
+run_suite "test-gate.sh"        "test/test-gate.sh"
+run_suite "test-fail-closed.sh" "test/test-fail-closed.sh"
+run_suite "test-distill.sh"     "test/test-distill.sh"
+
+if [ "$failed" != 0 ]; then
+  echo "✖ bin/ci: FAILED — fix the failures above. Do not bypass with --no-verify." >&2
+  exit 1
+fi
+echo "✔ bin/ci: all green." >&2

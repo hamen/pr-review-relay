@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Pre-push gate for pr-review-relay. Adopted verbatim from the portfolio template at
+# app-tools/templates/githooks/pre-push — deliberately NOT copied from a sibling repo: the hooks
+# checked in to kindle-gratis-compose and three-things-a-day are an older revision that discards the
+# ref list on stdin, which is precisely the hole this one closes.
+#
+# Per clone, once:
+#
+#     git config core.hooksPath .githooks
+#
+# It is repo-local config, so a fresh clone has no gate until someone runs that. Versioning the hook
+# makes the gate possible everywhere; git deliberately does not activate repository-controlled hooks
+# on clone, so it cannot be made automatic from inside the repo.
+#
+# Runs the repo's own bin/ci in push mode and BLOCKS the push if it fails. It does not know or
+# care whether the repo is Rails, Flutter or both — bin/ci owns that. One file to reason about,
+# and a repo can change what it checks without touching its hook.
+#
+# Contract with bin/ci:
+#   - CI_MODE=push selects the fast path: the checks worth waiting ~30s for before every push.
+#     Leave out anything needing a booted simulator, a device, or a release build — a gate that
+#     cannot pass on a normal dev machine gets bypassed, and a bypassed gate is worse than none
+#     because it teaches everyone to reach for --no-verify.
+#   - A repo whose bin/ci ignores CI_MODE still works; it just runs everything.
+#
+# Do NOT bypass with --no-verify. A failing gate is a finding; fix the cause. The one honest false
+# alarm is a fresh checkout or a post-version-bump gemset with no packages installed: every stage
+# fails in under a second and it looks catastrophic. The fix is `bundle install` / `flutter pub
+# get`, never a bypass.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+head="$(git rev-parse HEAD)"
+zero="$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')"
+
+# bin/ci tests the WORKING TREE, so the only thing it can honestly vouch for is HEAD. Git feeds the
+# refs actually being pushed on stdin — "<local ref> <local sha> <remote ref> <remote sha>" — and an
+# earlier version of this hook threw them away. That made the gate a lie in every case where what
+# you push is not what you have checked out:
+#
+#     git push origin some-other-branch:main     # pushes a branch nobody tested
+#     git push origin HEAD~3:main                # pushes an ancestor, gate runs on HEAD
+#     git push --all                             # every branch, one of them tested
+#
+# In each of those the gate passed on HEAD while something else went to the server. So: refuse
+# unless every commit being pushed is HEAD. Refusing is right rather than checking out each ref and
+# running the gate per ref — that would need a clean tree it is about to dirty, and a hook that
+# silently moves your checkout around is worse than one that says no.
+pushing_other=""
+carries_code=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [ -z "${local_sha:-}" ] && continue
+  [ "$local_sha" = "$zero" ] && continue   # branch deletion: no code goes anywhere
+
+  carries_code=1
+
+  # Peel to the commit. An annotated or signed tag pushes the TAG object's id, not the commit's, so
+  # comparing the raw id rejects `git push origin v1.2.3` even when the tag points straight at the
+  # tested HEAD — which would block the release flow entirely. ^{commit} is a no-op on a commit id.
+  commit="$(git rev-parse --quiet --verify "${local_sha}^{commit}" || true)"
+  [ -z "$commit" ] && commit="$local_sha"
+
+  [ "$commit" = "$head" ] && continue
+  pushing_other="$pushing_other  ${_remote_ref:-?} -> $commit
+"
+done
+
+# A push that only deletes refs transfers no code, so there is nothing for the gate to vouch for.
+# Running it anyway would let unrelated local mess — a dirty tree, a failing test — block a branch
+# deletion, and a gate that blocks work it has no opinion on is one people route around.
+if [ "$carries_code" -eq 0 ]; then
+  exit 0
+fi
+
+if [ -n "$pushing_other" ]; then
+  echo "pre-push: refusing — these refs are not your checked-out HEAD ($head):" >&2
+  printf '%s' "$pushing_other" >&2
+  echo "The gate runs against the working tree, so it can only vouch for HEAD. Check out what you" >&2
+  echo "want to push and push that." >&2
+  exit 1
+fi
+
+# Same reasoning one step further in: if the tree is dirty, the gate tests uncommitted changes while
+# a different (possibly broken) committed state is what actually gets pushed. Untracked files count
+# — a stray config, fixture or source file changes what bin/ci does just as much as a tracked edit.
+# Anything genuinely not worth committing belongs in .gitignore or .git/info/exclude.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "pre-push: working tree has uncommitted changes — the gate tests the working tree, so commit or stash them first (otherwise a passing gate wouldn't be the pushed code)." >&2
+  exit 1
+fi
+
+untracked="$(git ls-files --others --exclude-standard)"
+if [ -n "$untracked" ]; then
+  echo "pre-push: untracked files present — the gate tests the working tree, so these affect the result but are not what gets pushed:" >&2
+  printf '%s\n' "$untracked" | sed 's/^/  /' >&2
+  echo "Commit them, delete them, or add them to .gitignore / .git/info/exclude." >&2
+  exit 1
+fi
+
+if [ ! -x "$root/bin/ci" ]; then
+  echo "pre-push: $root/bin/ci is missing or not executable — cannot run the gate." >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Why the environment is scrubbed before running the gate
+#
+# git exports its repo-local variables (GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE, …) into hook
+# environments, pointing at THIS repo. Any tool the gate runs that shells out to git then gets
+# answers about this repo instead of about itself.
+#
+# This is not hypothetical. Flutter does exactly that to read its own version: run under a hook it
+# concluded the SDK was "0.0.0-unknown" with "repositoryUrl: pushup-tracker", cached that in the
+# SHARED $FLUTTER_ROOT/bin/cache/flutter.version.json, and from then on every `flutter` on the
+# machine — in every project — failed dependency resolution against a 0.0.0 SDK. The failure also
+# hides its cause: nothing in the error points back at a git hook.
+#
+# The list comes from git itself rather than being hand-written: a hand-written list is a snapshot
+# that silently rots as git adds variables, and the ones it would miss —
+# GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_SHALLOW_FILE, GIT_IMPLICIT_WORK_TREE — contaminate exactly
+# the same way. GIT_QUARANTINE_PATH is added by hand: receive-pack sets it and it is not in that
+# list.
+#
+# Unsetting costs nothing — the gate always works from $root, never from git's ambient environment.
+# Keep this even in a repo with no Flutter: the next tool with the same habit is free to arrive.
+# ---------------------------------------------------------------------------
+unset_flags=()
+while IFS= read -r git_var; do
+  [ -n "$git_var" ] && unset_flags+=(-u "$git_var")
+done < <(git rev-parse --local-env-vars)
+unset_flags+=(-u GIT_QUARANTINE_PATH)
+
+env "${unset_flags[@]}" CI_MODE=push "$root/bin/ci"
+
+# Check the tree AGAIN, because the gate can move it. `flutter pub get` rewrites the tracked
+# pubspec.lock; `bundle install` rewrites Gemfile.lock; a formatter run in fix mode rewrites source.
+# When that happens the gate passed against a tree that differs from the commit being pushed — the
+# exact thing the check at the top exists to prevent, arriving through the back door.
+#
+# This is not theoretical: `bundle install` in a fresh worktree dropped a bundler line from
+# Gemfile.lock on 2026-08-01, and only the up-front check caught it, by luck of running twice.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "pre-push: the gate MODIFIED tracked files while running — it passed against a tree that is not what you are pushing:" >&2
+  git diff --name-only HEAD | sed 's/^/  /' >&2
+  echo "Usually a lockfile rewritten by a dependency step. Review the diff, commit it or revert it, then push again." >&2
+  exit 1
+fi
+
+# Untracked too. A gate that generates a file — a fixture, a build artefact, a generated source —
+# and then passes because a later step consumed it has proved nothing about a clean checkout.
+after_untracked="$(git ls-files --others --exclude-standard)"
+if [ -n "$after_untracked" ]; then
+  echo "pre-push: the gate CREATED untracked files while running — later steps may have depended on them, so this says nothing about a clean checkout:" >&2
+  printf '%s\n' "$after_untracked" | sed 's/^/  /' >&2
+  echo "Commit them, delete them, or add them to .gitignore / .git/info/exclude." >&2
+  exit 1
+fi
+
+# And that HEAD is still HEAD. A gate that checks out, resets, or commits can leave a different —
+# perfectly clean — tree behind, so every check above would pass while the original untested commit
+# is what actually goes to the server.
+if [ "$(git rev-parse HEAD)" != "$head" ]; then
+  echo "pre-push: the gate MOVED HEAD while running ($head -> $(git rev-parse HEAD)) — what it tested is not what is being pushed." >&2
+  exit 1
+fi
