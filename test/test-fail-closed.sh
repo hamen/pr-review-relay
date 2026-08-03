@@ -83,6 +83,7 @@ case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output b
 # empty-output branch sees it, on stdout it does not — and the stdout one used to be posted as
 # a review.
 case ",\${QUOTA_ERR:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s." >&2; exit 1;; esac
+case ",\${QUOTA_PAD:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 08m00s." >&2; exit 1;; esac
 case ",\${QUOTA_TEXT_OK:-}," in *",\$key,"*) echo "Looks good. Note the branch where quota reached is handled."; exit 0;; esac
 case ",\${QUOTA_OUT:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s."; exit 1;; esac
 # Record our argv when asked, so a test can assert the command line the relay builds.
@@ -271,6 +272,35 @@ if [ "$_rc" = 3 ]; then
 else
   echo "  FAIL [got $_rc, want 3] a bench that cannot be persisted fails the round"; FAIL=$((FAIL+1))
 fi
+
+# A zero-padded reset ("08m00s") is invalid octal. Before this it aborted the arithmetic and took
+# the relay down with it — a quota message turning into a crash is the worst of the three outcomes.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" QUOTA_PAD=codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+_e="$(awk -F'\t' '$1=="codex"{print $2}' "$WORK/cache/pr-review-relay/benched" 2>/dev/null)"
+_d=$(( ${_e:-0} - $(date +%s) ))
+if [ "$_d" -gt 400 ] && [ "$_d" -lt 560 ]; then
+  echo "  ok   [-] a zero-padded reset parses as base 10, not octal"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] a zero-padded reset parses as base 10 — got ${_d}s, want ~480s"; FAIL=$((FAIL+1))
+fi
+
+# Pruning takes the lock too. With the lock held by someone else, prune must leave the file alone
+# rather than overwrite it with its own older view — which is how a concurrent discovery vanishes.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"; rm -f "$WORK/sha_counter"
+_future=$(( $(date +%s) + 7200 ))
+printf 'codex\t%s\tout of quota\n' "$_future" > "$WORK/cache/pr-review-relay/benched"
+mkdir -p "$WORK/cache/pr-review-relay/benched.lock"   # fresh lock: held by a "concurrent" relay
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude --parallel >/dev/null 2>&1
+if grep -q "^codex	" "$WORK/cache/pr-review-relay/benched" 2>/dev/null; then
+  echo "  ok   [-] prune respects the lock instead of overwriting a live entry"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] prune respects the lock instead of overwriting a live entry"; FAIL=$((FAIL+1))
+fi
+rm -rf "$WORK/cache/pr-review-relay/benched.lock"
+
 
 
 runx 0 "dry-run + valid explicit config → clean preflight" --reviewers claude,codex --dry-run

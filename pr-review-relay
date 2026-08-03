@@ -354,14 +354,19 @@ bench_until() {
 # Drops expired lines. Cheap, and it keeps the file from growing forever.
 bench_prune() {
   [ -r "$BENCH_FILE" ] || return 0
+  # Under the lock, like every other write. Without it a prune that started before a concurrent
+  # relay recorded a new bench would replace the file with its own older snapshot and erase that
+  # entry — the agent would be re-invoked and hit the same wall, with nothing to show why.
+  bench_lock || return 1
   local now tmp; now=$(date +%s)
-  tmp="$(mktemp "$ROUND_DIR/benched.XXXXXXXX")" || return 1
+  tmp="$(mktemp "$ROUND_DIR/benched.XXXXXXXX")" || { bench_unlock; return 1; }
   local agent until reason
   while IFS=$'\t' read -r agent until reason; do
     case "$until" in ''|*[!0-9]*) continue;; esac
     [ "$until" -gt "$now" ] && printf '%s\t%s\t%s\n' "$agent" "$until" "$reason" >> "$tmp"
   done < "$BENCH_FILE"
-  mv -f "$tmp" "$BENCH_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$BENCH_FILE" 2>/dev/null || { rm -f "$tmp"; bench_unlock; return 1; }
+  bench_unlock
   return 0
 }
 
@@ -381,7 +386,10 @@ bench_parse_reset() {
   [ -n "$m" ] && rest="${rest#*m}"
   s="$(printf '%s' "$rest" | sed -n 's/^\([0-9][0-9]*\)s.*/\1/p')"
   if [ -z "$h$m$s" ]; then echo $(( $(date +%s) + 21600 )); return 0; fi
-  echo $(( $(date +%s) + ${h:-0} * 3600 + ${m:-0} * 60 + ${s:-0} ))
+  # 10# on every component: a zero-padded value like "Resets in 08m00s" is read as octal
+  # otherwise, and `08` is not valid octal — the arithmetic aborts the relay instead of benching
+  # the reviewer, turning a quota message into a crash.
+  echo $(( $(date +%s) + 10#0${h:-0} * 3600 + 10#0${m:-0} * 60 + 10#0${s:-0} ))
 }
 
 # Does this output say "out of quota"? Deliberately narrow: a timeout or a crash is NOT out of

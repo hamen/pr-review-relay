@@ -607,8 +607,9 @@ global and time-based. If you reset a PR and a reviewer is still skipped, that i
 
 To force a reviewer back before its reset, delete its line from the bench file (one tab-separated
 line per agent: name, expiry epoch, reason). It sits beside the round state — under
-`$XDG_CACHE_HOME/pr-review-relay/benched`, created `0700` and ownership-checked, because a file that
-decides who reviews is worth the same protection as the reviews themselves. Each posted
+`$XDG_CACHE_HOME/pr-review-relay/benched`. The **directory** is the thing created `0700` and
+ownership-checked (the file itself lands `0600` via `mktemp`), because a file that decides who
+reviews is worth the same protection as the reviews themselves. Each posted
 review's footer records the **reviewed SHA** so you can tell whether a review predates a later push.
 
 > **Note:** reviews are posted as they complete, *before* the end-of-round SHA re-check. So a round that
