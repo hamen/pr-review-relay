@@ -296,6 +296,10 @@ relay_forget_key() { rm -f "$ROUND_FILE" "$ROUND_DIR/$ROUND_KEY".run.* "$ROUND_D
 [ "$RESET" = 1 ] && relay_forget_key
 # mtime: GNU `stat -c %Y`, BSD/macOS `stat -f %m`.
 _round_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+# NOTE: an unreadable mtime reads as 0 here, i.e. "ancient", so the whole key is forgotten. That is
+# the safe direction for the STATE (a fresh counter beats a counter nobody can date), and the
+# opposite of what the orphan sweep below does for logs, where the safe direction is to keep the
+# evidence. The asymmetry is deliberate, not an oversight.
 if [ -f "$ROUND_FILE" ] && [ $(( $(date +%s) - $(_round_mtime "$ROUND_FILE") )) -gt 21600 ]; then
   relay_forget_key   # stale (>6h): new session, start fresh — state AND transcripts
 fi

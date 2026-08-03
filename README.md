@@ -512,7 +512,7 @@ between two writes. And the sidecar-path symlink refusal is belt-and-braces that
 the path comes from a `mktemp` that created it `O_EXCL` moments earlier inside a mode-700 directory
 you own, so it provably did not exist — the real control is the directory, not the check.
 
-**Retention.** Every invocation leaves its own files. They are removed when that PR's state is
+**Retention.** Every invocation that gets as far as opening a run log leaves its own files. They are removed when that PR's state is
 discarded — by `--reset` or by the 6h inactivity reset — and, for runs that never wrote any state at
 all (a dry run, one that resolves no reviewer, one killed before the pre-dispatch write), by a
 sweep that expires those leftovers on their own 6h clock. Expiry is by **family**: a log and its
@@ -542,8 +542,10 @@ ever holds short event lines. If you want them gone sooner, `--reset` on the PR,
 
 ## 🔍 How it works
 
-1. Resolves the PR (current branch or `--pr`) and reads the diff with `gh pr diff` (used as a sanity
-   guard and for the line/byte summary).
+1. Resolves the PR (current branch or `--pr`), opens the run log (see
+   [Evidence and forensics](#-evidence-and-forensics) — it is opened here, before the calls that can
+   hang), then reads the diff with `gh pr diff` (used as a sanity guard and for the line/byte
+   summary).
 2. For each reviewer (except `--author`), runs the agent **headless** with a focused
    review prompt. By default (**`--link`**) the reviewer reads the changed files in context — so it
    reviews the *whole* PR, not just a diff snapshot. When the relay is run from the PR's own checkout and

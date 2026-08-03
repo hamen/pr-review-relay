@@ -1773,8 +1773,10 @@ if ( set -m ) 2>/dev/null; then
   ! grep -q "start sha=" "$_slog2" 2>/dev/null
   ok_if $? "and cannot yet carry the SHA line — the log came first" "$(cat "$_slog2" 2>/dev/null | tr '\n' '|')"
 else
-  echo "  skip [-] mid-diff kill test: no job control (set -m) available in this shell"
-  SKIP=$((SKIP+1))
+  # Five assertions live in that block; counting them individually keeps the summary honest
+  # about how much of the suite a shell without job control actually ran.
+  echo "  skip [-] mid-diff and head-SHA kill tests: no job control (set -m) available in this shell"
+  SKIP=$((SKIP+5))
 fi
 
 # --- every terminal path under an open log writes its verdict ----------------
@@ -1833,6 +1835,18 @@ _hmode="$(stat -c %a "$_hard/pr-review-relay" 2>/dev/null || stat -f %Lp "$_hard
 _hmode="${_hmode: -3}"
 [ "$_hmode" = "700" ]
 ok_if $? "a pre-existing state dir left 0777 is repaired to 700" "mode=${_hmode:-<unknown>}"
+
+# The refuse half of "same checks, every branch": a symlinked state directory must stop the run on
+# the XDG branch too, not only on the /tmp fallback. A planted link is how someone else's directory
+# ends up holding this PR's review text.
+_link="$WORK/linkcache"
+rm -rf "$_link" "$WORK/linktarget"; mkdir -p "$_link" "$WORK/linktarget"
+ln -s "$WORK/linktarget" "$_link/pr-review-relay"
+_lout=$(env PATH="$BIN:$PATH" XDG_CACHE_HOME="$_link" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA_A" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex 2>&1)
+_lrc=$?
+[ "$_lrc" != 0 ] && printf '%s' "$_lout" | grep -q "refusing to use round-state dir"
+ok_if $? "a symlinked state dir is refused on the XDG branch too" "rc=$_lrc"
 
 # NOTE ON WHAT IS *NOT* TESTED HERE. The relay refuses to write a sidecar whose path is already a
 # symlink. That check cannot be exercised honestly from this suite: the sidecar name is derived from
@@ -1938,7 +1952,7 @@ grep -q "INCOMPLETE" "$_side" 2>/dev/null; ok_if $? "overflow without SIGPIPE is
 # A cap exit must leave a verdict in the log, not just a return code.
 s_reset; s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=1 >/dev/null
 s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=1 >/dev/null
-_log=$(ls -t "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+_log=$(latest_log)
 grep -q "verdict exit=4 same-SHA cap" "$_log" 2>/dev/null; ok_if $? "an exit-4 cap hit logs its verdict" "$(tail -1 "$_log" 2>/dev/null)"
 
 # PR_RELAY_MAX_SAME_SHA=0: documented asymmetry — the same-SHA cap is only consulted once a SHA has
@@ -2021,7 +2035,7 @@ read -r _s _r _m < "$SRF" 2>/dev/null || true
 s_reset
 s_run "$SHA_A" -- --max-rounds 1 >/dev/null
 _rc=$(s_run "$SHA_B" -- --max-rounds 1)
-_log=$(ls -t "$SCACHE"/pr-review-relay/*.run.???????? 2>/dev/null | head -1)
+_log=$(latest_log)
 [ "$_rc" = 4 ] && grep -q "verdict exit=4 round cap" "$_log" 2>/dev/null
 ok_if $? "an exit-4 ROUND cap hit logs its verdict too" "rc=$_rc $(tail -1 "$_log" 2>/dev/null)"
 
@@ -2030,6 +2044,13 @@ ok_if $? "an exit-4 ROUND cap hit logs its verdict too" "rc=$_rc $(tail -1 "$_lo
 s_reset
 _rc=$(s_run "$SHA_A" PR_RELAY_MAX_ROUNDS=0)
 [ "$_rc" = 4 ] && [ ! -f "$SRF" ]; ok_if $? "MAX_ROUNDS=0 refuses the first dispatch and persists nothing" "rc=$_rc state=$(s_state)"
+# ...and because it persists nothing, its log is an orphan like the dry run's: same 6h sweep, so
+# the exit path documented as "always at cap" does not quietly accumulate evidence forever.
+_zlog=$(latest_log)
+touch -d "7 hours ago" "$_zlog" 2>/dev/null || touch -A -070000 "$_zlog" 2>/dev/null
+s_run "$SHA_A" >/dev/null
+[ -n "$_zlog" ] && [ ! -e "$_zlog" ]
+ok_if $? "a MAX_ROUNDS=0 run's log expires on the same orphan clock" "log=${_zlog:-<none>}"
 
 unset _r1 _r2 _sg _log _side _rc
 
