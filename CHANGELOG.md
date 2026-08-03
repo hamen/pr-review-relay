@@ -129,7 +129,6 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 - `bin/ci` probes for `node` as well as `jq`. The header called a missing `node` "the honest false
   alarm" and then did not check for it, so it failed mid-suite with an indirect message.
 
-### Fixed
 
 - **The suites' git isolation was weaker than it looked, and its own tests could not tell.** The
   version that landed with the evidence work named 8 of the 15 variables `git rev-parse

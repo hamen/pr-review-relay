@@ -23,7 +23,7 @@ WORK="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
 BIN="$WORK/bin"; mkdir -p "$BIN"
 trap 'rm -rf "$WORK"' EXIT
 
-# shellcheck source=test/lib-hermetic.sh
+# shellcheck source=lib-hermetic.sh
 . "$HERE/lib-hermetic.sh"
 relay_require_git_2_31
 relay_isolate_git "$WORK"
@@ -1981,15 +1981,34 @@ hr=$?; hv="$(tail -1 "$WORK/herm2.out" 2>/dev/null)"
   || { echo "  FAIL hermeticity: hooksPath ($(tail -1 "$WORK/herm5.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
 
 # 6. The remaining three keys have no observable effect on these suites, which is exactly why they
-#    would rot unnoticed. One combined config assertion is the right weight for them.
-( cd "$WORK" || exit 1; relay_isolate_git "$WORK"
+#    would rot unnoticed — and why asserting them post-isolation was not enough: on a machine that
+#    already has them false, deleting the exports leaves this green. Plant them true first.
+( cd "$WORK" || exit 1
+  export GIT_CONFIG_PARAMETERS="'tag.gpgsign=true' 'core.fsmonitor=true' 'color.ui=always'"
+  [ "$(git config --get tag.gpgsign 2>/dev/null)" = "true" ] || { echo PLANT_DEAD; exit 3; }
+  relay_isolate_git "$WORK"
   printf '%s|%s|%s' "$(git config --get tag.gpgsign 2>/dev/null)" \
                     "$(git config --get core.fsmonitor 2>/dev/null)" \
                     "$(git config --get color.ui 2>/dev/null)" ) > "$WORK/herm6.out" 2>/dev/null
-hv="$(tail -1 "$WORK/herm6.out" 2>/dev/null)"
-[ "$hv" = "false|false|false" ] \
-  && { echo "  ok   [-] tag.gpgsign, fsmonitor and color.ui are neutralised too"; PASS=$((PASS+1)); } \
-  || { echo "  FAIL hermeticity: tag.gpgsign/fsmonitor/color.ui (got '$hv')"; FAIL=$((FAIL+1)); }
+hr=$?; hv="$(tail -1 "$WORK/herm6.out" 2>/dev/null)"
+[ "$hr" = 0 ] && [ "$hv" = "false|false|false" ] \
+  && { echo "  ok   [-] planted tag.gpgsign, fsmonitor and color.ui are all neutralised"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: tag.gpgsign/fsmonitor/color.ui (rc=$hr got '$hv')"; FAIL=$((FAIL+1)); }
+
+# 6b. The --allow-hooks branch had no coverage at all: a regression that set core.hooksPath there
+#     would break every gate test, and nothing here pinned it. It must leave hooksPath OUT of the
+#     controlled keys so a fixture's own `git config core.hooksPath` still wins.
+( cd "$WORK" || exit 1
+  relay_isolate_git "$WORK" --allow-hooks
+  [ "${GIT_CONFIG_COUNT:-0}" = 5 ] || { echo "COUNT=${GIT_CONFIG_COUNT:-unset}"; exit 3; }
+  for i in 0 1 2 3 4; do
+    v="GIT_CONFIG_KEY_$i"
+    [ "${!v}" = "core.hooksPath" ] && { echo "hooksPath still set at $i"; exit 4; }
+  done
+  echo OK ) > "$WORK/herm6b.out" 2>/dev/null
+[ "$(tail -1 "$WORK/herm6b.out" 2>/dev/null)" = "OK" ] \
+  && { echo "  ok   [-] --allow-hooks leaves core.hooksPath to the caller"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: --allow-hooks ($(tail -1 "$WORK/herm6b.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
 
 # 7. The invariant, planted: a hostile git environment is actually cleared, not merely absent.
 ( cd "$WORK" || exit 1
@@ -2040,7 +2059,9 @@ _r1=$(s_run "$SHA_A" PR_RELAY_MAX_SAME_SHA=0); _r2=$(s_run "$SHA_A" PR_RELAY_MAX
 
 # The GIT_CONFIG_* half of the hermeticity fix needs its own guard: deleting those exports would
 # otherwise leave the suite green here and hanging on a signing machine.
-[ "${GIT_CONFIG_COUNT:-0}" -ge 2 ]; ok_if $? "the git config override is exported" "count=${GIT_CONFIG_COUNT:-unset}"
+# 6 by default, 5 under --allow-hooks. The old threshold was -ge 2, left over from when the
+# block set two keys; it stayed green while saying nothing about the current intent.
+[ "${GIT_CONFIG_COUNT:-0}" = 6 ]; ok_if $? "the git config override is exported (all six keys)" "count=${GIT_CONFIG_COUNT:-unset}"
 _sg=$( (cd "$WORK" && git config --get commit.gpgsign) 2>/dev/null )
 [ "$_sg" = "false" ]; ok_if $? "commit signing is forced off for every fixture git" "gpgsign=$_sg"
 

@@ -77,6 +77,12 @@ relay_isolate_git() {
   # Identity: NOT on git's local-env list, so the clearing above does not touch it — but fixture
   # commits would otherwise depend on the developer's own user.name/user.email, or fail outright
   # where neither is set.
+  # git's local-env list names GIT_CONFIG_COUNT but NOT the GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n
+  # pairs, so a hostile environment could leave stale pairs above our COUNT untouched. Harmless while
+  # our COUNT is the higher number, but "harmless today" is how the rest of this file's bugs started.
+  local _i
+  for _i in $(seq 0 31); do unset "GIT_CONFIG_KEY_$_i" "GIT_CONFIG_VALUE_$_i"; done
+
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com
   export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
 
@@ -92,7 +98,6 @@ relay_isolate_git() {
   export GIT_CONFIG_KEY_4=color.ui          GIT_CONFIG_VALUE_4=false
   if [ "$allow_hooks" = 1 ]; then
     export GIT_CONFIG_COUNT=5
-    unset GIT_CONFIG_KEY_5 GIT_CONFIG_VALUE_5
   else
     export GIT_CONFIG_COUNT=6
     export GIT_CONFIG_KEY_5=core.hooksPath  GIT_CONFIG_VALUE_5="$work/no-such-hooks"
@@ -109,10 +114,23 @@ relay_isolate_git() {
 # status means an ambient config that happens to define the probe key satisfies it on an old git.
 # That was a real finding in ship-feature's review.
 relay_require_git_2_31() {
-  local probe
-  probe="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=relay.probe GIT_CONFIG_VALUE_0=relay-isolation-ok \
-           git config --get relay.probe 2>/dev/null)"
-  [ "$probe" = "relay-isolation-ok" ] || {
+  # The probe must run with git's ambient environment ALREADY cleared. Two ways it was wrong:
+  #   * an inherited GIT_CONFIG_PARAMETERS overrides GIT_CONFIG_COUNT, so the probe read the ambient
+  #     value and the suite refused to run on git 2.51 claiming it needed 2.31 — measured with
+  #     `GIT_CONFIG_PARAMETERS="'relay.probe=x'" bash test/test-gate.sh`, and it would fire exactly
+  #     when run from a hook, which is the case this whole file is about;
+  #   * on a git OLDER than 2.31, GIT_CONFIG_COUNT is ignored entirely, so an ambient
+  #     `relay.probe = <expected>` in someone's ~/.gitconfig would satisfy it and the suite would run
+  #     half-isolated. The expected value is therefore generated per run, so no config can hold it.
+  local probe expected _vars _v
+  expected="relay-isolation-$$-${RANDOM}"
+  _vars="$(git rev-parse --local-env-vars 2>/dev/null)" || _vars=""
+  probe="$(
+    while IFS= read -r _v; do [ -n "$_v" ] && unset "$_v"; done <<< "$_vars"
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=relay.probe GIT_CONFIG_VALUE_0="$expected" \
+      git config --get relay.probe 2>/dev/null
+  )"
+  [ "$probe" = "$expected" ] || {
     echo "these tests need git 2.31+ (GIT_CONFIG_COUNT) to isolate their fixtures; found $(git --version)" >&2
     exit 2; }
 }

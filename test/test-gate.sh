@@ -26,7 +26,7 @@ trap 'rm -rf "$WORK"' EXIT
 # Git isolation: shared with test-fail-closed.sh so the two cannot drift. It matters here more than
 # anywhere — this file builds git repos AND runs a real git hook, which is precisely the shape that
 # writes into the host repository when git's repo-local environment leaks in.
-# shellcheck source=test/lib-hermetic.sh
+# shellcheck source=lib-hermetic.sh
 . "$HERE/lib-hermetic.sh"
 relay_require_git_2_31
 # --allow-hooks: this suite RUNS a hook, and env config outranks a repo's own core.hooksPath, so the
@@ -51,6 +51,20 @@ setup() { # setup [ci-body]
     && echo base > file.txt && git add -A && git commit -qm base )
 }
 push() { ( cd "$WORK/w" && git push "$@" 2>&1 ); }
+
+# The isolation above is load-bearing here too, and until now nothing in this file checked it: the
+# lines could be deleted and every case would still pass on a clean machine — the failure mode this
+# whole change is about. A plant, and the guard that the shared library actually ran.
+( cd "$WORK" || exit 1
+  export GIT_DIR="$WORK/nope/.git" GIT_CONFIG_PARAMETERS="'commit.gpgsign=true'"
+  relay_isolate_git "$WORK" --allow-hooks
+  [ -z "${GIT_DIR:-}" ] || { echo GIT_DIR_SET; exit 3; }
+  [ -z "${GIT_CONFIG_PARAMETERS:-}" ] || { echo PARAMS_SET; exit 4; }
+  [ "$(git config --get commit.gpgsign 2>/dev/null)" = "false" ] || { echo SIGNING_ON; exit 5; }
+  echo OK ) > "$WORK/iso.out" 2>/dev/null
+[ "$(tail -1 "$WORK/iso.out" 2>/dev/null)" = "OK" ] \
+  && ok "the shared git isolation is in force here too" \
+  || bad "git isolation not applied ($(tail -1 "$WORK/iso.out" 2>/dev/null))"
 
 echo "push gate tests:"
 
