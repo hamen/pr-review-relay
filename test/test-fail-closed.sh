@@ -79,6 +79,13 @@ case ",\${SLEEP_KEYS:-}," in *",\$key,"*) sleep 5;; esac        # outlast a shor
 case ",\${FAIL_EMPTY:-}," in *",\$key,"*) exit 0;; esac      # empty output, rc 0 → "no review"
 case ",\${WS_ONLY:-}," in *",\$key,"*) printf '\t\n  \n';  exit 0;; esac  # whitespace-only "review"
 case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output but rc!=0
+# Out of quota. Two variants because they take DIFFERENT code paths: on stderr the relay's
+# empty-output branch sees it, on stdout it does not — and the stdout one used to be posted as
+# a review.
+case ",\${QUOTA_ERR:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s." >&2; exit 1;; esac
+case ",\${QUOTA_PAD:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 08m00s." >&2; exit 1;; esac
+case ",\${QUOTA_TEXT_OK:-}," in *",\$key,"*) echo "Looks good. Note the branch where quota reached is handled."; exit 0;; esac
+case ",\${QUOTA_OUT:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s."; exit 1;; esac
 # Record our argv when asked, so a test can assert the command line the relay builds.
 # The bug this guards against is a flag silently going missing or being renamed, which
 # no output-shape assertion would ever notice.
@@ -134,6 +141,14 @@ run 3 "comment posting fails → not clean"               GH_POST_FAIL=1
 run 3 "whitespace-only review → not a valid review"     WS_ONLY=codex
 run 3 "reviewer times out → not clean"                  SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1
 
+# --- the bench: an agent that is out of quota ---------------------------------
+# Rationale in the "The bench" block of pr-review-relay. The short version: a quota-exhausted agent
+# fails every round for days, which makes every verdict worthless, so it is dropped for as long as
+# the agent itself said it would be out.
+run 0 "quota on stderr → benched, round still clean"    QUOTA_ERR=codex
+run 0 "quota on stdout → benched, not posted as review" QUOTA_OUT=codex
+run 3 "a timeout is NOT a quota → still fails the round" SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1
+
 # bespoke runs: <expected> <desc> -- <args...>  (custom --reviewers / --dry-run)
 runx() {
   local expect="$1" desc="$2"; shift 2
@@ -148,6 +163,146 @@ runx() {
 runx 3 "explicitly requested unknown reviewer → fail"   --reviewers claude,bogus --parallel
 runx 3 "malicious reviewer name is contained, still fails" --reviewers 'claude,../../PWNED' --parallel
 runx 0 "duplicate reviewer is deduped → clean pass"     --reviewers claude,claude --parallel
+
+# --- the bench, part 2: persistence, expiry, and the contract change ----------
+# bench_run <expected> <desc> <bench-file-contents> -- <relay args...>
+# Seeds the bench file the relay will read, so these assert what a LATER run sees — the whole point
+# of writing it down. The file lives beside the round state (XDG_CACHE_HOME), not in ~/.config.
+bench_run() {
+  local expect="$1" desc="$2" contents="$3"; shift 3
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"; rm -f "$WORK/sha_counter"
+  printf '%b' "$contents" > "$WORK/cache/pr-review-relay/benched"
+  local outf="$WORK/bench_out"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity "$@" > "$outf" 2>&1
+  local rc=$?
+  if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
+  else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
+}
+_future=$(( $(date +%s) + 7200 ))
+_past=$(( $(date +%s) - 7200 ))
+
+bench_run 0 "a benched reviewer is dropped and the round is still clean" \
+  "codex\t$_future\tout of quota\n" --reviewers claude,codex --parallel
+grep -q '⏸ skip codex' "$WORK/bench_out" \
+  && { echo "  ok   [-] the drop is announced, never silent"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL [-] the drop is announced, never silent"; FAIL=$((FAIL+1)); }
+
+# The contract change decided on 2026-08-03: --reviewers normally makes a missing reviewer a hard
+# fail, and a benched one is the single exception. Without this the bench does nothing under
+# ship-feature, which always passes --reviewers.
+grep -q 'PARTIAL' "$WORK/bench_out" \
+  && { echo "  ok   [-] a reduced panel is reported as PARTIAL, not as a full cross-review"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL [-] a reduced panel is reported as PARTIAL, not as a full cross-review"; FAIL=$((FAIL+1)); }
+
+bench_run 0 "an expired bench line lets the reviewer back in" \
+  "codex\t$_past\tout of quota\n" --reviewers claude,codex --parallel
+grep -q '⏸ skip codex' "$WORK/bench_out" \
+  && { echo "  FAIL [-] an expired line must not keep anyone out"; FAIL=$((FAIL+1)); } \
+  || { echo "  ok   [-] an expired line must not keep anyone out"; PASS=$((PASS+1)); }
+
+bench_run 3 "every reviewer benched → empty panel is NOT clean" \
+  "claude\t$_future\tout of quota\ncodex\t$_future\tout of quota\n" --reviewers claude,codex --parallel
+
+bench_run 0 "a malformed line is ignored, the rest still parsed" \
+  "codex\tnot-a-number\tjunk\n" --reviewers claude,codex --parallel
+
+# End-to-end: discovery in round 1 must actually stick for round 2. Asked for in cross-review, and
+# it earned its place immediately — it caught the bench being written under the STATUS KEY
+# (`k_codex`) while the panel looks it up by NAME (`codex`), so nothing matched and the feature was
+# inert across runs. Every earlier test missed it: the discovery ones only checked one round, and
+# the persistence ones hand-seeded the file with the right name already in place.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" QUOTA_ERR=codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+if grep -q "^codex	" "$WORK/cache/pr-review-relay/benched" 2>/dev/null; then
+  echo "  ok   [-] discovery writes the AGENT NAME, not the status key"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] discovery writes the AGENT NAME, not the status key"; FAIL=$((FAIL+1))
+fi
+# The stub says "Resets in 2h30m0s", so the expiry must land ~9000s out. A greedy parser read that
+# as 2h0m0s and brought the agent back 30 minutes early; on the real message (56h55m40s) it was a
+# whole day early. Assert the arithmetic, not merely that a number was written.
+_exp="$(awk -F'\t' '$1=="codex"{print $2}' "$WORK/cache/pr-review-relay/benched" 2>/dev/null)"
+_delta=$(( ${_exp:-0} - $(date +%s) ))
+if [ "$_delta" -gt 8900 ] && [ "$_delta" -lt 9100 ]; then
+  echo "  ok   [-] the reset time is parsed in full (2h30m, not 2h)"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] the reset time is parsed in full — got ${_delta}s, want ~9000s"; FAIL=$((FAIL+1))
+fi
+rm -f "$WORK/sha_counter" "$WORK/argv2"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" ARGV_LOG="$WORK/argv2" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel > "$WORK/round2_out" 2>&1
+if grep -q "skip codex" "$WORK/round2_out" && ! grep -q "^codex " "$WORK/argv2" 2>/dev/null; then
+  echo "  ok   [-] the next run drops it without invoking it"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] the next run drops it without invoking it"; FAIL=$((FAIL+1))
+fi
+
+# A review that merely MENTIONS quota, and succeeds, must not bench its author — the likeliest place
+# for that phrase is a review of quota-handling code, i.e. this very change.
+run 0 "a successful review mentioning quota does not bench" QUOTA_TEXT_OK=codex
+
+# Two agents out of quota in the SAME round must both survive the merge. This is the case that
+# forced the parent-side merge in the first place: if children wrote the file themselves, the
+# second would rename over the first and one bench would vanish.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" QUOTA_ERR=claude,codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+_n=$(grep -cE "^(claude|codex)	" "$WORK/cache/pr-review-relay/benched" 2>/dev/null || echo 0)
+if [ "$_n" = 2 ]; then
+  echo "  ok   [-] two agents benched in one round both survive the merge"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] two agents benched in one round both survive the merge (got $_n)"; FAIL=$((FAIL+1))
+fi
+
+# If the bench cannot be persisted, the round must NOT exit clean. A benched-but-unrecorded agent
+# would come back to the same wall next run with nothing written down to explain it — the quiet
+# clean pass this design refuses everywhere else. An undeletable lock directory simulates it.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"; rm -f "$WORK/sha_counter"
+mkdir -p "$WORK/cache/pr-review-relay/benched.lock"
+touch -t 203001010000 "$WORK/cache/pr-review-relay/benched.lock" 2>/dev/null || true
+chmod 500 "$WORK/cache/pr-review-relay" 2>/dev/null
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" QUOTA_ERR=codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+_rc=$?
+chmod 700 "$WORK/cache/pr-review-relay" 2>/dev/null
+if [ "$_rc" = 3 ]; then
+  echo "  ok   [-] a bench that cannot be persisted fails the round, not a quiet clean pass"; PASS=$((PASS+1))
+else
+  echo "  FAIL [got $_rc, want 3] a bench that cannot be persisted fails the round"; FAIL=$((FAIL+1))
+fi
+
+# A zero-padded reset ("08m00s") is invalid octal. Before this it aborted the arithmetic and took
+# the relay down with it — a quota message turning into a crash is the worst of the three outcomes.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" QUOTA_PAD=codex \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+_e="$(awk -F'\t' '$1=="codex"{print $2}' "$WORK/cache/pr-review-relay/benched" 2>/dev/null)"
+_d=$(( ${_e:-0} - $(date +%s) ))
+if [ "$_d" -gt 400 ] && [ "$_d" -lt 560 ]; then
+  echo "  ok   [-] a zero-padded reset parses as base 10, not octal"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] a zero-padded reset parses as base 10 — got ${_d}s, want ~480s"; FAIL=$((FAIL+1))
+fi
+
+# Pruning takes the lock too. With the lock held by someone else, prune must leave the file alone
+# rather than overwrite it with its own older view — which is how a concurrent discovery vanishes.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache/pr-review-relay"; rm -f "$WORK/sha_counter"
+_future=$(( $(date +%s) + 7200 ))
+printf 'codex\t%s\tout of quota\n' "$_future" > "$WORK/cache/pr-review-relay/benched"
+mkdir -p "$WORK/cache/pr-review-relay/benched.lock"   # fresh lock: held by a "concurrent" relay
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude --parallel >/dev/null 2>&1
+if grep -q "^codex	" "$WORK/cache/pr-review-relay/benched" 2>/dev/null; then
+  echo "  ok   [-] prune respects the lock instead of overwriting a live entry"; PASS=$((PASS+1))
+else
+  echo "  FAIL [-] prune respects the lock instead of overwriting a live entry"; FAIL=$((FAIL+1))
+fi
+rm -rf "$WORK/cache/pr-review-relay/benched.lock"
+
+
+
 runx 0 "dry-run + valid explicit config → clean preflight" --reviewers claude,codex --dry-run
 runx 3 "dry-run + invalid explicit config → fail preflight" --reviewers claude,bogus --dry-run
 
