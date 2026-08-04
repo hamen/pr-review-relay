@@ -2179,10 +2179,9 @@ hr=$?; hv="$(tail -1 "$WORK/herm6.out" 2>/dev/null)"
 #    `for _i in $(seq 0 31)`, and these suites do not run under `set -e`: on a machine without `seq`
 #    the substitution expands to nothing, the loop body never runs, the stale GIT_CONFIG_KEY_n pairs
 #    survive — and every test stays green, because until now nothing asserted the cleanup happened.
-#    Planted the only way that proves it: a PATH with no `seq` at all, plus a stale pair ABOVE the
-#    COUNT the library installs, which is precisely the pair the loop exists to remove.
-#    The control (`seq` really is gone) comes first, or a machine that still resolves `seq` through
-#    some other path would pass this without exercising anything.
+#    Planted with a stale pair ABOVE the COUNT the library installs — precisely the pair the loop
+#    exists to remove — and the control comes first, or a machine where the plant did not take would
+#    pass this without exercising anything.
 #    `seq` is SHADOWED by a failing stub, not removed by trimming PATH. Two earlier shapes were
 #    wrong in opposite directions: a hand-picked minimal PATH breaks the moment the isolation grows a
 #    dependency on another binary (a green-to-red flip for an environmental reason, reported as if
