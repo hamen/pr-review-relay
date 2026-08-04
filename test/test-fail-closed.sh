@@ -2174,6 +2174,36 @@ hr=$?; hv="$(tail -1 "$WORK/herm6.out" 2>/dev/null)"
 [ "$(tail -1 "$WORK/herm7.out" 2>/dev/null)" = "OK" ] \
   && { echo "  ok   [-] a planted git environment is cleared"; PASS=$((PASS+1)); } \
   || { echo "  FAIL hermeticity: env not cleared ($(tail -1 "$WORK/herm7.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
+
+# 8. The stale-pair cleanup must not depend on an external binary. It used to be
+#    `for _i in $(seq 0 31)`, and these suites do not run under `set -e`: on a machine without `seq`
+#    the substitution expands to nothing, the loop body never runs, the stale GIT_CONFIG_KEY_n pairs
+#    survive — and every test stays green, because until now nothing asserted the cleanup happened.
+#    Planted with a stale pair ABOVE the COUNT the library installs — precisely the pair the loop
+#    exists to remove — and the control comes first, or a machine where the plant did not take would
+#    pass this without exercising anything.
+#    `seq` is SHADOWED by a failing stub, not removed by trimming PATH. Two earlier shapes were
+#    wrong in opposite directions: a hand-picked minimal PATH breaks the moment the isolation grows a
+#    dependency on another binary (a green-to-red flip for an environmental reason, reported as if
+#    this bug were back), and dropping every PATH entry that contains `seq` takes `/usr/bin` with it
+#    — and `git` lives there, so `relay_isolate_git` aborted before asserting anything. A stub
+#    reproduces the exact failure mode the bug had: `$(seq 0 31)` expands to nothing.
+HSEQ="$WORK/hseq"; mkdir -p "$HSEQ"
+printf '#!/bin/sh\nexit 127\n' > "$HSEQ/seq"; chmod +x "$HSEQ/seq"
+( cd "$WORK" || exit 1
+  PATH="$HSEQ:$PATH"; export PATH
+  # Control: the stub really is what `seq` resolves to, and it really yields nothing.
+  [ "$(command -v seq)" = "$HSEQ/seq" ] || { echo PLANT_DEAD_WRONG_SEQ; exit 3; }
+  [ -z "$(seq 0 31 2>/dev/null)" ] || { echo PLANT_DEAD_SEQ_WORKS; exit 3; }
+  # A stale pair above the library's COUNT (it installs 0..5), planted so the loop has real work.
+  export GIT_CONFIG_KEY_9=core.pager GIT_CONFIG_VALUE_9=cat
+  [ -n "${GIT_CONFIG_KEY_9:-}" ] || { echo PLANT_DEAD; exit 3; }
+  relay_isolate_git "$WORK"
+  [ -z "${GIT_CONFIG_KEY_9:-}${GIT_CONFIG_VALUE_9:-}" ] && echo OK || echo "STALE_PAIR_SURVIVED" ) \
+  > "$WORK/herm8.out" 2>/dev/null
+[ "$(tail -1 "$WORK/herm8.out" 2>/dev/null)" = "OK" ] \
+  && { echo "  ok   [-] stale GIT_CONFIG_KEY_n pairs are cleared when \`seq\` is broken"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: seq-less cleanup ($(tail -1 "$WORK/herm8.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
 unset hr hv
 
 # --- gaps round 2 asked for ---------------------------------------------------

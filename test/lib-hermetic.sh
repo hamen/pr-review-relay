@@ -80,8 +80,13 @@ relay_isolate_git() {
   # git's local-env list names GIT_CONFIG_COUNT but NOT the GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n
   # pairs, so a hostile environment could leave stale pairs above our COUNT untouched. Harmless while
   # our COUNT is the higher number, but "harmless today" is how the rest of this file's bugs started.
+  # A BUILTIN loop, not `for _i in $(seq 0 31)`. These suites do not run under `set -e`, so on a
+  # machine without `seq` the command substitution would expand to nothing, the loop body would never
+  # run, and the stale pairs would survive — with every test still green, because nothing here checks
+  # that the cleanup happened. A silent no-op in the code whose whole job is isolation is the worst
+  # shape this file can take. `for ((...))` is bash arithmetic: it cannot be missing from PATH.
   local _i
-  for _i in $(seq 0 31); do unset "GIT_CONFIG_KEY_$_i" "GIT_CONFIG_VALUE_$_i"; done
+  for ((_i = 0; _i <= 31; _i++)); do unset "GIT_CONFIG_KEY_$_i" "GIT_CONFIG_VALUE_$_i"; done
 
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com
   export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
