@@ -40,6 +40,16 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 
 ## 🆕 What's new
 
+**v1.5.0** — **an agent out of quota is benched, the gate ships with the repo, and every run leaves
+evidence.** A quota-exhausted reviewer used to fail on every repo until its quota reset, and one
+failed reviewer makes the whole round not clean — so the first run that sees the error now writes the
+agent down with an expiry parsed from its own message, and later runs drop it until then. Alongside
+it: a versioned `.githooks/pre-push` and `bin/ci` so the quality gate travels with the checkout
+instead of living on one machine; a timestamped run log plus one sidecar per reviewer, so a round
+killed mid-flight is diagnosable rather than a black hole; and one shared git isolation for the test
+suites — whose stale-variable cleanup stopped depending on `seq` being installed, a silent no-op that
+left every test green while *that cleanup* did nothing (the rest of the isolation still ran).
+
 **v1.4.0** — **the `claude` seat is pinned, and the panel asks about tests.** It was the last
 reviewer taking both its model and its permissions from ambient config, so a `/model` switch silently
 changed what your panel reviewed with. It now runs on `CLAUDE_REVIEW_MODEL` (default `opus`, with a
