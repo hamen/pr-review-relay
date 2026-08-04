@@ -53,6 +53,27 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Fixed
 
+- **The git isolation could quietly stop isolating on a machine without `seq`.** The stale
+  `GIT_CONFIG_KEY_n` cleanup in `test/lib-hermetic.sh` was `for _i in $(seq 0 31)`. These suites do
+  not run under `set -e`, so where `seq` is absent the substitution expands to nothing, the loop body
+  never runs, the stale pairs survive — **and every test still passes**, because nothing asserted the
+  cleanup had happened. A silent no-op in the code whose only job is isolation. It is now
+  `for ((_i = 0; _i <= 31; _i++))`, bash arithmetic, which cannot be missing from `PATH`.
+
+  Covered by a new hermeticity check that plants the failure rather than describing it: a `PATH` with
+  no `seq` at all (asserted first, so a machine that still resolves it cannot pass vacuously) and a
+  stale pair above the COUNT the library installs. With the old loop restored it reports
+  `STALE_PAIR_SURVIVED`.
+
+  Found by a reviewer that had been given the change's **plan** as well as its diff — the first
+  cross-review run in that shape.
+
+- **The isolation's own CHANGELOG entry had the wrong counts.** It claimed "Seven checks" and "six of
+  the seven fail"; the suite had eight, and with the new one it has nine. Re-measured rather than
+  re-estimated: with the clearing removed, **seven of the nine** fail (the `--allow-hooks` and
+  seq-less checks do not depend on it). Numbers in a changelog are load-bearing — they are what a
+  future reader uses to tell whether a check went missing.
+
 - **Runs that never wrote state left log families nobody ever collected.** The 6h reset needs a
   `.round` file to look at, and state is written only when a run actually dispatches someone — so a
   dry run, a run that resolves no reviewer, or one killed before the pre-dispatch write left its log
@@ -164,8 +185,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
     the loop a silent no-op.
   - Also neutralised: `core.hooksPath`, `core.excludesFile` (a global `*.dat` ignore rule makes a
     fixture's file invisible to `git add`), `core.fsmonitor`, `color.ui`.
-  - Seven checks, each **planting** the hostility and proving the plant is live before asserting.
-    With the clearing removed, six of the seven fail; before this change, none did.
+  - Nine checks, each **planting** the hostility and proving the plant is live before asserting.
+    With the clearing removed, seven of the nine fail; before this change, none did.
   - git **2.31+** is required to run the suites and documented in the README; below it they refuse
     rather than half-applying the isolation.
 

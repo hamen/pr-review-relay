@@ -2174,6 +2174,29 @@ hr=$?; hv="$(tail -1 "$WORK/herm6.out" 2>/dev/null)"
 [ "$(tail -1 "$WORK/herm7.out" 2>/dev/null)" = "OK" ] \
   && { echo "  ok   [-] a planted git environment is cleared"; PASS=$((PASS+1)); } \
   || { echo "  FAIL hermeticity: env not cleared ($(tail -1 "$WORK/herm7.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
+
+# 8. The stale-pair cleanup must not depend on an external binary. It used to be
+#    `for _i in $(seq 0 31)`, and these suites do not run under `set -e`: on a machine without `seq`
+#    the substitution expands to nothing, the loop body never runs, the stale GIT_CONFIG_KEY_n pairs
+#    survive — and every test stays green, because until now nothing asserted the cleanup happened.
+#    Planted the only way that proves it: a PATH with no `seq` at all, plus a stale pair ABOVE the
+#    COUNT the library installs, which is precisely the pair the loop exists to remove.
+#    The control (`seq` really is gone) comes first, or a machine that still resolves `seq` through
+#    some other path would pass this without exercising anything.
+HSEQ="$WORK/hseq"; mkdir -p "$HSEQ"
+for t in git; do command -v "$t" >/dev/null && ln -sf "$(command -v "$t")" "$HSEQ/$t"; done
+( cd "$WORK" || exit 1
+  PATH="$HSEQ"; export PATH
+  command -v seq >/dev/null 2>&1 && { echo PLANT_DEAD_SEQ_PRESENT; exit 3; }
+  # A stale pair above the library's COUNT (it installs 0..5), planted so the loop has real work.
+  export GIT_CONFIG_KEY_9=core.pager GIT_CONFIG_VALUE_9=cat
+  [ -n "${GIT_CONFIG_KEY_9:-}" ] || { echo PLANT_DEAD; exit 3; }
+  relay_isolate_git "$WORK"
+  [ -z "${GIT_CONFIG_KEY_9:-}${GIT_CONFIG_VALUE_9:-}" ] && echo OK || echo "STALE_PAIR_SURVIVED" ) \
+  > "$WORK/herm8.out" 2>/dev/null
+[ "$(tail -1 "$WORK/herm8.out" 2>/dev/null)" = "OK" ] \
+  && { echo "  ok   [-] stale GIT_CONFIG_KEY_n pairs are cleared without \`seq\` on PATH"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL hermeticity: seq-less cleanup ($(tail -1 "$WORK/herm8.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
 unset hr hv
 
 # --- gaps round 2 asked for ---------------------------------------------------
