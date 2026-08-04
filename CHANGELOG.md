@@ -60,10 +60,12 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   cleanup had happened. A silent no-op in the code whose only job is isolation. It is now
   `for ((_i = 0; _i <= 31; _i++))`, bash arithmetic, which cannot be missing from `PATH`.
 
-  Covered by a new hermeticity check that plants the failure rather than describing it: a `PATH` with
-  no `seq` at all (asserted first, so a machine that still resolves it cannot pass vacuously) and a
-  stale pair above the COUNT the library installs. With the old loop restored it reports
-  `STALE_PAIR_SURVIVED`.
+  Covered by a new hermeticity check that plants the failure rather than describing it: `seq` is
+  **shadowed by a stub that exits 127**, reproducing the exact failure mode (`$(seq 0 31)` expands to
+  nothing) while the rest of `PATH` stays intact, plus a stale pair above the COUNT the library
+  installs. The control asserts both that the stub is what `seq` resolves to and that it really
+  yields nothing, so a machine where the plant did not take cannot pass vacuously. With the old loop
+  restored it reports `STALE_PAIR_SURVIVED`.
 
   Found by a reviewer that had been given the change's **plan** as well as its diff — the first
   cross-review run in that shape.
