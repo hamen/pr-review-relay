@@ -69,10 +69,12 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   cross-review run in that shape.
 
 - **The isolation's own CHANGELOG entry had the wrong counts.** It claimed "Seven checks" and "six of
-  the seven fail"; the suite had eight, and with the new one it has nine. Re-measured rather than
-  re-estimated: with the clearing removed, **seven of the nine** fail (the `--allow-hooks` and
-  seq-less checks do not depend on it). Numbers in a changelog are load-bearing — they are what a
-  future reader uses to tell whether a check went missing.
+  the seven fail" for a suite that already had **eight**, of which **seven** fail with the clearing
+  removed — the `--allow-hooks` check is the one that does not depend on it. Corrected to what that
+  release actually shipped; the check added here makes the suite **nine**, and that belongs to this
+  entry rather than being back-dated into the previous one. Re-measured, not re-estimated. Numbers in
+  a changelog are load-bearing — they are what a future reader uses to tell whether a check went
+  missing.
 
 - **Runs that never wrote state left log families nobody ever collected.** The 6h reset needs a
   `.round` file to look at, and state is written only when a run actually dispatches someone — so a
@@ -185,8 +187,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
     the loop a silent no-op.
   - Also neutralised: `core.hooksPath`, `core.excludesFile` (a global `*.dat` ignore rule makes a
     fixture's file invisible to `git add`), `core.fsmonitor`, `color.ui`.
-  - Nine checks, each **planting** the hostility and proving the plant is live before asserting.
-    With the clearing removed, seven of the nine fail; before this change, none did.
+  - Eight checks, each **planting** the hostility and proving the plant is live before asserting.
+    With the clearing removed, seven of the eight fail; before this change, none did.
   - git **2.31+** is required to run the suites and documented in the README; below it they refuse
     rather than half-applying the isolation.
 

@@ -2183,11 +2183,19 @@ hr=$?; hv="$(tail -1 "$WORK/herm6.out" 2>/dev/null)"
 #    COUNT the library installs, which is precisely the pair the loop exists to remove.
 #    The control (`seq` really is gone) comes first, or a machine that still resolves `seq` through
 #    some other path would pass this without exercising anything.
+#    `seq` is SHADOWED by a failing stub, not removed by trimming PATH. Two earlier shapes were
+#    wrong in opposite directions: a hand-picked minimal PATH breaks the moment the isolation grows a
+#    dependency on another binary (a green-to-red flip for an environmental reason, reported as if
+#    this bug were back), and dropping every PATH entry that contains `seq` takes `/usr/bin` with it
+#    — and `git` lives there, so `relay_isolate_git` aborted before asserting anything. A stub
+#    reproduces the exact failure mode the bug had: `$(seq 0 31)` expands to nothing.
 HSEQ="$WORK/hseq"; mkdir -p "$HSEQ"
-for t in git; do command -v "$t" >/dev/null && ln -sf "$(command -v "$t")" "$HSEQ/$t"; done
+printf '#!/bin/sh\nexit 127\n' > "$HSEQ/seq"; chmod +x "$HSEQ/seq"
 ( cd "$WORK" || exit 1
-  PATH="$HSEQ"; export PATH
-  command -v seq >/dev/null 2>&1 && { echo PLANT_DEAD_SEQ_PRESENT; exit 3; }
+  PATH="$HSEQ:$PATH"; export PATH
+  # Control: the stub really is what `seq` resolves to, and it really yields nothing.
+  [ "$(command -v seq)" = "$HSEQ/seq" ] || { echo PLANT_DEAD_WRONG_SEQ; exit 3; }
+  [ -z "$(seq 0 31 2>/dev/null)" ] || { echo PLANT_DEAD_SEQ_WORKS; exit 3; }
   # A stale pair above the library's COUNT (it installs 0..5), planted so the loop has real work.
   export GIT_CONFIG_KEY_9=core.pager GIT_CONFIG_VALUE_9=cat
   [ -n "${GIT_CONFIG_KEY_9:-}" ] || { echo PLANT_DEAD; exit 3; }
@@ -2195,7 +2203,7 @@ for t in git; do command -v "$t" >/dev/null && ln -sf "$(command -v "$t")" "$HSE
   [ -z "${GIT_CONFIG_KEY_9:-}${GIT_CONFIG_VALUE_9:-}" ] && echo OK || echo "STALE_PAIR_SURVIVED" ) \
   > "$WORK/herm8.out" 2>/dev/null
 [ "$(tail -1 "$WORK/herm8.out" 2>/dev/null)" = "OK" ] \
-  && { echo "  ok   [-] stale GIT_CONFIG_KEY_n pairs are cleared without \`seq\` on PATH"; PASS=$((PASS+1)); } \
+  && { echo "  ok   [-] stale GIT_CONFIG_KEY_n pairs are cleared when \`seq\` is broken"; PASS=$((PASS+1)); } \
   || { echo "  FAIL hermeticity: seq-less cleanup ($(tail -1 "$WORK/herm8.out" 2>/dev/null))"; FAIL=$((FAIL+1)); }
 unset hr hv
 
