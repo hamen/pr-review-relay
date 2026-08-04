@@ -6,6 +6,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-08-04
+
 ### Added
 
 - **An agent that is out of quota is benched instead of failing every round for days.** A
@@ -527,6 +529,7 @@ First tagged release.
 - **`--context-file`**: prepend a doc / spec / API reference so every reviewer verifies the PR against it.
 - **Bounded loop**: a per-PR round cap keeps read→fix→re-run from spiraling; re-runs are idempotent.
 
+[1.5.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.5.0
 [1.4.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.4.0
 [1.3.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.3.0
 [1.2.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.2.0
