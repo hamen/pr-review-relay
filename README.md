@@ -47,8 +47,8 @@ agent down with an expiry parsed from its own message, and later runs drop it un
 it: a versioned `.githooks/pre-push` and `bin/ci` so the quality gate travels with the checkout
 instead of living on one machine; a timestamped run log plus one sidecar per reviewer, so a round
 killed mid-flight is diagnosable rather than a black hole; and one shared git isolation for the test
-suites — which stopped depending on `seq` being installed, a silent no-op that left every test green
-while the isolation did nothing.
+suites — whose stale-variable cleanup stopped depending on `seq` being installed, a silent no-op that
+left every test green while *that cleanup* did nothing (the rest of the isolation still ran).
 
 **v1.4.0** — **the `claude` seat is pinned, and the panel asks about tests.** It was the last
 reviewer taking both its model and its permissions from ambient config, so a `/model` switch silently
