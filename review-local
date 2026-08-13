@@ -13,7 +13,7 @@
 #
 # Usage:
 #   review-local [--author claude|codex|cursor|antigravity|opencode|qwen|grok] [--base <ref>] \
-#                [--reviewers claude,codex,cursor,antigravity] [--parallel]
+#                [--reviewers claude,codex,grok,opencode] [--parallel]
 #                (opencode, qwen, and grok are also supported, opt-in: name them explicitly)
 #   (run from inside the repo, on the branch you want reviewed)
 set -uo pipefail
@@ -62,7 +62,7 @@ GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 [ -r "$GROK_LIB" ] || { echo "missing $GROK_LIB (keep it next to this script)" >&2; exit 1; }
 . "$GROK_LIB"
 
-AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,cursor,antigravity"; PARALLEL=0; REVIEWERS_EXPLICIT=0
+AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,grok,opencode"; PARALLEL=0; REVIEWERS_EXPLICIT=0
 AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 # Pin the Cursor reviewer's model — see the long rationale in pr-review-relay. Short version:
 # cursor-agent's own default is "Auto", which bills the small "Other Models" pool AND may pick a
