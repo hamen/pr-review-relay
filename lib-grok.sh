@@ -57,8 +57,11 @@ grok_review() {
     return 1
   }
 
-  model="${GROK_REVIEW_MODEL:-grok-4.5}"
-  effort="${GROK_REVIEW_EFFORT:-medium}"
+  # Through panel_resolve, so the config file can pin this seat like any other. The default
+  # stays grok-4.5 here rather than following whatever xAI ships latest: a default that moves on
+  # its own changes what the panel says without anyone deciding it.
+  model="$(panel_resolve GROK_REVIEW_MODEL MODEL_grok grok-4.5)"
+  effort="$(panel_resolve GROK_REVIEW_EFFORT EFFORT_grok medium)"
 
   # Resolve binaries BEFORE cd so a relative PATH entry cannot resolve differently
   # (or vanish) inside iso_cwd — same class of guard as opencode_review.

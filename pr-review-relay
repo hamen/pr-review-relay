@@ -96,6 +96,11 @@ unset _self _rl _n _link
 WRAP_COMMENT="$SCRIPT_DIR/wrap-collapsed-pr-comment.mjs"
 # The OpenCode reviewer lives in a shared lib so its policy cannot drift between
 # this script and review-local — cross-review flagged that duplication repeatedly.
+PANEL_LIB="$SCRIPT_DIR/lib-panel.sh"
+[ -r "$PANEL_LIB" ] || { echo "missing $PANEL_LIB (keep it next to this script)" >&2; exit 1; }
+. "$PANEL_LIB"
+panel_config_load
+
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
 . "$OPENCODE_LIB"
@@ -113,9 +118,14 @@ GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 # run — and being the DEFAULT meant it ran on every invocation that omitted --reviewers, which is
 # most of them. It is still supported: name it explicitly and it works.
 #
-# Keep this in step with SHIP_FEATURE_REVIEWERS in ~/.config/ship-feature/config. Two panels that
-# disagree about who is on them is how a seat quietly comes back.
-AUTHOR=""; PR=""; REVIEWERS="claude,codex,grok,opencode"; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0; AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
+# The panel is resolved through lib-panel.sh, so ~/.config/pr-review-relay/config reaches callers
+# that never pass --reviewers — which is most of them, and is exactly how `cursor` kept reviewing
+# for weeks after it was dropped. DEFAULT_REVIEWERS below is the last resort for a machine with no
+# config; it is assigned ONCE and every later comparison reads the variable, never the literal.
+DEFAULT_REVIEWERS="claude,codex,grok,opencode"
+AUTHOR=""; PR=""; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0
+REVIEWERS="$(panel_resolve PR_RELAY_REVIEWERS REVIEWERS "$DEFAULT_REVIEWERS")"
+AGENT_TIMEOUT="$(panel_resolve PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT 300)"
 # Validate here rather than letting `timeout` fail with a bare exit 125.
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
 
@@ -153,7 +163,7 @@ case "$LOG_MAX_BYTES" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_LOG_MAX_BYTES: '$
 # leaving stdout empty, so the fail-closed path below reports a failed reviewer. That rests on
 # stdout being empty — a non-zero exit WITH output is still posted (marked unclean).
 # Same value in review-local and pr-review-distill; the tests assert all three.
-CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
+CURSOR_REVIEW_MODEL="$(panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)"
 
 # Codex and antigravity took their model from their own global config, so the only
 # way to review a PR with a specific model was to edit that config — which changes
@@ -162,9 +172,9 @@ CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
 # before.
 #   CODEX_REVIEW_MODEL=gpt-5.6  CODEX_REVIEW_EFFORT=high
 #   AGY_REVIEW_MODEL=gemini-3.1-pro-high
-CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
-CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
-AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
+CODEX_REVIEW_MODEL="$(panel_resolve CODEX_REVIEW_MODEL MODEL_codex "")"
+CODEX_REVIEW_EFFORT="$(panel_resolve CODEX_REVIEW_EFFORT EFFORT_codex "")"
+AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_agy "")"
 
 # Claude was the last reviewer taking BOTH its model and its permissions from ambient config: a
 # bare `claude -p`. Every other seat is pinned on the command line, and #15/#17 pinned cursor for
@@ -186,9 +196,9 @@ AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
 # The fallback turns a guaranteed-wasted round into a real review. This repo is public — most
 # installs are not on the account that chose `opus`.
 # RESIDUAL: if the fallback model fails the same way, the error text is still what gets posted.
-CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
-CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
-CLAUDE_REVIEW_FALLBACK_MODEL="${CLAUDE_REVIEW_FALLBACK_MODEL:-sonnet}"
+CLAUDE_REVIEW_MODEL="$(panel_resolve CLAUDE_REVIEW_MODEL MODEL_claude opus)"
+CLAUDE_REVIEW_EFFORT="$(panel_resolve CLAUDE_REVIEW_EFFORT EFFORT_claude "")"
+CLAUDE_REVIEW_FALLBACK_MODEL="$(panel_resolve CLAUDE_REVIEW_FALLBACK_MODEL MODEL_claude_fallback sonnet)"
 
 # Built as arrays, not strings: an empty override must add NO argument at all,
 # whereas an unquoted empty string would be passed along as one.
@@ -988,7 +998,7 @@ review_with() {
 
 # Passing the default list explicitly flips missing CLIs from tolerated skips to
 # hard failures — warn, since it's an easy copy-paste-from-help footgun.
-if [ "$REVIEWERS_EXPLICIT" = 1 ] && [ "$REVIEWERS" = "claude,codex,grok,opencode" ]; then
+if [ "$REVIEWERS_EXPLICIT" = 1 ] && [ "$REVIEWERS" = "$DEFAULT_REVIEWERS" ]; then
   echo "  note: --reviewers matches the default, so a missing default CLI is now a hard failure (exit 3), not a skip. Omit --reviewers to tolerate missing agents." >&2
 fi
 

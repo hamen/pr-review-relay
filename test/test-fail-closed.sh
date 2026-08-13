@@ -1406,7 +1406,7 @@ else
 fi
 # A RELATIVE symlink target must resolve against the LINK's directory, not the cwd.
 REALD="$WORK/real"; mkdir -p "$REALD"
-cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
+cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../lib-panel.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
 LINKD="$WORK/linkbin"; mkdir -p "$LINKD"
 ( cd "$LINKD" && ln -s "../real/pr-review-relay" pr-review-relay )
 if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then

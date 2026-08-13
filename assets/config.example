@@ -1,0 +1,47 @@
+# pr-review-relay — who reviews, and with which model.
+#
+# This is the ONE place that answers those two questions. Copy it to
+# ~/.config/pr-review-relay/config and edit; every tool in this repo reads it, and so does
+# ship-feature. Before it existed the answer lived in five places, and a seat that was dropped
+# from the panel kept reviewing for weeks because callers that omit --reviewers got the default
+# assigned in the script instead of the configured one.
+#
+# Precedence, strongest first:
+#   1. the command-line flag     (--reviewers)
+#   2. the environment variable  (CLAUDE_REVIEW_MODEL, PR_RELAY_AGENT_TIMEOUT, ...)
+#   3. this file
+#   4. the default in the script — the last resort, for a machine with no config
+#
+# An EMPTY value means "not configured" and falls through to the next layer. It does NOT mean
+# "disable this".
+#
+# The file is READ, never sourced: no command substitution, no shell. Unknown keys and malformed
+# lines are reported on stderr rather than ignored.
+
+# Who sits on the panel. Every seat named here must also have a MODEL_ key below, or it silently
+# falls back to whatever the script defaults to — which is exactly how a dropped seat comes back.
+REVIEWERS=claude,codex,grok,opencode
+
+# The plan-review panel (ship-feature plan-review). Seat names differ on purpose: grok45high is
+# grok at high reasoning effort, kimi3 is the opencode runner on a different model.
+PLAN_REVIEWERS=claude,codex,grok45high,kimi3
+
+# Seconds before a reviewer is considered fallen. In parallel the total is the slowest seat, not
+# the sum, so this can be generous without costing wall-clock.
+AGENT_TIMEOUT=360
+
+# One key per seat. The key follows the SEAT name you pass to --reviewers, not the environment
+# variable it maps to — nobody should need to know that opencode's variable is called
+# PR_RELAY_OPENCODE_MODEL, or antigravity's AGY_REVIEW_MODEL.
+MODEL_claude=opus
+MODEL_claude_fallback=sonnet
+MODEL_codex=gpt-5.6-sol
+MODEL_grok=grok-4.6
+MODEL_opencode=openrouter/z-ai/glm-5.2
+MODEL_cursor=composer-2.5
+MODEL_agy=Gemini 3.1 Pro (High)
+
+# Reasoning effort, where the agent supports it.
+#EFFORT_claude=
+#EFFORT_codex=
+#EFFORT_grok=medium

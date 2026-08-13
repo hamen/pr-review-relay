@@ -52,12 +52,14 @@ for f in \
   pr-review-consensus \
   lib-opencode.sh \
   lib-grok.sh \
+  lib-panel.sh \
   bin/ci \
   .githooks/pre-push \
   test/lib-hermetic.sh \
   test/test-gate.sh \
   test/test-fail-closed.sh \
-  test/test-distill.sh
+  test/test-distill.sh \
+  test/test-panel-config.sh
 do
   [ -f "$f" ] || { echo "bin/ci: expected shell file is missing: $f" >&2; exit 1; }
   bash -n "$f" || { echo "bin/ci: syntax error in $f" >&2; exit 1; }
@@ -102,6 +104,7 @@ run_suite() { # <label> <script>
 run_suite "test-gate.sh"        "test/test-gate.sh"
 run_suite "test-fail-closed.sh" "test/test-fail-closed.sh"
 run_suite "test-distill.sh"     "test/test-distill.sh"
+run_suite "test-panel-config.sh" "test/test-panel-config.sh"
 
 if [ "$failed" != 0 ]; then
   echo "✖ bin/ci: FAILED — fix the failures above. Do not bypass with --no-verify." >&2

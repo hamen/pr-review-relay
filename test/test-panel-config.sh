@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# test-panel-config.sh — the config file is the one place that says who reviews and with which
+# model. These tests exist because the alternative failed in production: `cursor` was dropped from
+# the panel on 2026-08-13 and kept reviewing for weeks, because callers that omit --reviewers got
+# the default assigned in the script rather than the configured panel. The first test below is
+# that incident, in a form that fails.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LIB="$HERE/../lib-panel.sh"
+PASS=0; FAIL=0
+ok()  { echo "  ok   [-] $1"; PASS=$((PASS+1)); }
+bad() { echo "  FAIL $1"; FAIL=$((FAIL+1)); }
+
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+CFG="$WORK/config"
+
+# Every case runs with the model/panel environment scrubbed. Without this the suite reads the
+# developer's own exports and "the file wins" passes for the wrong reason — the exact trap the
+# relay's own tests already guard against for CURSOR_REVIEW_MODEL.
+resolve() { # $1 = config body (or ""), rest = panel_resolve args
+  local body="$1"; shift
+  printf '%s' "$body" > "$CFG"
+  env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+    bash -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve "$@"' "$LIB" "$@"
+}
+
+echo "panel config tests:"
+
+# THE INCIDENT: a panel set in the file must reach a caller that passes no flag at all.
+got=$(resolve 'REVIEWERS=claude,codex' NOT_SET_ANYWHERE REVIEWERS 'claude,codex,grok,opencode')
+[ "$got" = "claude,codex" ] && ok "a panel in the config reaches a caller that omits --reviewers" \
+  || bad "config panel ignored — got '$got'"
+
+# No config at all → the script default. The machine with nothing configured must still work.
+got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$WORK/absent" \
+  bash -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE REVIEWERS "$1"' "$LIB" 'claude,codex,grok,opencode')
+[ "$got" = "claude,codex,grok,opencode" ] && ok "no config file → the script default still applies" \
+  || bad "missing config broke the default — got '$got'"
+
+# Precedence: env beats file.
+got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" CLAUDE_REVIEW_MODEL=sonnet \
+  bash -c 'printf "MODEL_claude=opus\n" > "$2"; . "$0"; panel_config_load 2>/dev/null; panel_resolve CLAUDE_REVIEW_MODEL MODEL_claude fallback' "$LIB" x "$CFG")
+[ "$got" = "sonnet" ] && ok "the environment beats the config file" || bad "env lost to the file — got '$got'"
+
+# An EMPTY value means "not configured", at every layer — NOT "disable". The relay's own tests
+# run with CURSOR_REVIEW_MODEL= on purpose so a stray export cannot make an assertion pass; if
+# empty meant "disabled" the model would silently unpin and argv would carry a bare --model.
+got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" CURSOR_REVIEW_MODEL= \
+  bash -c 'printf "" > "$2"; . "$0"; panel_config_load 2>/dev/null; panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5' "$LIB" x "$CFG")
+[ "$got" = "composer-2.5" ] && ok "an empty env value means 'not set', not 'disabled'" \
+  || bad "empty env unpinned the model — got '$got'"
+got=$(resolve 'MODEL_cursor=' CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)
+[ "$got" = "composer-2.5" ] && ok "an empty file value means 'not set' too" || bad "empty file value — got '$got'"
+
+# Every seat named in a panel must be configurable. This is the cursor bug in its second form:
+# a seat you can name but cannot pin drifts back to a default nobody chose.
+for seat in claude claude_fallback codex cursor grok opencode agy; do
+  got=$(resolve "MODEL_$seat=pinned-$seat" NOT_SET "MODEL_$seat" 'script-default')
+  [ "$got" = "pinned-$seat" ] && ok "MODEL_$seat is configurable" || bad "MODEL_$seat ignored — got '$got'"
+done
+
+# Parsing is fail-noisy, never fail-silent: a config that disappears without a word is the very
+# defect this file exists to remove.
+out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+  bash -c 'printf "TYPO_KEY=x\nno-equals-here\n" > "$2"; . "$0"; panel_config_load 2>&1 >/dev/null' "$LIB" x "$CFG")
+printf '%s' "$out" | grep -q "unknown key" && ok "an unknown key is reported" || bad "unknown key swallowed"
+printf '%s' "$out" | grep -q "malformed" && ok "a malformed line is reported" || bad "malformed line swallowed"
+
+# The file is READ, never SOURCED. A config that executes is arbitrary code run by a tool that
+# runs from cron.
+canary="$WORK/pwned"
+env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+  bash -c 'printf "REVIEWERS=\$(touch %s)\n" "$3" > "$2"; . "$0"; panel_config_load >/dev/null 2>&1' "$LIB" x "$CFG" "$canary"
+[ -e "$canary" ] && bad "the config file was EXECUTED — command substitution ran" \
+  || ok "the config is read, never sourced (no command substitution)"
+
+# HOME unset — cron, systemd, containers. The relay supports it on purpose; a bare \$HOME under
+# set -u would abort the whole run.
+if env -u HOME -i PATH=/usr/bin:/bin bash -c 'set -u; . "$0"; panel_config_load; panel_resolve A B c' "$LIB" >/dev/null 2>&1; then
+  ok "an unset HOME does not abort the loader"
+else bad "unset HOME aborted panel_config_load"; fi
+
+echo "-------------------------------------------"
+echo "panel config tests: $PASS passed, $FAIL failed"
+[ "$FAIL" = 0 ]

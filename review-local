@@ -55,6 +55,11 @@ esac
 SCRIPT_DIR="$(cd -- "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || { echo "cannot resolve script directory" >&2; exit 1; }
 unset _self _rl _n _link
 # Shared with pr-review-relay so the read-only policy exists in exactly one place.
+PANEL_LIB="$SCRIPT_DIR/lib-panel.sh"
+[ -r "$PANEL_LIB" ] || { echo "missing $PANEL_LIB (keep it next to this script)" >&2; exit 1; }
+. "$PANEL_LIB"
+panel_config_load
+
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
 . "$OPENCODE_LIB"
@@ -62,19 +67,21 @@ GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 [ -r "$GROK_LIB" ] || { echo "missing $GROK_LIB (keep it next to this script)" >&2; exit 1; }
 . "$GROK_LIB"
 
-AUTHOR=""; BASE="main"; REVIEWERS="claude,codex,grok,opencode"; PARALLEL=0; REVIEWERS_EXPLICIT=0
+DEFAULT_REVIEWERS="claude,codex,grok,opencode"
+AUTHOR=""; BASE="main"; PARALLEL=0; REVIEWERS_EXPLICIT=0
+REVIEWERS="$(panel_resolve PR_RELAY_REVIEWERS REVIEWERS "$DEFAULT_REVIEWERS")"
 AGENT_TIMEOUT="${PR_RELAY_AGENT_TIMEOUT:-300}"
 # Pin the Cursor reviewer's model — see the long rationale in pr-review-relay. Short version:
 # cursor-agent's own default is "Auto", which bills the small "Other Models" pool AND may pick a
 # Claude model, so a Claude-authored branch gets reviewed by Claude in a Cursor badge.
-CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
+CURSOR_REVIEW_MODEL="$(panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)"
 
 # Same overrides as pr-review-relay: codex and antigravity otherwise take their
 # model from their own global config, so pinning one for a review meant editing
 # that config for every other use of the CLI. Unset = unchanged behaviour.
-CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
-CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
-AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
+CODEX_REVIEW_MODEL="$(panel_resolve CODEX_REVIEW_MODEL MODEL_codex "")"
+CODEX_REVIEW_EFFORT="$(panel_resolve CODEX_REVIEW_EFFORT EFFORT_codex "")"
+AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_agy "")"
 
 # Claude's model pin, same hard default and same load-bearing fallback as the relay — see the
 # long rationale there. Short version: an unavailable model prints its error on STDOUT (stderr
@@ -85,9 +92,9 @@ AGY_REVIEW_MODEL="${AGY_REVIEW_MODEL:-}"
 # to defend against, and --safe-mode would disable your own CLAUDE.md, hooks and MCP for your own
 # review — a quality regression bought against a threat that isn't in this script. The asymmetry
 # is intentional and asserted in the tests; do not "fix" it by making the two match.
-CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
-CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
-CLAUDE_REVIEW_FALLBACK_MODEL="${CLAUDE_REVIEW_FALLBACK_MODEL:-sonnet}"
+CLAUDE_REVIEW_MODEL="$(panel_resolve CLAUDE_REVIEW_MODEL MODEL_claude opus)"
+CLAUDE_REVIEW_EFFORT="$(panel_resolve CLAUDE_REVIEW_EFFORT EFFORT_claude "")"
+CLAUDE_REVIEW_FALLBACK_MODEL="$(panel_resolve CLAUDE_REVIEW_FALLBACK_MODEL MODEL_claude_fallback sonnet)"
 # Expanded as ${arr[@]+"${arr[@]}"} at the call sites: Bash 3.2 (what macOS ships)
 # aborts on "${arr[@]}" for an EMPTY array under `set -u`, which is the common case
 # here since both overrides are normally unset. Same guard lib-opencode.sh uses.
