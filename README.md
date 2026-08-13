@@ -213,7 +213,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that opened the PR. It auto-excludes itself from reviewing. |
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode`, `qwen`, and `grok` are supported but opt-in — name them explicitly to include them. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,grok,opencode` — four vendors, every seat on a flat-rate subscription. `cursor`, `antigravity`, and `qwen` are supported but opt-in — name them explicitly to include them. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
 | `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
@@ -264,7 +264,7 @@ Flags:
 |------|---------|
 | `--author <name>` | The agent that wrote the branch. It auto-excludes itself from reviewing. |
 | `--base <ref>` | Ref to diff against. Default: `main`. |
-| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode`, `qwen`, and `grok` are supported but opt-in — name them explicitly to include them. |
+| `--reviewers a,b,c` | Which agents review. Default: `claude,codex,grok,opencode` — four vendors, every seat on a flat-rate subscription. `cursor`, `antigravity`, and `qwen` are supported but opt-in — name them explicitly to include them. |
 | `--parallel` | Run the reviewers concurrently. |
 
 Reviewers that read stdin (`claude` / `codex` / `cursor` / `qwen`) get the diff piped in, so a large branch
