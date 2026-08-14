@@ -95,6 +95,20 @@ out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
 printf '%s' "$out" | grep -q "unknown key" && ok "a valid-looking but unknown key still says 'unknown key'" \
   || bad "unknown identifier key misreported — got: $out"
 
+# PANEL_CFG_* is the loader's output, not an input. An exported one would be a fifth precedence
+# layer nobody documented, outranking the script default — cursor coming back through the very fix
+# that removed it. This is asserted with NO config file, the case where the leak survives longest.
+got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$WORK/absent" PANEL_CFG_REVIEWERS=cursor \
+  bash -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE REVIEWERS "$1"' "$LIB" 'claude,codex,grok,opencode')
+[ "$got" = "claude,codex,grok,opencode" ] && ok "an inherited PANEL_CFG_* is not a precedence layer" \
+  || bad "PANEL_CFG_REVIEWERS from the environment won — got '$got'"
+
+# ...and it must not survive a load that DOES find a file either, for a key that file omits.
+got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" PANEL_CFG_MODEL_claude=ghost \
+  bash -c 'printf "REVIEWERS=claude\n" > "$2"; . "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE MODEL_claude opus' "$LIB" x "$CFG")
+[ "$got" = "opus" ] && ok "an inherited PANEL_CFG_* is dropped for a key the file omits" \
+  || bad "stale PANEL_CFG_MODEL_claude survived the load — got '$got'"
+
 # HOME unset — cron, systemd, containers. The relay supports it on purpose; a bare \$HOME under
 # set -u would abort the whole run.
 if env -u HOME -i PATH=/usr/bin:/bin bash -c 'set -u; . "$0"; panel_config_load; panel_resolve A B c' "$LIB" >/dev/null 2>&1; then

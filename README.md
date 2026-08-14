@@ -144,6 +144,36 @@ chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN
 
 **`lib-panel.sh`** is sourced by `pr-review-relay`, `review-local` and `pr-review-distill`, and they refuse to start without it. It is the one place that answers "who reviews, with which model" — install it alongside the others or those three stop at startup.
 
+### Configure the panel — `~/.config/pr-review-relay/config`
+
+Optional. With no config file every tool uses the default assigned in its own script, which is what a fresh machine gets.
+
+```bash
+mkdir -p ~/.config/pr-review-relay
+curl -fsSL "$REPO/assets/config.example" -o ~/.config/pr-review-relay/config
+$EDITOR ~/.config/pr-review-relay/config
+```
+
+`assets/config.example` documents every key; the short version:
+
+```
+REVIEWERS=claude,codex,grok,opencode
+PLAN_REVIEWERS=claude,codex,grok45high,kimi3
+AGENT_TIMEOUT=360
+MODEL_claude=opus
+MODEL_codex=gpt-5.6-sol
+MODEL_grok=grok-4.6
+MODEL_opencode=openrouter/z-ai/glm-5.2
+```
+
+A `MODEL_<seat>` key uses the **seat** name you pass to `--reviewers`, so you never need to know that opencode's variable is `PR_RELAY_OPENCODE_MODEL` and antigravity's is `AGY_REVIEW_MODEL`.
+
+Precedence, strongest first: the command-line flag, then the environment variable, then this file, then the default in the script. An **empty value means "not configured"** and falls through — it does not disable anything.
+
+The file is **read, never sourced**: no command substitution, no shell, and a key that is not a bare identifier is refused. Unknown keys and malformed lines are reported on stderr instead of being ignored, because a setting that vanishes in silence is the failure this file exists to prevent. Set `PR_RELAY_CONFIG` to read a different path.
+
+Why it exists: the panel used to live in five places at once. On 2026-08-13 `cursor` was dropped from it and kept reviewing for weeks, because every caller that omits `--reviewers` got the default assigned inside the script rather than the configured panel.
+
 ### 🪟 Windows
 
 The scripts are bash-only (`#!/usr/bin/env bash`) — there is no native PowerShell support, so

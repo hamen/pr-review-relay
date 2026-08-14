@@ -25,6 +25,15 @@ panel_config_load() {
   # HOME can be unset — cron, systemd units, minimal containers — and this runs under `set -u`,
   # where a bare $HOME aborts the whole relay. The script supports that environment on purpose
   # (there is a round-state fallback for exactly it), so no config simply means no config.
+  # PANEL_CFG_* is this loader's OUTPUT, never an input. Without this reset an exported
+  # PANEL_CFG_REVIEWERS=cursor would act as a fifth, undocumented precedence layer that outranks
+  # the script default — the exact shape of the bug this file exists to close, arriving through the
+  # fix for it. The reset runs before every early return, so a stale value cannot survive on a
+  # machine with no config at all.
+  local _v
+  for _v in ${!PANEL_CFG_@}; do unset "$_v"; done
+  PANEL_CFG_KEYS=
+
   local cfg="${PR_RELAY_CONFIG:-}"
   if [ -z "$cfg" ]; then
     [ -n "${HOME:-}" ] || return 0
