@@ -36,6 +36,16 @@ panel_config_load() {
   # the script default — the exact shape of the bug this file exists to close, arriving through the
   # fix for it. The reset runs before every early return, so a stale value cannot survive on a
   # machine with no config at all.
+  #
+  # `${!PANEL_CFG_@}` is a bash expansion. Under zsh it is a `bad substitution` that aborts this
+  # function mid-way, and the caller gets a half-load with no idea why — which is what happened
+  # the first time someone sourced this file from an interactive shell to inspect it. Every real
+  # consumer here is bash (all three have a bash shebang), so the honest behaviour under any other
+  # shell is to say so and load nothing, rather than pretend and hand back a partial answer.
+  if [ -z "${BASH_VERSION:-}" ]; then
+    echo "warning: lib-panel.sh needs bash (it is sourced by bash scripts); loaded no config" >&2
+    return 0
+  fi
   local _v
   for _v in ${!PANEL_CFG_@}; do unset "$_v"; done
   PANEL_CFG_KEYS=

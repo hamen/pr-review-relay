@@ -130,6 +130,22 @@ got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" PANEL_CFG_MO
 [ "$got" = "opus" ] && ok "an inherited PANEL_CFG_* is dropped for a key the file omits" \
   || bad "stale PANEL_CFG_MODEL_claude survived the load — got '$got'"
 
+# Sourced from a shell that is not bash. `${!PANEL_CFG_@}` is a bash expansion; under zsh it is a
+# `bad substitution` that aborted this function mid-way and handed the caller a half-load with no
+# usable error. Found by sourcing the file from an interactive zsh to inspect it. Every real
+# consumer is bash, so the honest answer elsewhere is "loaded nothing", said out loud.
+if command -v zsh >/dev/null 2>&1; then
+  out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+    zsh -c 'printf "REVIEWERS=from-file\n" > "$2"; . "$0"; panel_config_load; panel_resolve NOPE REVIEWERS script-default' "$LIB" x "$CFG" 2>&1)
+  case "$out" in
+    *"bad substitution"*) bad "sourcing from zsh still aborts on a bash expansion — got: $out" ;;
+    *"needs bash"*script-default*) ok "a non-bash shell is told so, and gets the script default" ;;
+    *) bad "unexpected zsh behaviour — got: $out" ;;
+  esac
+else
+  echo "  skip [-] zsh not installed"
+fi
+
 # HOME unset — cron, systemd, containers. The relay supports it on purpose; a bare \$HOME under
 # set -u would abort the whole run.
 if env -u HOME -i PATH=/usr/bin:/bin bash -c 'set -u; . "$0"; panel_config_load; panel_resolve A B c' "$LIB" >/dev/null 2>&1; then
