@@ -162,6 +162,27 @@ else
   echo "  skip [-] zsh not installed"
 fi
 
+# A bash parent EXPORTS BASH_VERSION, so a zsh or dash child inherits it. Any guard that reads
+# that name to mean "this is bash" then runs the bash-only expansion in the wrong shell: under zsh
+# a `bad substitution`, under dash an abort that takes the whole load with it. Every case above
+# uses `env -i`, which scrubs the variable and hides this entirely — so it gets its own cases.
+for _sh in zsh dash; do
+  command -v "$_sh" >/dev/null 2>&1 || { echo "  skip [-] $_sh not installed"; continue; }
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$WORK/absent" \
+    BASH_VERSION=5.2.0 PANEL_CFG_REVIEWERS=cursor \
+    "$_sh" -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE REVIEWERS "$1"' "$LIB" 'script-default')
+  [ "$got" = "script-default" ] && ok "$_sh: an inherited BASH_VERSION does not trigger the bash-only sweep" \
+    || bad "$_sh: inherited BASH_VERSION broke the load — got '$got'"
+
+  err=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$WORK/absent" BASH_VERSION=5.2.0 \
+    "$_sh" -c '. "$0"; panel_config_load' "$LIB" 2>&1 >/dev/null)
+  case "$err" in
+    *"ad substitution"*) bad "$_sh: inherited BASH_VERSION still causes a bad substitution — got: $err" ;;
+    *) ok "$_sh: no bad substitution with BASH_VERSION inherited" ;;
+  esac
+done
+unset _sh
+
 # A shell with no `printf -v` at all — dash is the one that ships everywhere, so this case needs no
 # extra dependency. Storing is impossible there, so the honest answer is to say so and load
 # nothing; the reset has already run, so nothing inherited is left standing either.

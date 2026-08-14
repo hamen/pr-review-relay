@@ -54,8 +54,12 @@ panel_reset_cfg() {
     if [ -n "$_s" ]; then unset "PANEL_CFG_MODEL_$_s"; unset "PANEL_CFG_EFFORT_$_s"; fi
     if [ "$_rest" = "$_s" ]; then _rest=; else _rest="${_rest#* }"; fi
   done
-  if [ -n "${BASH_VERSION:-}" ]; then
-    for _k in ${!PANEL_CFG_@}; do unset "$_k"; done
+  # Probe the expansion, never the shell's name: bash exports BASH_VERSION, so a bash parent hands
+  # it to a zsh or dash child, and a `[ -n "$BASH_VERSION" ]` guard then runs `${!PANEL_CFG_@}`
+  # there anyway — `bad substitution`, and under dash the whole load aborts. The eval'd string is
+  # a fixed literal, never anything read from the config file.
+  if ( eval 'set -- ${!PANEL_CFG_@}' ) 2>/dev/null; then
+    eval 'for _k in ${!PANEL_CFG_@}; do unset "$_k"; done'
   fi
   PANEL_CFG_KEYS=
 }
