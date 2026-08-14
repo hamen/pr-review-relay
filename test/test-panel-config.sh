@@ -162,6 +162,24 @@ else
   echo "  skip [-] zsh not installed"
 fi
 
+# A SECOND load must not leave the first one's values behind — including a key for a seat this
+# repo does not know, which is stored on purpose (ship-feature may know it) and therefore has to be
+# cleared on purpose. The bounded reset cannot see such a key by construction, and the bash sweep
+# is not available on every shell, so PANEL_CFG_KEYS from the previous load is what closes it.
+for _sh in bash zsh; do
+  command -v "$_sh" >/dev/null 2>&1 || { echo "  skip [-] $_sh not installed"; continue; }
+  printf 'MODEL_future=old\nREVIEWERS=first\n' > "$WORK/load-a.cfg"
+  printf 'REVIEWERS=second\n'                   > "$WORK/load-b.cfg"
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin "$_sh" -c '. "$0"
+    PR_RELAY_CONFIG="$1" panel_config_load 2>/dev/null
+    PR_RELAY_CONFIG="$2" panel_config_load 2>/dev/null
+    printf "%s|%s" "$(panel_resolve NOPE MODEL_future none)" "$(panel_resolve NOPE REVIEWERS d)"' \
+    "$LIB" "$WORK/load-a.cfg" "$WORK/load-b.cfg")
+  [ "$got" = "none|second" ] && ok "$_sh: a second load clears the first one's unknown-seat key" \
+    || bad "$_sh: stale key survived a reload — got '$got'"
+done
+unset _sh
+
 # A bash parent EXPORTS BASH_VERSION, so a zsh or dash child inherits it. Any guard that reads
 # that name to mean "this is bash" then runs the bash-only expansion in the wrong shell: under zsh
 # a `bad substitution`, under dash an abort that takes the whole load with it. Every case above

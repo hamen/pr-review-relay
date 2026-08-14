@@ -39,21 +39,38 @@ PANEL_SEATS="claude claude_fallback codex cursor antigravity grok opencode qwen 
 # half-load. Listing the keys instead needs no expansion any shell lacks, and no external command
 # (this file parses with built-ins only, because the relay has not validated PATH yet).
 #
-# The bash sweep still runs where it works, to also clear a key stored for a seat this repo does
-# not know about. It is the extra, never the guarantee.
-panel_reset_cfg() {
-  local _k _s _rest
-  for _k in REVIEWERS PLAN_REVIEWERS AGENT_TIMEOUT; do unset "PANEL_CFG_$_k"; done
-  # The seat list is peeled a word at a time rather than iterated with `for _s in $PANEL_SEATS`:
-  # zsh does not word-split an unquoted parameter, so that loop passed the WHOLE list as one name
-  # and unset failed with "invalid parameter name" — the reset silently doing nothing, in the
-  # function whose job is to make sure a stale value cannot survive.
-  _rest="$PANEL_SEATS"
-  while [ -n "$_rest" ]; do
-    _s="${_rest%% *}"
-    if [ -n "$_s" ]; then unset "PANEL_CFG_MODEL_$_s"; unset "PANEL_CFG_EFFORT_$_s"; fi
-    if [ "$_rest" = "$_s" ]; then _rest=; else _rest="${_rest#* }"; fi
+# Three layers, because no single one covers everything:
+#   1. what the PREVIOUS load stored — PANEL_CFG_KEYS names it exactly, unknown seats included.
+#   2. every key panel_resolve can be asked for — the three fixed ones plus MODEL_/EFFORT_ per seat.
+#   3. a bash-only sweep, which alone can also catch an unknown-seat key inherited from the
+#      environment rather than stored by a previous load. The extra, never the guarantee.
+#
+# Layer 1 is what makes a second load correct on a shell without the sweep: a key for a seat this
+# repo does not know is stored on purpose (ship-feature may know it), so it must also be cleared on
+# purpose, or it outlives the file that set it.
+
+# _panel_unset_each <space-separated list> <prefix> [<prefix2>]
+# The list is peeled a word at a time rather than iterated with `for x in $list`: zsh does not
+# word-split an unquoted parameter, so that loop passed the WHOLE list as one name and unset failed
+# with "invalid parameter name" — the reset silently doing nothing, in the code whose job is to
+# guarantee it happened.
+_panel_unset_each() {
+  local _list="$1" _p1="$2" _p2="${3-}" _w
+  while [ -n "$_list" ]; do
+    _w="${_list%% *}"
+    if [ -n "$_w" ]; then
+      unset "$_p1$_w"
+      [ -n "$_p2" ] && unset "$_p2$_w"
+    fi
+    if [ "$_list" = "$_w" ]; then _list=; else _list="${_list#* }"; fi
   done
+}
+
+panel_reset_cfg() {
+  local _k
+  _panel_unset_each "${PANEL_CFG_KEYS:-}" PANEL_CFG_
+  for _k in REVIEWERS PLAN_REVIEWERS AGENT_TIMEOUT; do unset "PANEL_CFG_$_k"; done
+  _panel_unset_each "$PANEL_SEATS" PANEL_CFG_MODEL_ PANEL_CFG_EFFORT_
   # Probe the expansion, never the shell's name: bash exports BASH_VERSION, so a bash parent hands
   # it to a zsh or dash child, and a `[ -n "$BASH_VERSION" ]` guard then runs `${!PANEL_CFG_@}`
   # there anyway — `bad substitution`, and under dash the whole load aborts. The eval'd string is
