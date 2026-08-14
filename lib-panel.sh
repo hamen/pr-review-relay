@@ -27,28 +27,58 @@
 # when the first model is unavailable.
 PANEL_SEATS="claude claude_fallback codex cursor antigravity grok opencode qwen kimi3 grok45high"
 
+# PANEL_CFG_* is this loader's OUTPUT, never an input. Without this reset an exported
+# PANEL_CFG_REVIEWERS=cursor acts as a fifth, undocumented precedence layer that outranks the
+# script default — the exact shape of the bug this file exists to close, arriving through the fix
+# for it.
+#
+# The reset is bounded rather than a wildcard sweep, and that is what makes it PORTABLE. The set of
+# keys panel_resolve can ever be asked for is known: three fixed keys, plus MODEL_/EFFORT_ for each
+# seat. Enumerating variables by prefix has no portable form — `${!PANEL_CFG_@}` is bash-only, and
+# under zsh it is a `bad substitution` that aborted this function mid-way and handed the caller a
+# half-load. Listing the keys instead needs no expansion any shell lacks, and no external command
+# (this file parses with built-ins only, because the relay has not validated PATH yet).
+#
+# The bash sweep still runs where it works, to also clear a key stored for a seat this repo does
+# not know about. It is the extra, never the guarantee.
+panel_reset_cfg() {
+  local _k _s _rest
+  for _k in REVIEWERS PLAN_REVIEWERS AGENT_TIMEOUT; do unset "PANEL_CFG_$_k"; done
+  # The seat list is peeled a word at a time rather than iterated with `for _s in $PANEL_SEATS`:
+  # zsh does not word-split an unquoted parameter, so that loop passed the WHOLE list as one name
+  # and unset failed with "invalid parameter name" — the reset silently doing nothing, in the
+  # function whose job is to make sure a stale value cannot survive.
+  _rest="$PANEL_SEATS"
+  while [ -n "$_rest" ]; do
+    _s="${_rest%% *}"
+    if [ -n "$_s" ]; then unset "PANEL_CFG_MODEL_$_s"; unset "PANEL_CFG_EFFORT_$_s"; fi
+    if [ "$_rest" = "$_s" ]; then _rest=; else _rest="${_rest#* }"; fi
+  done
+  if [ -n "${BASH_VERSION:-}" ]; then
+    for _k in ${!PANEL_CFG_@}; do unset "$_k"; done
+  fi
+  PANEL_CFG_KEYS=
+}
+
 panel_config_load() {
   # HOME can be unset — cron, systemd units, minimal containers — and this runs under `set -u`,
   # where a bare $HOME aborts the whole relay. The script supports that environment on purpose
   # (there is a round-state fallback for exactly it), so no config simply means no config.
-  # PANEL_CFG_* is this loader's OUTPUT, never an input. Without this reset an exported
-  # PANEL_CFG_REVIEWERS=cursor would act as a fifth, undocumented precedence layer that outranks
-  # the script default — the exact shape of the bug this file exists to close, arriving through the
-  # fix for it. The reset runs before every early return, so a stale value cannot survive on a
-  # machine with no config at all.
   #
-  # `${!PANEL_CFG_@}` is a bash expansion. Under zsh it is a `bad substitution` that aborts this
-  # function mid-way, and the caller gets a half-load with no idea why — which is what happened
-  # the first time someone sourced this file from an interactive shell to inspect it. Every real
-  # consumer here is bash (all three have a bash shebang), so the honest behaviour under any other
-  # shell is to say so and load nothing, rather than pretend and hand back a partial answer.
-  if [ -z "${BASH_VERSION:-}" ]; then
-    echo "warning: lib-panel.sh needs bash (it is sourced by bash scripts); loaded no config" >&2
+  # The reset runs FIRST, before every early return, so a stale value cannot survive on a machine
+  # with no config at all — including the "wrong shell" path, where returning early without it
+  # would leave the inherited value in place while claiming nothing was loaded.
+  panel_reset_cfg
+
+  # Storing a value needs `printf -v`. bash and zsh both have it; dash and other POSIX shells do
+  # not, and there the assignment below would fail once per line and store nothing, leaving a
+  # caller with a config file it believes was read. Probed rather than inferred from a shell name,
+  # because BASH_VERSION can be exported into another shell by a parent. The probe runs AFTER the
+  # reset, so the "cannot load" path still cannot leave an inherited value standing.
+  if ! ( printf -v _panel_probe '%s' x ) 2>/dev/null; then
+    echo "warning: this shell has no 'printf -v'; lib-panel.sh loaded no config" >&2
     return 0
   fi
-  local _v
-  for _v in ${!PANEL_CFG_@}; do unset "$_v"; done
-  PANEL_CFG_KEYS=
 
   local cfg="${PR_RELAY_CONFIG:-}"
   if [ -z "$cfg" ]; then

@@ -130,20 +130,54 @@ got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" PANEL_CFG_MO
 [ "$got" = "opus" ] && ok "an inherited PANEL_CFG_* is dropped for a key the file omits" \
   || bad "stale PANEL_CFG_MODEL_claude survived the load — got '$got'"
 
-# Sourced from a shell that is not bash. `${!PANEL_CFG_@}` is a bash expansion; under zsh it is a
-# `bad substitution` that aborted this function mid-way and handed the caller a half-load with no
-# usable error. Found by sourcing the file from an interactive zsh to inspect it. Every real
-# consumer is bash, so the honest answer elsewhere is "loaded nothing", said out loud.
+# Sourced from a shell that is not bash. The reset that stops an inherited PANEL_CFG_* from acting
+# as a precedence layer used `${!PANEL_CFG_@}`, a bash-only expansion: under zsh it was a
+# `bad substitution` that aborted panel_config_load mid-way. The first fix returned early on a
+# non-bash shell — which SKIPPED the reset, so PANEL_CFG_REVIEWERS=cursor still won while the
+# warning claimed nothing was loaded. Three reviewers caught that. The reset is now bounded and
+# portable, and it runs before every return.
+ZCFG="$WORK/other-shell.cfg"   # never the shared $CFG: later cases reuse that file
 if command -v zsh >/dev/null 2>&1; then
-  out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
-    zsh -c 'printf "REVIEWERS=from-file\n" > "$2"; . "$0"; panel_config_load; panel_resolve NOPE REVIEWERS script-default' "$LIB" x "$CFG" 2>&1)
-  case "$out" in
-    *"bad substitution"*) bad "sourcing from zsh still aborts on a bash expansion — got: $out" ;;
-    *"needs bash"*script-default*) ok "a non-bash shell is told so, and gets the script default" ;;
-    *) bad "unexpected zsh behaviour — got: $out" ;;
+  printf 'REVIEWERS=from-file\nMODEL_grok=g46\n' > "$ZCFG"
+
+  # THE FINDING: an inherited PANEL_CFG_* must not survive, on the shell where the sweep cannot run.
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$WORK/absent" PANEL_CFG_REVIEWERS=cursor \
+    zsh -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE REVIEWERS "$1"' "$LIB" 'claude,codex,grok,opencode')
+  [ "$got" = "claude,codex,grok,opencode" ] && ok "zsh: an inherited PANEL_CFG_* is cleared, not honoured" \
+    || bad "zsh: PANEL_CFG_REVIEWERS survived — got '$got'"
+
+  # ...and a real file still loads there, rather than aborting on a bash expansion.
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$ZCFG" PANEL_CFG_REVIEWERS=cursor \
+    zsh -c '. "$0"; panel_config_load 2>/dev/null; printf "%s|%s" "$(panel_resolve NOPE REVIEWERS d)" "$(panel_resolve NOPE MODEL_grok grok-4.5)"' "$LIB")
+  [ "$got" = "from-file|g46" ] && ok "zsh: the config file loads (no bash-only expansion on the path)" \
+    || bad "zsh: file did not load — got '$got'"
+
+  err=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$ZCFG" \
+    zsh -c '. "$0"; panel_config_load' "$LIB" 2>&1 >/dev/null)
+  case "$err" in
+    *"bad substitution"*) bad "zsh: still aborts on a bash expansion — got: $err" ;;
+    *) ok "zsh: loading is silent, with no bad substitution" ;;
   esac
 else
   echo "  skip [-] zsh not installed"
+fi
+
+# A shell with no `printf -v` at all — dash is the one that ships everywhere, so this case needs no
+# extra dependency. Storing is impossible there, so the honest answer is to say so and load
+# nothing; the reset has already run, so nothing inherited is left standing either.
+if command -v dash >/dev/null 2>&1; then
+  printf 'REVIEWERS=from-file\n' > "$ZCFG"
+  err=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$ZCFG" PANEL_CFG_REVIEWERS=cursor \
+    dash -c '. "$0"; panel_config_load' "$LIB" 2>&1 >/dev/null)
+  printf '%s' "$err" | grep -q "printf -v" && ok "a shell without printf -v says so" \
+    || bad "no printf -v, but no warning either — got: $err"
+
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$ZCFG" PANEL_CFG_REVIEWERS=cursor \
+    dash -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE REVIEWERS "$1"' "$LIB" 'script-default')
+  [ "$got" = "script-default" ] && ok "a shell without printf -v still clears an inherited PANEL_CFG_*" \
+    || bad "dash: inherited value survived the refusal — got '$got'"
+else
+  echo "  skip [-] dash not installed"
 fi
 
 # HOME unset — cron, systemd, containers. The relay supports it on purpose; a bare \$HOME under
