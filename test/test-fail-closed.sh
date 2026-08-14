@@ -1111,6 +1111,43 @@ lc_run GH_LOCAL_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 if grep -q 'reviewers fetch via gh' <<< "$out"; then
   echo "  ok   [-] a non-matching checkout falls back to gh"; PASS=$((PASS+1))
 else echo "  FAIL non-matching checkout did not fall back to gh"; FAIL=$((FAIL+1)); fi
+# WHY it fell back has to be on screen. A silent downgrade still produces reviews, so nothing
+# connects the extra gh round-trips to the checkout you happened to be standing in — three mygoo
+# PRs were reviewed that way in one session before anyone noticed.
+lc_run GH_LOCAL_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+if grep -q 'local context off:' <<< "$out" && grep -q 'the PR head is deadbee' <<< "$out"; then
+  echo "  ok   [-] a non-matching checkout says so, and names both SHAs"; PASS=$((PASS+1))
+else echo "  FAIL fallback reason not reported ($(grep -o 'local context off:.*' <<< "$out" | head -1))"; FAIL=$((FAIL+1)); fi
+
+# ...and when a worktree IS on the PR head, name it: that is almost always where the caller meant
+# to be, and it is the difference between a diagnosis and an instruction.
+# Order matters: git refuses to put a branch in a second worktree while it is checked out here,
+# so this checkout has to move off `feature` BEFORE the worktree is created.
+( cd "$LREPO" && git checkout -q main )
+git -C "$LREPO" worktree add -q "$WORK/lc-wt" feature
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if grep -q 'a worktree at' <<< "$out" && grep -q 'lc-wt' <<< "$out"; then
+  echo "  ok   [-] the worktree sitting on the PR head is named"; PASS=$((PASS+1))
+else echo "  FAIL worktree on the PR head not named ($(grep -o 'local context off:.*' <<< "$out" | head -1))"; FAIL=$((FAIL+1)); fi
+# ...and back, in the order git allows: the worktree releases the branch, then this checkout can
+# take it again. Reversed, the checkout fails and every later case in this block runs on main.
+git -C "$LREPO" worktree remove --force "$WORK/lc-wt"
+( cd "$LREPO" && git checkout -q feature )
+
+# a dirty tree says THAT instead, and says how much — the other everyday cause.
+echo dirty >> "$LREPO/file.txt"
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if grep -q 'the tree is dirty' <<< "$out"; then
+  echo "  ok   [-] a dirty tree names itself as the reason"; PASS=$((PASS+1))
+else echo "  FAIL dirty tree reason not reported"; FAIL=$((FAIL+1)); fi
+( cd "$LREPO" && git checkout -q -- file.txt )
+
+# and a clean run at the PR head must NOT print a reason at all.
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if grep -q 'local context off:' <<< "$out"; then
+  echo "  FAIL a working local context still reported a reason"; FAIL=$((FAIL+1))
+else echo "  ok   [-] no reason is printed when local context is on"; PASS=$((PASS+1)); fi
+
 # end-of-round re-check: if a reviewer dirties the working tree DURING the round (local
 # context was enabled on a clean tree), the reviews are stale → exit 3.
 printf '#!/usr/bin/env bash\necho scratch >> file.txt\necho "LGTM"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
