@@ -130,6 +130,95 @@ got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" PANEL_CFG_MO
 [ "$got" = "opus" ] && ok "an inherited PANEL_CFG_* is dropped for a key the file omits" \
   || bad "stale PANEL_CFG_MODEL_claude survived the load — got '$got'"
 
+# Sourced from a shell that is not bash. The reset that stops an inherited PANEL_CFG_* from acting
+# as a precedence layer used `${!PANEL_CFG_@}`, a bash-only expansion: under zsh it was a
+# `bad substitution` that aborted panel_config_load mid-way. The first fix returned early on a
+# non-bash shell — which SKIPPED the reset, so PANEL_CFG_REVIEWERS=cursor still won while the
+# warning claimed nothing was loaded. Three reviewers caught that. The reset is now bounded and
+# portable, and it runs before every return.
+ZCFG="$WORK/other-shell.cfg"   # never the shared $CFG: later cases reuse that file
+if command -v zsh >/dev/null 2>&1; then
+  printf 'REVIEWERS=from-file\nMODEL_grok=g46\n' > "$ZCFG"
+
+  # THE FINDING: an inherited PANEL_CFG_* must not survive, on the shell where the sweep cannot run.
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$WORK/absent" PANEL_CFG_REVIEWERS=cursor \
+    zsh -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE REVIEWERS "$1"' "$LIB" 'claude,codex,grok,opencode')
+  [ "$got" = "claude,codex,grok,opencode" ] && ok "zsh: an inherited PANEL_CFG_* is cleared, not honoured" \
+    || bad "zsh: PANEL_CFG_REVIEWERS survived — got '$got'"
+
+  # ...and a real file still loads there, rather than aborting on a bash expansion.
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$ZCFG" PANEL_CFG_REVIEWERS=cursor \
+    zsh -c '. "$0"; panel_config_load 2>/dev/null; printf "%s|%s" "$(panel_resolve NOPE REVIEWERS d)" "$(panel_resolve NOPE MODEL_grok grok-4.5)"' "$LIB")
+  [ "$got" = "from-file|g46" ] && ok "zsh: the config file loads (no bash-only expansion on the path)" \
+    || bad "zsh: file did not load — got '$got'"
+
+  err=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$ZCFG" \
+    zsh -c '. "$0"; panel_config_load' "$LIB" 2>&1 >/dev/null)
+  case "$err" in
+    *"bad substitution"*) bad "zsh: still aborts on a bash expansion — got: $err" ;;
+    *) ok "zsh: loading is silent, with no bad substitution" ;;
+  esac
+else
+  echo "  skip [-] zsh not installed"
+fi
+
+# A SECOND load must not leave the first one's values behind — including a key for a seat this
+# repo does not know, which is stored on purpose (ship-feature may know it) and therefore has to be
+# cleared on purpose. The bounded reset cannot see such a key by construction, and the bash sweep
+# is not available on every shell, so PANEL_CFG_KEYS from the previous load is what closes it.
+for _sh in bash zsh; do
+  command -v "$_sh" >/dev/null 2>&1 || { echo "  skip [-] $_sh not installed"; continue; }
+  printf 'MODEL_future=old\nREVIEWERS=first\n' > "$WORK/load-a.cfg"
+  printf 'REVIEWERS=second\n'                   > "$WORK/load-b.cfg"
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin "$_sh" -c '. "$0"
+    PR_RELAY_CONFIG="$1" panel_config_load 2>/dev/null
+    PR_RELAY_CONFIG="$2" panel_config_load 2>/dev/null
+    printf "%s|%s" "$(panel_resolve NOPE MODEL_future none)" "$(panel_resolve NOPE REVIEWERS d)"' \
+    "$LIB" "$WORK/load-a.cfg" "$WORK/load-b.cfg")
+  [ "$got" = "none|second" ] && ok "$_sh: a second load clears the first one's unknown-seat key" \
+    || bad "$_sh: stale key survived a reload — got '$got'"
+done
+unset _sh
+
+# A bash parent EXPORTS BASH_VERSION, so a zsh or dash child inherits it. Any guard that reads
+# that name to mean "this is bash" then runs the bash-only expansion in the wrong shell: under zsh
+# a `bad substitution`, under dash an abort that takes the whole load with it. Every case above
+# uses `env -i`, which scrubs the variable and hides this entirely — so it gets its own cases.
+for _sh in zsh dash; do
+  command -v "$_sh" >/dev/null 2>&1 || { echo "  skip [-] $_sh not installed"; continue; }
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$WORK/absent" \
+    BASH_VERSION=5.2.0 PANEL_CFG_REVIEWERS=cursor \
+    "$_sh" -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE REVIEWERS "$1"' "$LIB" 'script-default')
+  [ "$got" = "script-default" ] && ok "$_sh: an inherited BASH_VERSION does not trigger the bash-only sweep" \
+    || bad "$_sh: inherited BASH_VERSION broke the load — got '$got'"
+
+  err=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$WORK/absent" BASH_VERSION=5.2.0 \
+    "$_sh" -c '. "$0"; panel_config_load' "$LIB" 2>&1 >/dev/null)
+  case "$err" in
+    *"ad substitution"*) bad "$_sh: inherited BASH_VERSION still causes a bad substitution — got: $err" ;;
+    *) ok "$_sh: no bad substitution with BASH_VERSION inherited" ;;
+  esac
+done
+unset _sh
+
+# A shell with no `printf -v` at all — dash is the one that ships everywhere, so this case needs no
+# extra dependency. Storing is impossible there, so the honest answer is to say so and load
+# nothing; the reset has already run, so nothing inherited is left standing either.
+if command -v dash >/dev/null 2>&1; then
+  printf 'REVIEWERS=from-file\n' > "$ZCFG"
+  err=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$ZCFG" PANEL_CFG_REVIEWERS=cursor \
+    dash -c '. "$0"; panel_config_load' "$LIB" 2>&1 >/dev/null)
+  printf '%s' "$err" | grep -q "printf -v" && ok "a shell without printf -v says so" \
+    || bad "no printf -v, but no warning either — got: $err"
+
+  got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$ZCFG" PANEL_CFG_REVIEWERS=cursor \
+    dash -c '. "$0"; panel_config_load 2>/dev/null; panel_resolve NOPE REVIEWERS "$1"' "$LIB" 'script-default')
+  [ "$got" = "script-default" ] && ok "a shell without printf -v still clears an inherited PANEL_CFG_*" \
+    || bad "dash: inherited value survived the refusal — got '$got'"
+else
+  echo "  skip [-] dash not installed"
+fi
+
 # HOME unset — cron, systemd, containers. The relay supports it on purpose; a bare \$HOME under
 # set -u would abort the whole run.
 if env -u HOME -i PATH=/usr/bin:/bin bash -c 'set -u; . "$0"; panel_config_load; panel_resolve A B c' "$LIB" >/dev/null 2>&1; then
