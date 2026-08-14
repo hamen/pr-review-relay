@@ -50,12 +50,20 @@ panel_config_load() {
     esac
     key="${key%"${key##*[![:space:]]}"}"
     val="${val#"${val%%[![:space:]]*}"}"
+    # A key must be a bare identifier BEFORE it reaches printf -v. `printf -v name[i]` assigns to
+    # an array element, and bash evaluates that subscript as an arithmetic expression — so a key
+    # like MODEL_x[$(id)] would execute the command substitution while merely "parsing" the file.
+    # The whole point of not sourcing this file is that reading it must not run anything.
+    case "$key" in
+      ''|*[!A-Za-z0-9_]*)
+        echo "warning: ignoring invalid key in $cfg: $key" >&2; continue ;;
+    esac
     case "$key" in
       REVIEWERS|PLAN_REVIEWERS|AGENT_TIMEOUT) ;;
       MODEL_*|EFFORT_*) ;;
       *) echo "warning: unknown key in $cfg: $key" >&2; continue ;;
     esac
-    # An empty value is a deliberate "unset this", not "not configured".
+    # An empty value means "not configured" — the resolver falls through to the script default.
     printf -v "PANEL_CFG_$key" '%s' "$val"
     PANEL_CFG_KEYS="${PANEL_CFG_KEYS:+$PANEL_CFG_KEYS }$key"
   done < "$cfg"

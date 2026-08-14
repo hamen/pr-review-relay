@@ -74,6 +74,27 @@ env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
 [ -e "$canary" ] && bad "the config file was EXECUTED — command substitution ran" \
   || ok "the config is read, never sourced (no command substitution)"
 
+# The KEY side of the same rule, which the test above does not cover. `printf -v name[i]` assigns
+# to an array element and bash evaluates that subscript as arithmetic — so MODEL_x[$(cmd)] would
+# run cmd while the file was merely being parsed. The key must be a bare identifier first.
+for inj in 'MODEL_x[$(touch %s)]=y' 'MODEL_x[`touch %s`]=y' 'EFFORT_a[$(touch %s)]=z'; do
+  canary="$WORK/pwned-key"; rm -f "$canary"
+  printf "$inj\n" "$canary" > "$CFG"
+  out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+    bash -c '. "$0"; panel_config_load; panel_resolve NOPE REVIEWERS d' "$LIB" 2>&1)
+  if [ -e "$canary" ]; then bad "key injection EXECUTED a command: $inj"
+  elif printf '%s' "$out" | grep -q "invalid key"; then ok "an injected key is rejected and reported: ${inj%%=*}"
+  else bad "injected key neither ran nor was reported: $inj (out: $out)"; fi
+done
+rm -f "$WORK/pwned-key"
+
+# A key that is a plain identifier but unknown is still just an unknown key — the charset check
+# must not swallow that distinction, or the warning stops telling you which mistake you made.
+out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+  bash -c 'printf "NOT_A_KEY=1\n" > "$2"; . "$0"; panel_config_load; panel_resolve NOPE REVIEWERS d' "$LIB" x "$CFG" 2>&1)
+printf '%s' "$out" | grep -q "unknown key" && ok "a valid-looking but unknown key still says 'unknown key'" \
+  || bad "unknown identifier key misreported — got: $out"
+
 # HOME unset — cron, systemd, containers. The relay supports it on purpose; a bare \$HOME under
 # set -u would abort the whole run.
 if env -u HOME -i PATH=/usr/bin:/bin bash -c 'set -u; . "$0"; panel_config_load; panel_resolve A B c' "$LIB" >/dev/null 2>&1; then

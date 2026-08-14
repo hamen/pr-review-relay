@@ -100,13 +100,13 @@ OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 relay_assert_path_outside_repo
 relay_assert_tmpdir_outside_repo_global
 
-AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
+AGENT_TIMEOUT="$(panel_resolve PR_DISTILL_AGENT_TIMEOUT AGENT_TIMEOUT 300)"
 
 # Same codex override as pr-review-relay and review-local, so the three do not
 # drift. Expanded with ${arr[@]+…} because Bash 3.2 (macOS) aborts on an empty
 # array under `set -u`.
 CODEX_REVIEW_MODEL="$(panel_resolve CODEX_REVIEW_MODEL MODEL_codex "")"
-CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
+CODEX_REVIEW_EFFORT="$(panel_resolve CODEX_REVIEW_EFFORT EFFORT_codex "")"
 CODEX_MODEL_ARGS=()
 [ -n "$CODEX_REVIEW_MODEL" ] && CODEX_MODEL_ARGS+=(-m "$CODEX_REVIEW_MODEL")
 [ -n "$CODEX_REVIEW_EFFORT" ] && CODEX_MODEL_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REVIEW_EFFORT\"")
@@ -123,7 +123,7 @@ CODEX_MODEL_ARGS=()
 # Both read-only flags live in this array, as they do in the relay — they were split across the
 # array and the call site, which reads as if one of them were optional. Both are asserted.
 CLAUDE_REVIEW_MODEL="$(panel_resolve CLAUDE_REVIEW_MODEL MODEL_claude opus)"
-CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
+CLAUDE_REVIEW_EFFORT="$(panel_resolve CLAUDE_REVIEW_EFFORT EFFORT_claude "")"
 CLAUDE_REVIEW_FALLBACK_MODEL="$(panel_resolve CLAUDE_REVIEW_FALLBACK_MODEL MODEL_claude_fallback sonnet)"
 CLAUDE_MODEL_ARGS=(--model "$CLAUDE_REVIEW_MODEL" --fallback-model "$CLAUDE_REVIEW_FALLBACK_MODEL" --permission-mode plan --safe-mode)
 [ -n "$CLAUDE_REVIEW_EFFORT" ] && CLAUDE_MODEL_ARGS+=(--effort "$CLAUDE_REVIEW_EFFORT")
