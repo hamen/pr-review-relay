@@ -32,14 +32,16 @@ AGENT_TIMEOUT=360
 
 # One key per seat. The key follows the SEAT name you pass to --reviewers, not the environment
 # variable it maps to — nobody should need to know that opencode's variable is called
-# PR_RELAY_OPENCODE_MODEL, or antigravity's AGY_REVIEW_MODEL.
+# PR_RELAY_OPENCODE_MODEL, or antigravity's AGY_REVIEW_MODEL. MODEL_agy is accepted as an old
+# alias for MODEL_antigravity. A suffix that names no seat is stored but reported, so a typo
+# does not pass for a setting that quietly had no effect.
 MODEL_claude=opus
 MODEL_claude_fallback=sonnet
 MODEL_codex=gpt-5.6-sol
 MODEL_grok=grok-4.6
 MODEL_opencode=openrouter/z-ai/glm-5.2
 MODEL_cursor=composer-2.5
-MODEL_agy=Gemini 3.1 Pro (High)
+MODEL_antigravity=Gemini 3.1 Pro (High)
 
 # Reasoning effort, where the agent supports it.
 #EFFORT_claude=

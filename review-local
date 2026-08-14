@@ -81,7 +81,7 @@ CURSOR_REVIEW_MODEL="$(panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2
 # that config for every other use of the CLI. Unset = unchanged behaviour.
 CODEX_REVIEW_MODEL="$(panel_resolve CODEX_REVIEW_MODEL MODEL_codex "")"
 CODEX_REVIEW_EFFORT="$(panel_resolve CODEX_REVIEW_EFFORT EFFORT_codex "")"
-AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_agy "")"
+AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_antigravity "")"
 
 # Claude's model pin, same hard default and same load-bearing fallback as the relay — see the
 # long rationale there. Short version: an unavailable model prints its error on STDOUT (stderr

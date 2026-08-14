@@ -54,10 +54,31 @@ got=$(resolve 'MODEL_cursor=' CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)
 
 # Every seat named in a panel must be configurable. This is the cursor bug in its second form:
 # a seat you can name but cannot pin drifts back to a default nobody chose.
-for seat in claude claude_fallback codex cursor grok opencode agy; do
+for seat in claude claude_fallback codex cursor grok opencode antigravity; do
   got=$(resolve "MODEL_$seat=pinned-$seat" NOT_SET "MODEL_$seat" 'script-default')
   [ "$got" = "pinned-$seat" ] && ok "MODEL_$seat is configurable" || bad "MODEL_$seat ignored — got '$got'"
 done
+
+# The seat is 'antigravity' — that is what --reviewers takes. Its variable happens to be called
+# AGY_REVIEW_MODEL, and the call site used to read MODEL_agy, so MODEL_antigravity was accepted,
+# stored, and read by nothing: a setting that vanished in silence, in the file written to stop
+# settings vanishing in silence. MODEL_agy stays working as an alias for anyone who wrote it.
+got=$(resolve 'MODEL_agy=via-alias' NOT_SET MODEL_antigravity 'script-default')
+[ "$got" = "via-alias" ] && ok "MODEL_agy still resolves as an alias of MODEL_antigravity" \
+  || bad "the MODEL_agy alias broke — got '$got'"
+
+# A suffix that names no seat is stored (ship-feature reads this file too and may know seats this
+# repo does not) but must be REPORTED, or a typo reads as a setting that simply had no effect.
+out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+  bash -c 'printf "MODEL_opencde=oops\n" > "$2"; . "$0"; panel_config_load 2>&1 >/dev/null' "$LIB" x "$CFG")
+printf '%s' "$out" | grep -q "no reviewer seat named 'opencde'" && ok "a MODEL_ key for a non-seat is reported" \
+  || bad "typo'd seat name swallowed — got: $out"
+
+# ...and a seat this repo does not drive itself must NOT be reported: ship-feature's plan panel
+# uses these, and warning about them would train everyone to ignore the warning.
+out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+  bash -c 'printf "MODEL_kimi3=x\nMODEL_grok45high=y\n" > "$2"; . "$0"; panel_config_load 2>&1 >/dev/null' "$LIB" x "$CFG")
+[ -z "$out" ] && ok "plan-review seats are not reported as unknown" || bad "plan seat warned about — got: $out"
 
 # Parsing is fail-noisy, never fail-silent: a config that disappears without a word is the very
 # defect this file exists to remove.

@@ -166,7 +166,7 @@ MODEL_grok=grok-4.6
 MODEL_opencode=openrouter/z-ai/glm-5.2
 ```
 
-A `MODEL_<seat>` key uses the **seat** name you pass to `--reviewers`, so you never need to know that opencode's variable is `PR_RELAY_OPENCODE_MODEL` and antigravity's is `AGY_REVIEW_MODEL`.
+A `MODEL_<seat>` key uses the **seat** name you pass to `--reviewers`, so you never need to know that opencode's variable is `PR_RELAY_OPENCODE_MODEL` and antigravity's is `AGY_REVIEW_MODEL`. (`MODEL_agy` still works as an alias of `MODEL_antigravity`.) A suffix that names no seat is kept — ship-feature reads this same file and knows seats this repo does not — but it is reported on stderr, so a typo cannot pass for a setting that quietly had no effect.
 
 Precedence, strongest first: the command-line flag, then the environment variable, then this file, then the default in the script. An **empty value means "not configured"** and falls through — it does not disable anything.
 

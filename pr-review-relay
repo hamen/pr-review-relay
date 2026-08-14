@@ -174,7 +174,7 @@ CURSOR_REVIEW_MODEL="$(panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2
 #   AGY_REVIEW_MODEL=gemini-3.1-pro-high
 CODEX_REVIEW_MODEL="$(panel_resolve CODEX_REVIEW_MODEL MODEL_codex "")"
 CODEX_REVIEW_EFFORT="$(panel_resolve CODEX_REVIEW_EFFORT EFFORT_codex "")"
-AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_agy "")"
+AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_antigravity "")"
 
 # Claude was the last reviewer taking BOTH its model and its permissions from ambient config: a
 # bare `claude -p`. Every other seat is pinned on the command line, and #15/#17 pinned cursor for

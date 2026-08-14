@@ -21,6 +21,12 @@
 # that runs from cron. Parsing uses shell built-ins only — no tr, no sed, no cut — because the
 # relay does not validate PATH until later, and a config parser that shells out before that check
 # would be exactly the hole the check exists to close.
+# Every seat a MODEL_/EFFORT_ suffix may name. The relay's own panel, plus the plan-review seats
+# that ship-feature drives from this same file (grok45high is grok at high effort, kimi3 is the
+# opencode runner on another model). claude_fallback is not a seat: it is claude's second choice
+# when the first model is unavailable.
+PANEL_SEATS="claude claude_fallback codex cursor antigravity grok opencode qwen kimi3 grok45high"
+
 panel_config_load() {
   # HOME can be unset — cron, systemd units, minimal containers — and this runs under `set -u`,
   # where a bare $HOME aborts the whole relay. The script supports that environment on purpose
@@ -69,7 +75,24 @@ panel_config_load() {
     esac
     case "$key" in
       REVIEWERS|PLAN_REVIEWERS|AGENT_TIMEOUT) ;;
-      MODEL_*|EFFORT_*) ;;
+      MODEL_*|EFFORT_*)
+        # The documented rule is that the suffix is the SEAT name you pass to --reviewers. One
+        # seat broke it: antigravity's variable is AGY_REVIEW_MODEL, so the call site read
+        # MODEL_agy and MODEL_antigravity was accepted, stored, and never read by anything —
+        # a setting that vanishes in silence, which is the failure this whole file exists to
+        # prevent. The seat name is now the real key and `agy` is folded into it.
+        case "$key" in
+          MODEL_agy)  key=MODEL_antigravity ;;
+          EFFORT_agy) key=EFFORT_antigravity ;;
+        esac
+        # A suffix that is not a seat is still stored — ship-feature reads this same file and may
+        # know seats this repo does not — but it is reported, so a typo does not pass for a
+        # setting that simply had no effect.
+        case " $PANEL_SEATS " in
+          *" ${key#*_} "*) ;;
+          *) echo "warning: no reviewer seat named '${key#*_}' in $cfg: $key (stored, but nothing here reads it)" >&2 ;;
+        esac
+        ;;
       *) echo "warning: unknown key in $cfg: $key" >&2; continue ;;
     esac
     # An empty value means "not configured" — the resolver falls through to the script default.
