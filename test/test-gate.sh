@@ -20,6 +20,13 @@ HOOK="$HERE/../.githooks/pre-push"
 [ -r "$HOOK" ] || { echo "cannot read $HOOK" >&2; exit 1; }
 
 WORK="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
+# The developer's own ~/.config/pr-review-relay/config must not reach these fixtures. It sets the
+# real panel and real models, so a machine with one configured would fail assertions that pin a
+# model or a reviewer list — and the pre-push gate would go red for a reason that has nothing to do
+# with the change being pushed. Point every suite at a path that does not exist; the cases that
+# WANT a config set PR_RELAY_CONFIG themselves, per invocation.
+export PR_RELAY_CONFIG="$WORK/no-such-panel-config"
+
 [ -n "$WORK" ] && [ -d "$WORK" ] || { echo "no temp dir" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
 

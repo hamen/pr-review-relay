@@ -85,6 +85,11 @@ DISTILL_SELF="$_self"   # the resolved real file — used by --help (which "$0" 
 unset _self _rl _n _link
 # Shared helpers (PATH/tmpdir guards) live in the same lib the relay uses, so the policy
 # exists in one place.
+PANEL_LIB="$SCRIPT_DIR/lib-panel.sh"
+[ -r "$PANEL_LIB" ] || { echo "missing $PANEL_LIB (keep it next to this script)" >&2; exit 1; }
+. "$PANEL_LIB"
+panel_config_load
+
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
 . "$OPENCODE_LIB"
@@ -95,13 +100,13 @@ OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 relay_assert_path_outside_repo
 relay_assert_tmpdir_outside_repo_global
 
-AGENT_TIMEOUT="${PR_DISTILL_AGENT_TIMEOUT:-300}"
+AGENT_TIMEOUT="$(panel_resolve PR_DISTILL_AGENT_TIMEOUT AGENT_TIMEOUT 300)"
 
 # Same codex override as pr-review-relay and review-local, so the three do not
 # drift. Expanded with ${arr[@]+…} because Bash 3.2 (macOS) aborts on an empty
 # array under `set -u`.
-CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-}"
-CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-}"
+CODEX_REVIEW_MODEL="$(panel_resolve CODEX_REVIEW_MODEL MODEL_codex "")"
+CODEX_REVIEW_EFFORT="$(panel_resolve CODEX_REVIEW_EFFORT EFFORT_codex "")"
 CODEX_MODEL_ARGS=()
 [ -n "$CODEX_REVIEW_MODEL" ] && CODEX_MODEL_ARGS+=(-m "$CODEX_REVIEW_MODEL")
 [ -n "$CODEX_REVIEW_EFFORT" ] && CODEX_MODEL_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REVIEW_EFFORT\"")
@@ -117,9 +122,9 @@ CODEX_MODEL_ARGS=()
 # which is exactly what an injected comment would reach for. Same posture as the relay.
 # Both read-only flags live in this array, as they do in the relay — they were split across the
 # array and the call site, which reads as if one of them were optional. Both are asserted.
-CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
-CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-}"
-CLAUDE_REVIEW_FALLBACK_MODEL="${CLAUDE_REVIEW_FALLBACK_MODEL:-sonnet}"
+CLAUDE_REVIEW_MODEL="$(panel_resolve CLAUDE_REVIEW_MODEL MODEL_claude opus)"
+CLAUDE_REVIEW_EFFORT="$(panel_resolve CLAUDE_REVIEW_EFFORT EFFORT_claude "")"
+CLAUDE_REVIEW_FALLBACK_MODEL="$(panel_resolve CLAUDE_REVIEW_FALLBACK_MODEL MODEL_claude_fallback sonnet)"
 CLAUDE_MODEL_ARGS=(--model "$CLAUDE_REVIEW_MODEL" --fallback-model "$CLAUDE_REVIEW_FALLBACK_MODEL" --permission-mode plan --safe-mode)
 [ -n "$CLAUDE_REVIEW_EFFORT" ] && CLAUDE_MODEL_ARGS+=(--effort "$CLAUDE_REVIEW_EFFORT")
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: '$AGENT_TIMEOUT' (want a positive number of seconds)" >&2; exit 2;; esac
@@ -127,7 +132,7 @@ case "$AGENT_TIMEOUT" in ''|*[!0-9]*|0) echo "invalid PR_DISTILL_AGENT_TIMEOUT: 
 # Pin the Cursor agent's model — see the long rationale in pr-review-relay. Short version:
 # cursor-agent's own default is "Auto", which bills the small "Other Models" pool instead of the
 # Cursor-branded one. Distillation is the same binary on the same account, so it shares the fix.
-CURSOR_REVIEW_MODEL="${CURSOR_REVIEW_MODEL:-composer-2.5}"
+CURSOR_REVIEW_MODEL="$(panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)"
 
 REPO=""; REPO_EXPLICIT=0; LIMIT=20; STATE="merged"; AGENT="claude"; RULES_FILE=""; OUT=""; PRINT_ONLY=0; DRY=0
 # A value-taking option with no argument must fail with a clean usage error (exit 2),

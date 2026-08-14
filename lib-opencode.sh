@@ -455,7 +455,11 @@ opencode_review() {
   local attach_dir="$1" diff="$2" context_block="$3" subject="$4" errf="$5" agent_timeout="$6"
   local diff_file oc_prompt _abs_path _rest _pe
   local -a model=()
-  [ -n "${PR_RELAY_OPENCODE_MODEL:-}" ] && model=(-m "$PR_RELAY_OPENCODE_MODEL")
+  # Through panel_resolve so ~/.config/pr-review-relay/config can pin this seat like any other.
+  # The seat is named `opencode` on the command line but its variable is PR_RELAY_OPENCODE_MODEL;
+  # the config key follows the SEAT name, so nobody has to know that history to configure it.
+  local _m; _m="$(panel_resolve PR_RELAY_OPENCODE_MODEL MODEL_opencode "")"
+  [ -n "$_m" ] && model=(-m "$_m")
 
   # UNIQUE per invocation. A fixed name races: both callers dedupe their reviewer
   # lists now, but that is one guard away from two of these running concurrently

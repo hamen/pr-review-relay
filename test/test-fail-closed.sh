@@ -19,6 +19,13 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RELAY="$HERE/../pr-review-relay"
 WORK="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
+# The developer's own ~/.config/pr-review-relay/config must not reach these fixtures. It sets the
+# real panel and real models, so a machine with one configured would fail assertions that pin a
+# model or a reviewer list — and the pre-push gate would go red for a reason that has nothing to do
+# with the change being pushed. Point every suite at a path that does not exist; the cases that
+# WANT a config set PR_RELAY_CONFIG themselves, per invocation.
+export PR_RELAY_CONFIG="$WORK/no-such-panel-config"
+
 [ -n "$WORK" ] && [ -d "$WORK" ] || { echo "no temp dir" >&2; exit 1; }
 BIN="$WORK/bin"; mkdir -p "$BIN"
 trap 'rm -rf "$WORK"' EXIT
@@ -1406,7 +1413,7 @@ else
 fi
 # A RELATIVE symlink target must resolve against the LINK's directory, not the cwd.
 REALD="$WORK/real"; mkdir -p "$REALD"
-cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
+cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../lib-panel.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
 LINKD="$WORK/linkbin"; mkdir -p "$LINKD"
 ( cd "$LINKD" && ln -s "../real/pr-review-relay" pr-review-relay )
 if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then
@@ -2336,6 +2343,48 @@ s_run "$SHA_A" >/dev/null
 ok_if $? "a MAX_ROUNDS=0 run's log expires on the same orphan clock" "log=${_zlog:-<none>}"
 
 unset _r1 _r2 _sg _log _side _rc
+
+# --- the panel config reaches the ENTRY POINT, not just panel_resolve --------------------------
+# test-panel-config.sh proves the resolver. It cannot prove the relay CALLS it, and that gap is
+# exactly the production bug: `cursor` was dropped from the panel on 2026-08-13 and kept reviewing
+# for weeks, because a caller that omits --reviewers got the default assigned inside the script.
+# These run the real relay with no --reviewers and assert the command lines it actually built.
+_pcfg="$WORK/panel.conf"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$WORK/argv.panel"
+printf 'REVIEWERS=claude,codex\nMODEL_claude=sonnet\n' > "$_pcfg"
+# The model env vars are cleared on purpose: with one exported, "the file wins" would pass for the
+# wrong reason — the same trap this suite already guards for CURSOR_REVIEW_MODEL.
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  ARGV_LOG="$WORK/argv.panel" PR_RELAY_CONFIG="$_pcfg" \
+  CLAUDE_REVIEW_MODEL= PR_RELAY_REVIEWERS= \
+  bash "$RELAY" --pr 1 --author antigravity --parallel >/dev/null 2>&1
+grep -q "^claude " "$WORK/argv.panel" 2>/dev/null && grep -q "^codex " "$WORK/argv.panel" 2>/dev/null \
+  && ! grep -q "^grok \|^opencode " "$WORK/argv.panel" 2>/dev/null
+ok_if $? "a panel in the config file reaches the relay with no --reviewers" "argv=$(cat "$WORK/argv.panel" 2>/dev/null | cut -c1-120 | tr '\n' '|')"
+
+grep -q "^claude .*--model sonnet" "$WORK/argv.panel" 2>/dev/null
+ok_if $? "MODEL_<seat> from the config reaches that reviewer's command line" "argv=$(grep '^claude ' "$WORK/argv.panel" 2>/dev/null | cut -c1-160)"
+
+# --reviewers still outranks the file — precedence 1 beats precedence 3, at the entry point.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$WORK/argv.panel2"
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  ARGV_LOG="$WORK/argv.panel2" PR_RELAY_CONFIG="$_pcfg" CLAUDE_REVIEW_MODEL= PR_RELAY_REVIEWERS= \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers codex --parallel >/dev/null 2>&1
+grep -q "^codex " "$WORK/argv.panel2" 2>/dev/null && ! grep -q "^claude " "$WORK/argv.panel2" 2>/dev/null
+ok_if $? "--reviewers still outranks the config file" "argv=$(cat "$WORK/argv.panel2" 2>/dev/null | cut -c1-120 | tr '\n' '|')"
+
+# AGENT_TIMEOUT from the file reaches each of the three programs that load the config. The value is
+# deliberately invalid: every one of them validates it before doing any work, so the error message
+# naming it back is proof the file was read inside THAT program.
+printf 'AGENT_TIMEOUT=notanumber\n' > "$_pcfg"
+for _prog in pr-review-relay review-local pr-review-distill; do
+  _out=$(env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" PR_RELAY_CONFIG="$_pcfg" \
+    PR_RELAY_AGENT_TIMEOUT= PR_DISTILL_AGENT_TIMEOUT= \
+    bash "$HERE/../$_prog" --pr 1 --author antigravity 2>&1); _prc=$?
+  [ "$_prc" = 2 ] && printf '%s' "$_out" | grep -q "notanumber"
+  ok_if $? "$_prog reads AGENT_TIMEOUT from the config file" "rc=$_prc out=$(printf '%s' "$_out" | head -1)"
+done
+unset _pcfg _prog _out _prc
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
