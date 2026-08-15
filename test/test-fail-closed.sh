@@ -1146,6 +1146,19 @@ else echo "  FAIL dirty worktree advertised as usable ($(grep -o 'local context 
 git -C "$LREPO" worktree remove --force "$WORK/lc-dirty-wt"
 ( cd "$LREPO" && git checkout -q feature )
 
+# ...and a worktree whose state cannot be read at all must say so rather than be recommended: an
+# errored `git status` leaves the same empty output a clean tree does, and reading that as clean
+# sends the caller somewhere that will fail them a second time.
+( cd "$LREPO" && git checkout -q main )
+git -C "$LREPO" worktree add -q "$WORK/lc-gone-wt" feature
+rm -rf "$WORK/lc-gone-wt"          # the entry survives in git's metadata until pruned
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if grep -q 'its state could not be read' <<< "$out"; then
+  echo "  ok   [-] an unreadable worktree is reported, not recommended"; PASS=$((PASS+1))
+else echo "  FAIL unreadable worktree treated as usable ($(grep -o 'local context off:.*' <<< "$out" | head -1))"; FAIL=$((FAIL+1)); fi
+git -C "$LREPO" worktree prune
+( cd "$LREPO" && git checkout -q feature )
+
 # The reason function must never return non-zero: the common case (wrong checkout, NO worktree on
 # the PR head) used to end on a failed test, which today only survives because the caller ignores
 # the status — an assignment under set -e would abort the run.

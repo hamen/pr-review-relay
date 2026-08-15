@@ -600,11 +600,18 @@ local_context_reason() {
     # worktree would be sending them to the same fallback by another road.
     _wt=$(worktree_on_pr_head)
     if [ -n "$_wt" ]; then
-      _wt_st=$(git -C "$_wt" status --porcelain 2>/dev/null)
-      if [ -n "$_wt_st" ]; then
-        printf ' — a worktree at %s is on it but is dirty; clean it and run from there' "$_wt"
+      # Fail-closed on the status COMMAND, not just its output — the same rule local_context_ok()
+      # applies to itself. An errored git status leaves _wt_st empty, and reading that as "clean"
+      # would send the caller to a worktree that is gone, unreadable, or whose path this parse got
+      # wrong: they would move, get the same fallback, and have been told twice it would work.
+      if _wt_st=$(git -C "$_wt" status --porcelain 2>/dev/null); then
+        if [ -n "$_wt_st" ]; then
+          printf ' — a worktree at %s is on it but is dirty; clean it and run from there' "$_wt"
+        else
+          printf ' — a worktree at %s is on it; run from there to skip the gh round-trips' "$_wt"
+        fi
       else
-        printf ' — a worktree at %s is on it; run from there to skip the gh round-trips' "$_wt"
+        printf ' — a worktree at %s is on it, but its state could not be read' "$_wt"
       fi
     fi
     return 0
