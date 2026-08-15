@@ -586,23 +586,43 @@ local_context_ok() {
 # session before anyone noticed — from the repo's main checkout, while a worktree holding the PR's
 # own branch sat one directory down.
 local_context_reason() {
-  local _h _st _wt
-  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'not inside a git work tree'; return; }
-  _h=$(git rev-parse HEAD 2>/dev/null) || { printf 'cannot read HEAD here'; return; }
+  local _h _st _wt _wt_st
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'not inside a git work tree'; return 0; }
+  _h=$(git rev-parse HEAD 2>/dev/null) || { printf 'cannot read HEAD here'; return 0; }
+  # Checked BEFORE the comparison: with no PR head there is nothing to be wrong about, and
+  # comparing against it would print "the PR head is " with nothing after it.
+  if [ -z "$HEAD_SHA" ]; then printf 'the PR head could not be read'; return 0; fi
+
   if [ "$_h" != "$HEAD_SHA" ]; then
     printf 'HEAD here is %.7s, the PR head is %.7s' "$_h" "$HEAD_SHA"
     # The actionable half: if some worktree IS on the PR head, name it. That is almost always the
-    # one the caller meant to be in.
+    # one the caller meant to be in. Its cleanliness is checked too — sending someone to a dirty
+    # worktree would be sending them to the same fallback by another road.
     _wt=$(worktree_on_pr_head)
-    [ -n "$_wt" ] && printf ' — a worktree at %s is on it; run from there to skip the gh round-trips' "$_wt"
-    return
+    if [ -n "$_wt" ]; then
+      _wt_st=$(git -C "$_wt" status --porcelain 2>/dev/null)
+      if [ -n "$_wt_st" ]; then
+        printf ' — a worktree at %s is on it but is dirty; clean it and run from there' "$_wt"
+      else
+        printf ' — a worktree at %s is on it; run from there to skip the gh round-trips' "$_wt"
+      fi
+    fi
+    return 0
   fi
-  _st=$(git status --porcelain 2>/dev/null) || { printf 'git status failed here'; return; }
+
+  _st=$(git status --porcelain 2>/dev/null) || { printf 'git status failed here'; return 0; }
   if [ -n "$_st" ]; then
-    printf 'the tree is dirty (%s changed path(s)) — commit or stash before reviewing' "$(printf '%s\n' "$_st" | wc -l | tr -d ' ')"
-    return
+    # `stash` alone leaves untracked files behind, and those make the tree dirty just the same.
+    printf 'the tree is dirty (%s changed path(s)) — commit, `git stash -u`, or clean before reviewing' \
+      "$(printf '%s\n' "$_st" | wc -l | tr -d ' ')"
+    return 0
   fi
-  printf 'no PR head to compare against'
+
+  # Everything this function knows how to check came back fine, yet local_context_ok() said no. It
+  # has grown a rule this message does not mirror. Saying so is the honest answer; inventing a
+  # plausible one would send the reader after the wrong thing.
+  printf 'local_context_ok() refused for a reason this message does not cover'
+  return 0
 }
 
 # Path of a worktree whose HEAD is exactly the PR head, or empty. Parses the porcelain form, which
@@ -613,6 +633,7 @@ worktree_on_pr_head() {
     /^worktree /{ path = substr($0, 10) }
     /^HEAD /     { if (substr($0, 6) == want) { print path; exit } }
   '
+  return 0
 }
 
 LOCAL_CONTEXT=0

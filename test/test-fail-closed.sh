@@ -1134,6 +1134,56 @@ else echo "  FAIL worktree on the PR head not named ($(grep -o 'local context of
 git -C "$LREPO" worktree remove --force "$WORK/lc-wt"
 ( cd "$LREPO" && git checkout -q feature )
 
+# A worktree on the PR head that is DIRTY must not be advertised as the answer: running from it
+# lands in the same fallback by another road.
+( cd "$LREPO" && git checkout -q main )
+git -C "$LREPO" worktree add -q "$WORK/lc-dirty-wt" feature
+echo scratch >> "$WORK/lc-dirty-wt/file.txt"
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if grep -q 'is on it but is dirty' <<< "$out"; then
+  echo "  ok   [-] a dirty worktree on the PR head is flagged, not recommended"; PASS=$((PASS+1))
+else echo "  FAIL dirty worktree advertised as usable ($(grep -o 'local context off:.*' <<< "$out" | head -1))"; FAIL=$((FAIL+1)); fi
+git -C "$LREPO" worktree remove --force "$WORK/lc-dirty-wt"
+( cd "$LREPO" && git checkout -q feature )
+
+# The reason function must never return non-zero: the common case (wrong checkout, NO worktree on
+# the PR head) used to end on a failed test, which today only survives because the caller ignores
+# the status — an assignment under set -e would abort the run.
+_rsn_rc=$( cd "$LREPO" && env PATH="$BIN:$PATH" bash -c '
+  set -e
+  HEAD_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+  eval "$(sed -n "/^local_context_reason() {/,/^}/p;/^worktree_on_pr_head() {/,/^}/p" "$1")"
+  reason=$(local_context_reason)
+  echo "$reason" >/dev/null
+  echo ok
+' _ "$RELAY" 2>/dev/null )
+if [ "$_rsn_rc" = ok ]; then
+  echo "  ok   [-] the reason never returns non-zero (safe under set -e)"; PASS=$((PASS+1))
+else echo "  FAIL local_context_reason returned non-zero with no matching worktree"; FAIL=$((FAIL+1)); fi
+
+# Outside a git work tree it says that, rather than guessing about SHAs.
+_rsn=$( cd "$WORK" && env PATH="$BIN:$PATH" bash -c '
+  HEAD_SHA=deadbeef
+  eval "$(sed -n "/^local_context_reason() {/,/^}/p;/^worktree_on_pr_head() {/,/^}/p" "$1")"
+  local_context_reason
+' _ "$RELAY" 2>/dev/null )
+case "$_rsn" in
+  *"not inside a git work tree"*) echo "  ok   [-] outside a repo, the reason says so"; PASS=$((PASS+1)) ;;
+  *) echo "  FAIL outside a repo the reason was: $_rsn"; FAIL=$((FAIL+1)) ;;
+esac
+
+# With no PR head there is nothing to compare against, and the message must not print an empty SHA.
+_rsn=$( cd "$LREPO" && env PATH="$BIN:$PATH" bash -c '
+  HEAD_SHA=
+  eval "$(sed -n "/^local_context_reason() {/,/^}/p;/^worktree_on_pr_head() {/,/^}/p" "$1")"
+  local_context_reason
+' _ "$RELAY" 2>/dev/null )
+case "$_rsn" in
+  *"the PR head could not be read"*) echo "  ok   [-] an unreadable PR head says so, with no empty SHA"; PASS=$((PASS+1)) ;;
+  *) echo "  FAIL empty HEAD_SHA produced: $_rsn"; FAIL=$((FAIL+1)) ;;
+esac
+unset _rsn _rsn_rc
+
 # a dirty tree says THAT instead, and says how much — the other everyday cause.
 echo dirty >> "$LREPO/file.txt"
 lc_run GH_LOCAL_HEAD="$LHEAD"
