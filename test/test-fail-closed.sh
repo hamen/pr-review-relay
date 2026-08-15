@@ -1159,6 +1159,37 @@ else echo "  FAIL unreadable worktree treated as usable ($(grep -o 'local contex
 git -C "$LREPO" worktree prune
 ( cd "$LREPO" && git checkout -q feature )
 
+# A CLEAN worktree wins over a dirty one that happens to come first: the message exists to save a
+# trip, and naming the dirty one while a usable one sits there costs exactly that trip.
+( cd "$LREPO" && git checkout -q main )
+git -C "$LREPO" worktree add -q "$WORK/lc-wt-a" feature
+git -C "$LREPO" worktree add -q --detach "$WORK/lc-wt-b" feature
+echo scratch >> "$WORK/lc-wt-a/file.txt"          # the first one listed is the dirty one
+lc_run GH_LOCAL_HEAD="$LHEAD"
+if grep -q 'lc-wt-b is on it; run from there' <<< "$out"; then
+  echo "  ok   [-] a clean worktree is preferred over a dirty one"; PASS=$((PASS+1))
+else echo "  FAIL dirty worktree named while a clean one existed ($(grep -o 'local context off:.*' <<< "$out" | head -1))"; FAIL=$((FAIL+1)); fi
+git -C "$LREPO" worktree remove --force "$WORK/lc-wt-a"
+git -C "$LREPO" worktree remove --force "$WORK/lc-wt-b"
+( cd "$LREPO" && git checkout -q feature )
+
+# grok raised this one as a live risk and it is already handled — so it gets a test rather than an
+# assurance. This script runs under `set -o pipefail`, so a failing `git worktree list` would make
+# the helper non-zero without its explicit `return 0`, and a caller that ever adds `set -e` would
+# abort inside the code whose only job is explaining a fallback.
+_rsn_rc=$( cd "$LREPO" && env PATH="$BIN:$PATH" bash -c '
+  set -eo pipefail
+  HEAD_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+  eval "$(sed -n "/^local_context_reason() {/,/^}/p;/^worktrees_on_pr_head() {/,/^}/p;/^best_worktree_on_pr_head() {/,/^}/p" "$1")"
+  git() { return 1; }        # every git call fails, pipeline included
+  export -f git 2>/dev/null || true
+  reason=$(local_context_reason)
+  echo ok
+' _ "$RELAY" 2>/dev/null )
+if [ "$_rsn_rc" = ok ]; then
+  echo "  ok   [-] the helpers stay zero-status under set -e with pipefail"; PASS=$((PASS+1))
+else echo "  FAIL a failing git aborted local_context_reason under set -e"; FAIL=$((FAIL+1)); fi
+
 # The reason function must never return non-zero: the common case (wrong checkout, NO worktree on
 # the PR head) used to end on a failed test, which today only survives because the caller ignores
 # the status — an assignment under set -e would abort the run.

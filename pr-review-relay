@@ -586,7 +586,7 @@ local_context_ok() {
 # session before anyone noticed — from the repo's main checkout, while a worktree holding the PR's
 # own branch sat one directory down.
 local_context_reason() {
-  local _h _st _wt _wt_st
+  local _h _st _wt _wt_state
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'not inside a git work tree'; return 0; }
   _h=$(git rev-parse HEAD 2>/dev/null) || { printf 'cannot read HEAD here'; return 0; }
   # Checked BEFORE the comparison: with no PR head there is nothing to be wrong about, and
@@ -598,21 +598,19 @@ local_context_reason() {
     # The actionable half: if some worktree IS on the PR head, name it. That is almost always the
     # one the caller meant to be in. Its cleanliness is checked too — sending someone to a dirty
     # worktree would be sending them to the same fallback by another road.
-    _wt=$(worktree_on_pr_head)
+    # Fail-closed on the status COMMAND, not just its output — the same rule local_context_ok()
+    # applies to itself. An errored git status gives the same empty output a clean tree does, and
+    # reading that as "clean" would send the caller to a worktree that is gone or unreadable: they
+    # would move, get the same fallback, and have been told twice that it would work.
+    _wt=$(best_worktree_on_pr_head)
     if [ -n "$_wt" ]; then
-      # Fail-closed on the status COMMAND, not just its output — the same rule local_context_ok()
-      # applies to itself. An errored git status leaves _wt_st empty, and reading that as "clean"
-      # would send the caller to a worktree that is gone, unreadable, or whose path this parse got
-      # wrong: they would move, get the same fallback, and have been told twice it would work.
-      if _wt_st=$(git -C "$_wt" status --porcelain 2>/dev/null); then
-        if [ -n "$_wt_st" ]; then
-          printf ' — a worktree at %s is on it but is dirty; clean it and run from there' "$_wt"
-        else
-          printf ' — a worktree at %s is on it; run from there to skip the gh round-trips' "$_wt"
-        fi
-      else
-        printf ' — a worktree at %s is on it, but its state could not be read' "$_wt"
-      fi
+      _wt_state="${_wt##*$'\t'}"
+      _wt="${_wt%%$'\t'*}"
+      case "$_wt_state" in
+        clean)      printf ' — a worktree at %s is on it; run from there to skip the gh round-trips' "$_wt" ;;
+        dirty)      printf ' — a worktree at %s is on it but is dirty; clean it and run from there' "$_wt" ;;
+        unreadable) printf ' — a worktree at %s is on it, but its state could not be read' "$_wt" ;;
+      esac
     fi
     return 0
   fi
@@ -632,14 +630,37 @@ local_context_reason() {
   return 0
 }
 
-# Path of a worktree whose HEAD is exactly the PR head, or empty. Parses the porcelain form, which
+# Every worktree whose HEAD is exactly the PR head, one per line. Parses the porcelain form, which
 # emits "worktree <path>" and "HEAD <sha>" lines per entry.
-worktree_on_pr_head() {
+#
+# `return 0` is not decoration: this script runs under `set -o pipefail`, so a failing
+# `git worktree list` would otherwise make the whole function non-zero, and a caller that ever adds
+# `set -e` would abort inside the code whose only job is explaining a fallback.
+worktrees_on_pr_head() {
   [ -n "$HEAD_SHA" ] || return 0
   git worktree list --porcelain 2>/dev/null | awk -v want="$HEAD_SHA" '
     /^worktree /{ path = substr($0, 10) }
-    /^HEAD /     { if (substr($0, 6) == want) { print path; exit } }
+    /^HEAD /     { if (substr($0, 6) == want) print path }
   '
+  return 0
+}
+
+# The best worktree to send someone to, and what is wrong with it if anything:
+# "<path>\t<clean|dirty|unreadable>". A CLEAN one wins even if a dirty one comes first — the
+# message exists to save a trip, and naming the dirty one when a usable one exists costs that trip.
+best_worktree_on_pr_head() {
+  local _p _st _first="" _first_state=""
+  while IFS= read -r _p; do
+    [ -n "$_p" ] || continue
+    if _st=$(git -C "$_p" status --porcelain 2>/dev/null); then
+      [ -z "$_st" ] && { printf '%s\tclean' "$_p"; return 0; }
+      _state=dirty
+    else
+      _state=unreadable
+    fi
+    [ -n "$_first" ] || { _first="$_p"; _first_state="$_state"; }
+  done <<< "$(worktrees_on_pr_head)"
+  [ -n "$_first" ] && printf '%s\t%s' "$_first" "$_first_state"
   return 0
 }
 
