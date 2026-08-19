@@ -6,6 +6,17 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Changed
+
+- **The per-reviewer timeout defaults to 500s, up from 300s.** The panel runs reasoning models at
+  high effort now; 300 was tuned when it did not, and an ordinary plan review no longer fits inside
+  it — one session lost three consecutive `grok45high` attempts to the clock on a plan whose only
+  fault was being thorough. A timeout is not silent (exit `3`, and the round refuses to count), but
+  it spends the gate's budget without exercising the gate, and a round that returns no findings
+  reads the same on the page as a clean one. `AGENT_TIMEOUT` in `~/.config/pr-review-relay/config`
+  remains the single place to override it — for this tool and for `ship-feature plan-review`, which
+  reads the same file.
+
 ## [1.5.0] — 2026-08-04
 
 ### Added
