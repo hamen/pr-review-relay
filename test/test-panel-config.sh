@@ -52,6 +52,32 @@ got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" CURSOR_REVIE
 got=$(resolve 'MODEL_cursor=' CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)
 [ "$got" = "composer-2.5" ] && ok "an empty file value means 'not set' too" || bad "empty file value — got '$got'"
 
+# THE TIMEOUT DEFAULT, pinned as a literal. `panel_resolve` takes its fallback as an ARGUMENT, so
+# every test above proves the ladder and none of them proves which number the script actually hands
+# it — a plan review that dies on the clock reports no findings, which reads exactly like a clean
+# review, so the number is worth pinning. Reading the literal out of the script is the only way to
+# assert it without a full relay run; change 500 here and this goes red, which is its whole job.
+#
+# ~/.config/pr-review-relay/config's AGENT_TIMEOUT is the one place to override it, for this tool
+# AND for ship-feature's plan-review, which reads this same file.
+RELAY="$HERE/../pr-review-relay"
+got=$(grep -o 'panel_resolve PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT [0-9]*' "$RELAY" | awk '{print $4}')
+[ "$got" = "500" ] && ok "the built-in per-reviewer timeout is 500s" \
+  || bad "the built-in timeout default is '$got', not 500"
+
+# review-local runs the SAME panel with the SAME seats off the SAME config key, so its literal has to
+# agree with the relay's. Two entrypoints in one repo quietly disagreeing on a no-config machine is
+# the drift this default exists to remove, and nothing else in the suite compares them.
+LOCAL="$HERE/../review-local"
+got=$(grep -o 'panel_resolve PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT [0-9]*' "$LOCAL" | awk '{print $4}')
+[ "$got" = "500" ] && ok "review-local uses the same 500s default as the relay" \
+  || bad "review-local's timeout default is '$got', not 500"
+
+# The file still beats that literal — the override has to keep working, or the default becomes a cap.
+got=$(resolve 'AGENT_TIMEOUT=470' PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT 500)
+[ "$got" = "470" ] && ok "AGENT_TIMEOUT in the config beats the built-in default" \
+  || bad "config timeout ignored — got '$got'"
+
 # Every seat named in a panel must be configurable. This is the cursor bug in its second form:
 # a seat you can name but cannot pin drifts back to a default nobody chose.
 for seat in claude claude_fallback codex cursor grok opencode antigravity; do

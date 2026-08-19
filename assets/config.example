@@ -27,8 +27,13 @@ REVIEWERS=claude,codex,grok,opencode
 PLAN_REVIEWERS=claude,codex,grok45high,kimi3
 
 # Seconds before a reviewer is considered fallen. In parallel the total is the slowest seat, not
-# the sum, so this can be generous without costing wall-clock.
-AGENT_TIMEOUT=360
+# the sum, so this can be generous without costing wall-clock — and reasoning models at high effort
+# routinely need more than five minutes on a substantial diff or plan.
+#
+# This is the ONE place to set it: ship-feature's plan-review reads this same file, so the two tools
+# cannot end up on different budgets. Matches the built-in default; lower it if you have fast
+# inference and would rather not wait.
+AGENT_TIMEOUT=500
 
 # One key per seat. The key follows the SEAT name you pass to --reviewers, not the environment
 # variable it maps to — nobody should need to know that opencode's variable is called
