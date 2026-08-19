@@ -385,10 +385,27 @@ BIN2="$WORK/bin2"; mkdir -p "$BIN2"
 for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN2/$t"; done
 ln -sf "$(command -v node)" "$BIN2/node" 2>/dev/null
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+# PR_RELAY_OPENCODE_BIN is cleared for the same reason HOME is overridden: it is a
+# DOCUMENTED variable, so a developer may well have it exported, and it outranks
+# both PATH and the HOME fallback. Three resolution branches, three ways for the
+# real binary to get in; this closes the third.
 mkdir -p "$WORK/home-subset"
-env PATH="$BIN2:/usr/bin:/bin" HOME="$WORK/home-subset" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
-  bash "$RELAY" --pr 1 --parallel >/dev/null 2>&1
-rc=$?; if [ "$rc" = 0 ]; then echo "  ok   [0] default set, subset installed → skip missing, pass"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 0] default subset"; FAIL=$((FAIL+1)); fi
+env PATH="$BIN2:/usr/bin:/bin" HOME="$WORK/home-subset" PR_RELAY_OPENCODE_BIN= \
+  XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --parallel > "$WORK/subset-out" 2>&1
+rc=$?
+# rc == 0 ALONE IS NOT ENOUGH, and that is how this test hid a live opencode for as
+# long as it did: a real reviewer that runs and happens to succeed also exits 0. The
+# assertion has to name what was supposed to happen — both uninstalled seats
+# SKIPPED — or "it passed" and "it billed someone" are the same result.
+if [ "$rc" = 0 ] \
+   && grep -q "grok not installed (skip grok)" "$WORK/subset-out" \
+   && grep -q "opencode not installed (skip opencode)" "$WORK/subset-out"; then
+  echo "  ok   [0] default set, subset installed → skip missing, pass"; PASS=$((PASS+1))
+else
+  echo "  FAIL [got $rc, want 0] default subset — or a missing seat was not skipped"; FAIL=$((FAIL+1))
+  grep -E "reviewing…|not installed" "$WORK/subset-out" | sed 's/^/       /'
+fi
 
 # wrap helper: a review that merely MENTIONS <details> must still be wrapped with our summary.
 printf '## Heading\nThis review discusses a <details> element in the code.\n' > "$WORK/rev.md"
