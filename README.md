@@ -159,7 +159,7 @@ $EDITOR ~/.config/pr-review-relay/config
 ```
 REVIEWERS=claude,codex,grok,opencode
 PLAN_REVIEWERS=claude,codex,grok45high,kimi3
-AGENT_TIMEOUT=360
+AGENT_TIMEOUT=500
 MODEL_claude=opus
 MODEL_codex=gpt-5.6-sol
 MODEL_grok=grok-4.6

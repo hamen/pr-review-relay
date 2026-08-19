@@ -65,6 +65,14 @@ got=$(grep -o 'panel_resolve PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT [0-9]*' "$RELA
 [ "$got" = "500" ] && ok "the built-in per-reviewer timeout is 500s" \
   || bad "the built-in timeout default is '$got', not 500"
 
+# review-local runs the SAME panel with the SAME seats off the SAME config key, so its literal has to
+# agree with the relay's. Two entrypoints in one repo quietly disagreeing on a no-config machine is
+# the drift this default exists to remove, and nothing else in the suite compares them.
+LOCAL="$HERE/../review-local"
+got=$(grep -o 'panel_resolve PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT [0-9]*' "$LOCAL" | awk '{print $4}')
+[ "$got" = "500" ] && ok "review-local uses the same 500s default as the relay" \
+  || bad "review-local's timeout default is '$got', not 500"
+
 # The file still beats that literal — the override has to keep working, or the default becomes a cap.
 got=$(resolve 'AGENT_TIMEOUT=470' PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT 500)
 [ "$got" = "470" ] && ok "AGENT_TIMEOUT in the config beats the built-in default" \

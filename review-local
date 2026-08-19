@@ -70,7 +70,11 @@ GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 DEFAULT_REVIEWERS="claude,codex,grok,opencode"
 AUTHOR=""; BASE="main"; PARALLEL=0; REVIEWERS_EXPLICIT=0
 REVIEWERS="$(panel_resolve PR_RELAY_REVIEWERS REVIEWERS "$DEFAULT_REVIEWERS")"
-AGENT_TIMEOUT="$(panel_resolve PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT 300)"
+# 500, and it MUST match pr-review-relay's literal. Same env name, same config key, same seats, same
+# models — a machine with no config that got 500 from one and 300 from the other would be the very
+# drift this default exists to remove. pr-review-distill deliberately keeps 300: different workload,
+# and it has its own PR_DISTILL_AGENT_TIMEOUT.
+AGENT_TIMEOUT="$(panel_resolve PR_RELAY_AGENT_TIMEOUT AGENT_TIMEOUT 500)"
 # Pin the Cursor reviewer's model — see the long rationale in pr-review-relay. Short version:
 # cursor-agent's own default is "Auto", which bills the small "Other Models" pool AND may pick a
 # Claude model, so a Claude-authored branch gets reviewed by Claude in a Cursor badge.
