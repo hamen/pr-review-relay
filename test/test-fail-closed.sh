@@ -369,11 +369,24 @@ qwen_env_run 3 "qwen whitespace-only review → not valid"     WS_ONLY=qwen
 
 # default set with only a subset of CLIs installed → skip the missing ones, exit 0.
 # PATH excludes the real agent dir; BIN2 has gh+claude+codex (+node for the wrapper).
+#
+# HOME IS OVERRIDDEN BELOW, and scrubbing PATH alone is not enough.
+# opencode_resolve_bin (lib-opencode.sh) falls back to "$HOME/.opencode/bin/opencode"
+# when PATH has no opencode — that branch exists so a normal install works without
+# PATH surgery, and it means a PATH-only scrub leaves this test launching the
+# developer's REAL opencode against a REAL OpenRouter key. On this machine it did
+# exactly that, and the suite went red with "Key limit exceeded (monthly limit)":
+# a unit test failing on somebody's billing, for a reason nothing in the assertion
+# mentions.
+#
+# grok hid the hole by passing for the right reason — it resolves through PATH only,
+# so it really was skipped. One assertion, two code paths, one of them not isolated.
 BIN2="$WORK/bin2"; mkdir -p "$BIN2"
 for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN2/$t"; done
 ln -sf "$(command -v node)" "$BIN2/node" 2>/dev/null
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
-env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+mkdir -p "$WORK/home-subset"
+env PATH="$BIN2:/usr/bin:/bin" HOME="$WORK/home-subset" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
   bash "$RELAY" --pr 1 --parallel >/dev/null 2>&1
 rc=$?; if [ "$rc" = 0 ]; then echo "  ok   [0] default set, subset installed → skip missing, pass"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 0] default subset"; FAIL=$((FAIL+1)); fi
 
