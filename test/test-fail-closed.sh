@@ -369,13 +369,54 @@ qwen_env_run 3 "qwen whitespace-only review → not valid"     WS_ONLY=qwen
 
 # default set with only a subset of CLIs installed → skip the missing ones, exit 0.
 # PATH excludes the real agent dir; BIN2 has gh+claude+codex (+node for the wrapper).
+#
+# HOME IS OVERRIDDEN BELOW, and scrubbing PATH alone is not enough.
+# opencode_resolve_bin (lib-opencode.sh) falls back to "$HOME/.opencode/bin/opencode"
+# when PATH has no opencode — that branch exists so a normal install works without
+# PATH surgery, and it means a PATH-only scrub leaves this test launching the
+# developer's REAL opencode against a REAL OpenRouter key. On this machine it did
+# exactly that, and the suite went red with "Key limit exceeded (monthly limit)":
+# a unit test failing on somebody's billing, for a reason nothing in the assertion
+# mentions.
+#
+# grok hid the hole by passing for the right reason — it resolves through PATH only,
+# so it really was skipped. One assertion, two code paths, one of them not isolated.
 BIN2="$WORK/bin2"; mkdir -p "$BIN2"
 for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN2/$t"; done
 ln -sf "$(command -v node)" "$BIN2/node" 2>/dev/null
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
-env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
-  bash "$RELAY" --pr 1 --parallel >/dev/null 2>&1
-rc=$?; if [ "$rc" = 0 ]; then echo "  ok   [0] default set, subset installed → skip missing, pass"; PASS=$((PASS+1)); else echo "  FAIL [got $rc, want 0] default subset"; FAIL=$((FAIL+1)); fi
+# Two documented variables are UNSET, not merely emptied, so this runs as it would on
+# a machine that configured neither.
+#
+#   PR_RELAY_OPENCODE_BIN — outranks both PATH and the HOME fallback. Three
+#     resolution branches, three ways for the real binary to get in. (An EMPTY value
+#     is in fact ignored — opencode_resolve_bin guards with `[ -n "$OPENCODE_BIN" ]`,
+#     checked, not assumed — but `-u` says what is meant without the reader having to
+#     go and confirm that.)
+#
+#   PR_RELAY_REVIEWERS — narrows the panel, which the skip assertions below depend on.
+#     Measured: with PR_RELAY_REVIEWERS=claude,codex exported, this case reports
+#     `FAIL [got 0, want 0]` — the exit code is fine and the skip lines are simply
+#     absent, because the seats were never dispatched. The stronger assertion pays
+#     for itself with a new way to be wrong, and this is it.
+mkdir -p "$WORK/home-subset"
+env -u PR_RELAY_OPENCODE_BIN -u PR_RELAY_REVIEWERS \
+  PATH="$BIN2:/usr/bin:/bin" HOME="$WORK/home-subset" \
+  XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+  bash "$RELAY" --pr 1 --parallel > "$WORK/subset-out" 2>&1
+rc=$?
+# rc == 0 ALONE IS NOT ENOUGH, and that is how this test hid a live opencode for as
+# long as it did: a real reviewer that runs and happens to succeed also exits 0. The
+# assertion has to name what was supposed to happen — both uninstalled seats
+# SKIPPED — or "it passed" and "it billed someone" are the same result.
+if [ "$rc" = 0 ] \
+   && grep -q "grok not installed (skip grok)" "$WORK/subset-out" \
+   && grep -q "opencode not installed (skip opencode)" "$WORK/subset-out"; then
+  echo "  ok   [0] default set, subset installed → skip missing, pass"; PASS=$((PASS+1))
+else
+  echo "  FAIL [got $rc, want 0] default subset — or a missing seat was not skipped"; FAIL=$((FAIL+1))
+  grep -E "reviewing…|not installed" "$WORK/subset-out" | sed 's/^/       /'
+fi
 
 # wrap helper: a review that merely MENTIONS <details> must still be wrapped with our summary.
 printf '## Heading\nThis review discusses a <details> element in the code.\n' > "$WORK/rev.md"
