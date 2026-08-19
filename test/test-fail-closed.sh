@@ -385,12 +385,23 @@ BIN2="$WORK/bin2"; mkdir -p "$BIN2"
 for t in gh claude codex; do ln -sf "$BIN/$t" "$BIN2/$t"; done
 ln -sf "$(command -v node)" "$BIN2/node" 2>/dev/null
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
-# PR_RELAY_OPENCODE_BIN is cleared for the same reason HOME is overridden: it is a
-# DOCUMENTED variable, so a developer may well have it exported, and it outranks
-# both PATH and the HOME fallback. Three resolution branches, three ways for the
-# real binary to get in; this closes the third.
+# Two documented variables are UNSET, not merely emptied, so this runs as it would on
+# a machine that configured neither.
+#
+#   PR_RELAY_OPENCODE_BIN — outranks both PATH and the HOME fallback. Three
+#     resolution branches, three ways for the real binary to get in. (An EMPTY value
+#     is in fact ignored — opencode_resolve_bin guards with `[ -n "$OPENCODE_BIN" ]`,
+#     checked, not assumed — but `-u` says what is meant without the reader having to
+#     go and confirm that.)
+#
+#   PR_RELAY_REVIEWERS — narrows the panel, which the skip assertions below depend on.
+#     Measured: with PR_RELAY_REVIEWERS=claude,codex exported, this case reports
+#     `FAIL [got 0, want 0]` — the exit code is fine and the skip lines are simply
+#     absent, because the seats were never dispatched. The stronger assertion pays
+#     for itself with a new way to be wrong, and this is it.
 mkdir -p "$WORK/home-subset"
-env PATH="$BIN2:/usr/bin:/bin" HOME="$WORK/home-subset" PR_RELAY_OPENCODE_BIN= \
+env -u PR_RELAY_OPENCODE_BIN -u PR_RELAY_REVIEWERS \
+  PATH="$BIN2:/usr/bin:/bin" HOME="$WORK/home-subset" \
   XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
   bash "$RELAY" --pr 1 --parallel > "$WORK/subset-out" 2>&1
 rc=$?
