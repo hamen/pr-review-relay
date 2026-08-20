@@ -2486,6 +2486,44 @@ _side=$(latest_side)
 _tot=$(wc -c < "$_side" 2>/dev/null || echo 0)
 [ "$_tot" -le $((4096 + 400)) ]; ok_if $? "the probe byte is trimmed, body respects the stated cap" "total=$_tot"
 
+# --no-post. The reviews are the delivery on stdout, and the pull request is not touched: used when
+# the PR belongs to someone else and a human has to read the review before anybody else does. The
+# assertion that matters is the empty post log — "it printed something" would pass even if it had
+# also posted.
+s_reset; : > "$WORK/posted.log"
+_np_out=$(env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude --no-post 2>&1)
+_np_rc=$?
+[ ! -s "$WORK/posted.log" ]; ok_if $? "--no-post writes nothing to the PR" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+printf '%s' "$_np_out" | grep -q 'printed, not posted'; ok_if $? "--no-post says the review was printed rather than posted" "out=$(printf '%s' "$_np_out" | tail -3 | tr '\n' '|')"
+[ "$_np_rc" = 0 ]; ok_if $? "--no-post is a clean round: not posting is not a reviewer failure" "rc=$_np_rc"
+
+# --no-post must not hide a bad review. The flag changes where the review goes, not whether it counts,
+# so an empty or failed reviewer still fails the round.
+s_reset; : > "$WORK/posted.log"
+env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" FAIL_EMPTY=claude \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude --no-post >/dev/null 2>&1
+_np_bad=$?
+[ "$_np_bad" = 3 ]; ok_if $? "--no-post still fails the round on an empty review" "rc=$_np_bad"
+[ ! -s "$WORK/posted.log" ]; ok_if $? "--no-post posts nothing even when the round fails" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+
+# The banner has to say what happened. "posted" on a run that posted nothing is exactly the kind of
+# false report the fail-closed contract exists to prevent.
+s_reset; : > "$WORK/posted.log"
+_np_banner=$(env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude --no-post 2>&1)
+printf '%s' "$_np_banner" | grep -q 'reviewer(s) printed, not posted'; ok_if $? "the closing banner does not claim it posted" "banner=$(printf '%s' "$_np_banner" | grep 'Relay done' | tr '\n' '|')"
+
+# Without the flag the same run posts, which is what makes the assertion above mean something.
+s_reset; : > "$WORK/posted.log"
+env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+[ -s "$WORK/posted.log" ]; ok_if $? "without --no-post the same run does post" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+
 # The revert case is the whole subtlety of "SHA transitions, not distinct SHAs": going back to a SHA
 # already reviewed spends a THIRD slot, because only the last SHA is stored.
 s_reset

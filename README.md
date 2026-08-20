@@ -237,6 +237,7 @@ pr-review-relay --pr 47 --reviewers codex          # only one reviewer
 pr-review-relay --pr 47 --reviewers claude,agy     # pick specific reviewers
 pr-review-relay --context-file SPEC.md             # make every reviewer read & verify against SPEC.md
 pr-review-relay --diff                             # old behaviour: pipe the diff instead of a PR link
+pr-review-relay --no-post                          # run every reviewer, print the reviews, write nothing
 pr-review-relay --dry-run                          # show what it would do, run no agents
 ```
 
@@ -251,6 +252,7 @@ Flags:
 | `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
 | `--parallel` | Run the reviewers concurrently. |
+| `--no-post` | Run every reviewer for real, print the reviews to stdout, and skip the relay's own posting. For a PR that is not yours, where a person has to read the review before anybody else sees it. Not posting is not itself a failure, but an empty, truncated or timed-out review still exits 3: the flag changes where a review goes, not whether it counts.<br><br>**Scope:** it stops *this script* from commenting. It does not sandbox the reviewers, and several of them run with tool access, so text inside a hostile PR could still tell one of them to publish something. If you need that guaranteed, put a `gh` that refuses writes ahead of the real one on `PATH`: the agents inherit it, so the refusal covers them too. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
 | `--max-rounds N` | Cap on **reviewed revisions** per PR — the counter advances when the head SHA changes, not on every invocation (default `3`, or `$PR_RELAY_MAX_ROUNDS`). See [Loop safety](#-loop-safety-no-runaway-iteration). |
 | `--reset` | Reset the counters for this PR (force another round past a cap). Also discards that PR's run logs and sidecars. |
@@ -348,7 +350,8 @@ is idempotent, re-running just refreshes the comments (one per agent).
 A typical agent instruction to make this a loop:
 
 > After opening a PR, run `pr-review-relay --author <self>`. **Branch on its exit code — only `0` is a
-> clean round** (every reviewer actually ran and posted, PR head unchanged). On `3` the round is not
+> clean round** (every reviewer actually ran and posted, PR head unchanged; with `--no-post`, ran and
+> produced). On `3` the round is not
 > trustworthy (a reviewer failed / the SHA couldn't be confirmed / HEAD moved) — **don't act on the
 > posted reviews, re-run against the current head**. On `4` a loop cap is hit — read the message: the
 > **round** cap (3 reviewed revisions) means stop and escalate; the **same-SHA** cap means you have
@@ -615,7 +618,7 @@ ever holds short event lines. If you want them gone sooner, `--reset` on the PR,
 
 | Code | Meaning | What to do |
 |------|---------|------------|
-| `0` | Every reviewer that ran produced **and posted** a review, and the PR head didn't move. May be a **PARTIAL** panel — a reviewer can be skipped (CLI not installed) or [benched](#-benched-reviewers-out-of-quota) (out of quota). The banner says which, and how many. | Everyone *ran* — not that it's approved. Read the reviews, resolve every Blocker/Should-fix, then merge. |
+| `0` | Every reviewer that ran produced **and posted** a review, and the PR head didn't move. With `--no-post`, produced is the bar and nothing is posted. May be a **PARTIAL** panel — a reviewer can be skipped (CLI not installed) or [benched](#-benched-reviewers-out-of-quota) (out of quota). The banner says which, and how many. | Everyone *ran* — not that it's approved. Read the reviews, resolve every Blocker/Should-fix, then merge. |
 | `3` | Not a clean round: a reviewer returned empty / timed out / exited non-zero / failed to post, **or** an explicitly-requested reviewer was missing (**except** when it is [benched](#-benched-reviewers-out-of-quota) for quota — that is the one carve-out, and the round can still exit `0` as PARTIAL), **or** no reviewer ran, **or** HEAD moved mid-round (reviews now describe stale code). | Fix the cause and re-run; don't treat as reviewed. |
 | `4` | A loop cap was reached — either the **round** cap (`--max-rounds`, counted per reviewed SHA) or the **same-SHA dispatch** cap (`PR_RELAY_MAX_SAME_SHA`). The message says which. | Stop looping; escalate to a human. On the same-SHA cap, pushing a fix is what unblocks it. |
 | `1`/`2` | Usage/precondition error (no `gh`, no PR, empty diff, bad arg). | Fix the invocation. |
