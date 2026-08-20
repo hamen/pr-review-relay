@@ -45,6 +45,11 @@
 #      not yours and a human has to read the review before anyone else does. An
 #      empty or failed review still exits 3 — the flag changes where a review
 #      goes, not whether it counts.
+#
+#      Scope: --no-post stops THIS script from commenting. It does not sandbox
+#      the reviewers, and several run with tool access, so a hostile PR could
+#      tell one of them to publish. For a guarantee, put a gh that refuses
+#      writes ahead of the real one on PATH — the agents inherit it.
 #      NOTE: this means everyone RAN — not that the PR is approved. You still must
 #      read the reviews and resolve every Blocker/Should-fix before merging.
 #   3  not a clean round: a reviewer returned empty / timed out / exited non-zero /
