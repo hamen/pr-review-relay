@@ -35,11 +35,14 @@
 #   pr-review-relay [--author claude|codex|cursor|antigravity|opencode|qwen|grok] [--pr <number|url>] \
 #                   [--reviewers claude,codex,grok,opencode] [--parallel] \
 #                   (opencode, qwen, and grok are also supported, opt-in: name them explicitly)
-#                   [--context-file <path>] [--diff] [--dry-run]
+#                   [--context-file <path>] [--diff] [--dry-run] [--no-post]
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 #
 # Fail-closed exit codes (so callers can trust the outcome, not just the banner):
 #   0  every reviewer that ran produced AND posted a review; PR head did not move.
+#      With --no-post, produced is the whole bar: the reviews go to stdout and
+#      nothing is written to the pull request. Use it when the pull request is
+#      not yours and a human has to read the review before anyone else does.
 #      NOTE: this means everyone RAN — not that the PR is approved. You still must
 #      read the reviews and resolve every Blocker/Should-fix before merging.
 #   3  not a clean round: a reviewer returned empty / timed out / exited non-zero /
@@ -239,7 +242,7 @@ AGY_GRACE=10
 # same arithmetic is how review-local's rc-124 message went stale one commit after the relay's
 # was fixed — the reviewers caught it, twice.
 AGY_OUTER_TIMEOUT=$((10#$AGENT_TIMEOUT + AGY_GRACE))
-CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0
+CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0; NO_POST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --author)       AUTHOR="$2"; shift 2;;
@@ -249,6 +252,7 @@ while [ $# -gt 0 ]; do
     --context-file) CONTEXT_FILE="$2"; shift 2;;
     --diff)         MODE="diff"; shift;;
     --link)         MODE="link"; shift;;
+    --no-post)      NO_POST=1; shift;;
     --dry-run)      DRY=1; shift;;
     --max-rounds)   MAX_ROUNDS="$2"; shift 2;;
     --reset)        RESET=1; shift;;
@@ -1050,6 +1054,14 @@ review_with() {
   # address the findings, push, and re-run (the iterate loop). Single printf to
   # stay roughly atomic under --parallel.
   printf '\n========== %s review ==========\n%s\n===============================\n' "$Name" "$out"
+  # --no-post: the review is on stdout and that is the whole delivery. Used when
+  # the pull request belongs to someone else and a human has to read the review
+  # before anyone else sees it. Nothing below this point writes.
+  if [ "$NO_POST" = 1 ]; then
+    echo "  · $name review printed, not posted (--no-post)"
+    [ "$unclean" = 1 ] && echo fail > "$STATUS_DIR/$skey" || echo ok > "$STATUS_DIR/$skey"
+    return 0
+  fi
   # idempotent: remove any previous review from the SAME agent on this PR
   if [ -n "$REPO" ]; then
     for id in $(gh api --paginate "repos/$REPO/issues/$PR/comments" \

@@ -237,6 +237,7 @@ pr-review-relay --pr 47 --reviewers codex          # only one reviewer
 pr-review-relay --pr 47 --reviewers claude,agy     # pick specific reviewers
 pr-review-relay --context-file SPEC.md             # make every reviewer read & verify against SPEC.md
 pr-review-relay --diff                             # old behaviour: pipe the diff instead of a PR link
+pr-review-relay --no-post                          # run every reviewer, print the reviews, write nothing
 pr-review-relay --dry-run                          # show what it would do, run no agents
 ```
 
@@ -251,6 +252,7 @@ Flags:
 | `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
 | `--parallel` | Run the reviewers concurrently. |
+| `--no-post` | Run every reviewer for real, print the reviews to stdout, and touch nothing on the pull request. For a PR that is not yours, where a person has to read the review before anybody else sees it. Not posting is not a failure: the round is still clean. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
 | `--max-rounds N` | Cap on **reviewed revisions** per PR — the counter advances when the head SHA changes, not on every invocation (default `3`, or `$PR_RELAY_MAX_ROUNDS`). See [Loop safety](#-loop-safety-no-runaway-iteration). |
 | `--reset` | Reset the counters for this PR (force another round past a cap). Also discards that PR's run logs and sidecars. |
