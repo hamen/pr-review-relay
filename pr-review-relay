@@ -42,7 +42,9 @@
 #   0  every reviewer that ran produced AND posted a review; PR head did not move.
 #      With --no-post, produced is the whole bar: the reviews go to stdout and
 #      nothing is written to the pull request. Use it when the pull request is
-#      not yours and a human has to read the review before anyone else does.
+#      not yours and a human has to read the review before anyone else does. An
+#      empty or failed review still exits 3 — the flag changes where a review
+#      goes, not whether it counts.
 #      NOTE: this means everyone RAN — not that the PR is approved. You still must
 #      read the reviews and resolve every Blocker/Should-fix before merging.
 #   3  not a clean round: a reviewer returned empty / timed out / exited non-zero /
@@ -1311,6 +1313,11 @@ if [ "$ran" = 0 ]; then
   [ "$benched" -gt 0 ] && echo "  ⏸ $benched reviewer(s) are benched (out of quota) — see $BENCH_FILE" >&2
   exit 3
 fi
+# What the reviewers did with their reviews. --no-post posts nothing, and a
+# banner that says "posted" on such a run is the kind of false report this
+# script exists to prevent.
+if [ "$NO_POST" = 1 ]; then _delivered="printed, not posted"; else _delivered="posted"; fi
+
 if [ "$failed" -gt 0 ]; then
   relay_log "verdict exit=3 not clean: $failed/$ran failed —$failed_names"
   echo "✖ Relay round NOT clean: $failed/$ran reviewer(s) failed —$failed_names. Fix and re-run." >&2
@@ -1322,13 +1329,13 @@ if [ "$skipped" -gt 0 ] || [ "$benched" -gt 0 ]; then
   _why=""
   [ "$skipped" -gt 0 ] && _why="$skipped skipped (not installed)"
   [ "$benched" -gt 0 ] && _why="${_why:+$_why, }$benched benched (out of quota)"
-  relay_log "verdict exit=0 partial: $ran posted, $_why"
-  echo "✔ Relay done (PARTIAL cross-review) — $ran/$ran reviewer(s) posted, $_why, reviewed sha ${HEAD_SHA:0:7}."
+  relay_log "verdict exit=0 partial: $ran ${_delivered}, $_why"
+  echo "✔ Relay done (PARTIAL cross-review) — $ran/$ran reviewer(s) ${_delivered}, $_why, reviewed sha ${HEAD_SHA:0:7}."
   echo "  ⚠ This was NOT a full cross-review — $_why." >&2
   [ "$benched" -gt 0 ] && echo "  ⏸ A benched reviewer returns on its own when its quota resets. To force it back now, delete its line from $BENCH_FILE" >&2
 else
-  relay_log "verdict exit=0 clean: $ran/$ran posted"
-  echo "✔ Relay done — $ran/$ran reviewer(s) posted, reviewed sha ${HEAD_SHA:0:7}."
+  relay_log "verdict exit=0 clean: $ran/$ran ${_delivered}"
+  echo "✔ Relay done — $ran/$ran reviewer(s) ${_delivered}, reviewed sha ${HEAD_SHA:0:7}."
 fi
 echo "  This confirms every reviewer RAN, not that the PR is approved: read the reviews and"
 echo "  resolve every Blocker/Should-fix before merging."
