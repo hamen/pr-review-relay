@@ -39,6 +39,11 @@ relay_isolate_git "$WORK"
 cat > "$BIN/gh" <<'GH'
 #!/usr/bin/env bash
 case "$1 $2" in
+  "pr view"|"pr diff")
+    [ -n "${GH_READ_LOG:-}" ] && echo "read repo=${GH_REPO:-none} $*" >> "$GH_READ_LOG"
+    ;;
+esac
+case "$1 $2" in
   "pr view")
     if printf '%s\n' "$@" | grep -q headRefOid; then
       if [ -n "${GH_SHA_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi
@@ -254,6 +259,47 @@ if grep -q 'repos/owner/repo/issues/34/comments' <<< "$_urlform" &&
   echo "  ok   [-] --pr <url> reaches the API as a number, so the delete pass works"; PASS=$((PASS+1))
 else
   echo "  FAIL --pr <url> reached an API route unresolved"; FAIL=$((FAIL+1))
+fi
+
+# Reads, not only writes. Reducing `--pr <url>` to a number removed the one thing
+# that made those calls unambiguous, so `gh pr view 34` and `gh pr diff 34` would
+# resolve against the checkout — review repository A, post the result on
+# repository B, with nothing on screen showing it.
+_reads=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/read.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/StellarElements/android-dac-snippets/pull/34" \
+      GH_READ_LOG="$WORK/read.log" \
+      bash "$RELAY" --pr https://github.com/StellarElements/android-dac-snippets/pull/34 \
+      --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  # The first read resolves the URL itself and cannot be pinned yet; every read
+  # after that must be.
+  tail -n +2 "$WORK/read.log" 2>/dev/null
+)
+_nreads=$(grep -c . <<< "$_reads")
+_pinned=$(grep -c 'repo=StellarElements/android-dac-snippets' <<< "$_reads")
+if [ "$_nreads" -gt 0 ] && [ "$_nreads" = "$_pinned" ]; then
+  echo "  ok   [-] every read after the first is pinned to the same repository ($_pinned)"; PASS=$((PASS+1))
+else
+  echo "  FAIL $_pinned of $_nreads reads were pinned; the rest used the checkout"; FAIL=$((FAIL+1))
+fi
+
+# `--pr <url>` with nothing numeric on the end. The rewrite leaves $PR as the URL,
+# and it is pasted into API routes, so refuse rather than build issues/https://...
+_nonum_rc=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/nonum.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/owner/repo/pull/" GH_POST_LOG="$WORK/nonum.log" \
+      bash "$RELAY" --pr https://github.com/owner/repo/pull/ --author antigravity \
+      --reviewers claude,codex --parallel >/dev/null 2>&1
+  echo "$?"
+)
+if [ "$_nonum_rc" != 0 ] && [ ! -s "$WORK/nonum.log" ]; then
+  echo "  ok   [$_nonum_rc] --pr with a URL carrying no number refuses"; PASS=$((PASS+1))
+else
+  echo "  FAIL [rc=$_nonum_rc] a URL with no number reached the API path"; FAIL=$((FAIL+1))
 fi
 
 # A URL that cannot be reduced to owner/name used to fall back to `gh repo view`

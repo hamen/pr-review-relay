@@ -312,6 +312,14 @@ case "$REPO" in
   */*) ;;
   *) REPO="" ;;
 esac
+if [ -n "$REPO" ]; then
+  # Everything below this line — the SHA reads, the diff, the comment, and the
+  # agents that inherit this environment — resolves against the repository the
+  # round was pinned to, instead of against whatever checkout it happens to run
+  # in. Normalising `--pr <url>` to a number made this mandatory: a URL is
+  # unambiguous on its own, a bare number is not.
+  export GH_REPO="$REPO"
+fi
 if [ -n "$PR_HOST" ]; then
   # Every gh call after this one targets the host the pull request is on. Without
   # it, `gh api repos/owner/name/...` goes to whatever host gh defaults to, so on
@@ -326,9 +334,16 @@ if [ -z "$REPO" ]; then
   # know least about what we are pointed at.
   echo "Could not determine the repository for PR #$PR from '$PR_URL'." >&2
   echo "  Refusing to guess: every guess here writes on somebody's pull request." >&2
-  echo "  Set GH_REPO=owner/name, or run from a checkout where gh resolves the PR." >&2
+  echo "  The URL comes from \`gh pr view\`: set GH_REPO=owner/name so that call resolves," >&2
+  echo "  or run from a checkout where it does, or pass --pr with the full pull request URL." >&2
   exit 1
 fi
+case "$PR" in
+  ''|*[!0-9]*)
+    echo "Could not resolve PR '$PR' to a number." >&2
+    echo "  It is pasted into API routes, where a URL builds issues/https://... and fails silently." >&2
+    exit 1 ;;
+esac
 # --max-rounds must be a non-negative integer, else the arithmetic below breaks and
 # silently bypasses the cap — reject it as a usage error instead.
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
