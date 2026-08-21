@@ -62,14 +62,17 @@ case "$1 $2" in
       else
         echo "aaaaaaa1111111111111111111111111111111111"
       fi
-    elif printf '%s\n' "$@" | grep -q url; then echo "${GH_PR_URL:-http://example.test/pr/1}"
+    elif printf '%s\n' "$@" | grep -q url; then echo "${GH_PR_URL-http://example.test/owner/repo/pull/1}"
     elif printf '%s\n' "$@" | grep -q number; then echo 1
     fi ;;
   "repo view") echo "${GH_REPO_VIEW:-owner/repo}" ;;
   # GH_DIFF_HANG makes the diff fetch block forever, so a test can kill the relay
   # *during* the network call and assert what evidence already exists on disk.
   "pr diff")   if [ -n "${GH_DIFF_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0; echo "diff --git a/x b/x"; echo "+change" ;;
-  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted" >> "$GH_POST_LOG"; exit 0 ;;
+  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted $*" >> "$GH_POST_LOG"; exit 0 ;;
+  "api "*|"api")
+    [ -n "${GH_API_LOG:-}" ] && echo "api $*" >> "$GH_API_LOG"
+    echo "" ;;
   *) echo "" ;;
 esac
 exit 0
@@ -191,6 +194,47 @@ if grep -q 'StellarElements_android-dac-snippets#1' <<< "$_fork_out" &&
 else
   echo "  FAIL the parent repository won: a --post round would write on it"; FAIL=$((FAIL+1))
 fi
+
+# Where a POST actually goes. The round key above is a banner; this reads the
+# routes of the two calls that write. `gh pr comment N` with no repository
+# resolves the number against the PARENT inside a fork, so before --repo was
+# passed the deletes landed on our repository and the comment on theirs — with
+# every line on screen naming ours.
+_fork_post=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/fork_posted.log"; : > "$WORK/fork_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/StellarElements/android-dac-snippets/pull/1" \
+      GH_REPO_VIEW="android/snippets" \
+      GH_POST_LOG="$WORK/fork_posted.log" GH_API_LOG="$WORK/fork_api.log" \
+      bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/fork_posted.log" "$WORK/fork_api.log" 2>/dev/null
+)
+if grep -q -- '--repo StellarElements/android-dac-snippets' <<< "$_fork_post" &&
+   ! grep -q 'android/snippets/issues' <<< "$_fork_post"; then
+  echo "  ok   [-] the comment and the deletes both address the fork, not the parent"; PASS=$((PASS+1))
+else
+  echo "  FAIL a write was addressed at the parent repository"; FAIL=$((FAIL+1))
+fi
+
+# A URL that cannot be reduced to owner/name used to fall back to `gh repo view`
+# — the parent, in a fork — so the one run that knew least about its target was
+# the one that guessed. It now refuses.
+for _bad in "" "http://example.test/pr/1" "https://github.com/owner/repo//pull/1"; do
+  _rc=$(
+    rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+    : > "$WORK/bad_posted.log"
+    env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+        GH_PR_URL="$_bad" GH_REPO_VIEW="android/snippets" GH_POST_LOG="$WORK/bad_posted.log" \
+        bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+    echo "$?"
+  )
+  if [ "$_rc" != 0 ] && [ ! -s "$WORK/bad_posted.log" ]; then
+    echo "  ok   [$_rc] an unusable pull request URL refuses instead of guessing (${_bad:-empty})"; PASS=$((PASS+1))
+  else
+    echo "  FAIL [rc=$_rc] guessed the repository from an unusable URL (${_bad:-empty})"; FAIL=$((FAIL+1))
+  fi
+done
 
 # --- the bench, part 2: persistence, expiry, and the contract change ----------
 # bench_run <expected> <desc> <bench-file-contents> -- <relay args...>

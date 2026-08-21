@@ -292,8 +292,26 @@ case "$PR_URL" in
     REPO=${PR_URL#*://*/}
     REPO=${REPO%%/pull/*}
     ;;
-  *) REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true) ;;
+  *) REPO="" ;;
 esac
+# Exactly owner/name, and nothing else. A URL with a doubled or trailing slash
+# leaves "owner/repo/" here, which addresses a different path once it is pasted
+# into an API route.
+case "$REPO" in
+  */*/*|*/|/*|"") REPO="" ;;
+  */*) ;;
+  *) REPO="" ;;
+esac
+if [ -z "$REPO" ]; then
+  # No fallback to `gh repo view`. That command answers with the PARENT inside a
+  # fork and ignores GH_REPO, so falling back to it is the exact bug this block
+  # exists to remove — and it would only ever fire on the runs where we already
+  # know least about what we are pointed at.
+  echo "Could not determine the repository for PR #$PR from '$PR_URL'." >&2
+  echo "  Refusing to guess: every guess here writes on somebody's pull request." >&2
+  echo "  Set GH_REPO=owner/name, or run from a checkout where gh resolves the PR." >&2
+  exit 1
+fi
 # --max-rounds must be a non-negative integer, else the arithmetic below breaks and
 # silently bypasses the cap — reject it as a usage error instead.
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
@@ -542,6 +560,23 @@ HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true
 # fetch would otherwise carry a log with no SHA in it, and the SHA is what ties a review to code.
 relay_log "start sha=${HEAD_SHA:-<unreadable>} mode=$MODE author=${AUTHOR:-none}"
 echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
+# Name the repository every write will address, and say when the checkout you are
+# standing in is a different one. Inside a fork those two differ in silence, and
+# the difference is normally discovered by finding your comment on a stranger's
+# pull request. This does not refuse — reviewing an upstream pull request from a
+# fork checkout is a legitimate thing to do — it just refuses to be quiet about it.
+_origin_url=$(git remote get-url origin 2>/dev/null || true)
+if [ -n "$_origin_url" ]; then
+  _origin=${_origin_url#*://}; _origin=${_origin#*@}
+  case $_origin in *:*) _origin=${_origin#*:} ;; */*) _origin=${_origin#*/} ;; esac
+  _origin=${_origin%.git}; _origin=${_origin%/}
+  _oname=${_origin##*/}; _oowner=${_origin%/*}; _oowner=${_oowner##*/}
+  [ -n "$_oname" ] && [ -n "$_oowner" ] && _origin="$_oowner/$_oname" || _origin=""
+  if [ -n "$_origin" ] && [ "$_origin" != "$REPO" ]; then
+    echo "  ! this checkout is $_origin — every write below goes to $REPO instead"
+  fi
+fi
+unset _origin_url _origin _oname _oowner
 # (The fail-closed early-abort on an unreadable HEAD SHA lives AFTER the round-cap
 #  check below, so a PR already at the cap still reports exit 4, not 3.)
 
@@ -1107,7 +1142,11 @@ review_with() {
     rm -f "$out_file" "$comment_body"; return 0
   fi
   rm -f "$out_file"
-  if gh pr comment "$PR" --body-file "$comment_body" >/dev/null; then
+  # --repo, always. Without it gh resolves the number against the PARENT inside a
+  # fork, so the deletes above would land on our repository and this write on
+  # theirs. $REPO is the one the round was resolved against; nothing else may
+  # decide where a comment goes.
+  if gh pr comment "$PR" --repo "$REPO" --body-file "$comment_body" >/dev/null; then
     echo "  ✓ $name review posted (collapsed)"
     [ "$unclean" = 1 ] && echo fail > "$STATUS_DIR/$skey" || echo ok > "$STATUS_DIR/$skey"
   else
