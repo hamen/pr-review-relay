@@ -20,9 +20,11 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   a URL that cannot be reduced to `owner/name` **refuses** instead of falling back to the command
   this change exists to stop trusting.
 - **The write named no repository at all.** `gh pr comment N` resolves the number against the parent
-  inside a fork, so the deletes above it went to our repository and the comment went to theirs. It
-  passes `--repo` now, and one `export GH_REPO` pins the SHA reads, the diff, and the agents that
-  inherit the environment to the same repository the round was resolved against.
+  inside a fork, just as `gh repo view` does — so before the fix above, the deletes and the comment
+  both landed upstream, and fixing only where `$REPO` comes from would have left the comment there
+  while the deletes moved home. It passes `--repo` now, and one `export GH_REPO` pins the SHA reads,
+  the diff, and the agents that inherit the environment to the same repository the round was resolved
+  against.
 - **`--pr <url>` reached the API as a URL.** `$PR` is pasted into `repos/owner/name/issues/$PR/comments`,
   where a URL builds `issues/https://.../comments` and fails silently behind the delete pass's
   `|| true` — so the previous review was never removed and every round left another copy on the pull
