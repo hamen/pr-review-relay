@@ -242,6 +242,23 @@ else
   echo "  FAIL a write went to the default host for an Enterprise pull request"; FAIL=$((FAIL+1))
 fi
 
+# The host slice of a URL is not always a hostname. Credentials in front of it
+# and a port behind it both arrive here, and GH_HOST takes a hostname.
+_hosts=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/host_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://user:pass@ghe.example.com:8443/owner/repo/pull/7" \
+      GH_API_LOG="$WORK/host_api.log" \
+      bash "$RELAY" --pr 7 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/host_api.log" 2>/dev/null
+)
+if grep -q 'host=ghe.example.com:8443' <<< "$_hosts" && ! grep -q '@' <<< "$_hosts"; then
+  echo "  ok   [-] credentials are stripped from the host and the port is kept"; PASS=$((PASS+1))
+else
+  echo "  FAIL GH_HOST was set to something that is not a hostname"; FAIL=$((FAIL+1))
+fi
+
 # `--pr` takes a URL as well as a number, and the number is pasted into API
 # routes. Left as a URL the delete pass builds `issues/https://.../comments`,
 # fails behind `|| true`, and every round adds another copy of the same review.

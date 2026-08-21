@@ -291,6 +291,13 @@ case "$PR_URL" in
   http://*/*/*/pull/*|https://*/*/*/pull/*)
     _rest=${PR_URL#*://}
     PR_HOST=${_rest%%/*}          # the host the pull request actually lives on
+    # userinfo is not part of the host. `https://user:pass@ghe.example.com/...`
+    # would otherwise export GH_HOST=user:pass@ghe.example.com, which is not a
+    # hostname, and gh then resolves somewhere nobody chose.
+    PR_HOST=${PR_HOST##*@}
+    # A port is KEPT. Dropping it points at a different endpoint on the same
+    # machine, which is the silent-wrong-target failure this block exists to
+    # remove; if gh cannot use it, it says so out loud instead.
     REPO=${_rest#*/}
     REPO=${REPO%%/pull/*}
     # `--pr` accepts a URL as well as a number, and $PR is pasted into API routes
