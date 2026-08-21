@@ -12,7 +12,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 - **The relay took its repository from `gh repo view`, which answers with the PARENT inside a fork —
   and ignores `GH_REPO`, unlike `gh pr view`.** `$REPO` is what the posting path deletes comments
-  through and what the review prompt names, so a `--post` round launched from a fork of
+  through and what the review prompt names, so a posting round launched from a fork of
   `android/snippets` would have deleted and written comments upstream, on a stranger's pull request,
   while every banner on screen named the fork. It surfaced on a read-only run: the banner said the
   fork and the run log beside it said the parent. The repository is now read off the URL that

@@ -43,7 +43,7 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 **v1.6.0** — *the fixes below landed on `main` in #34; this is the release that names them.* **The
 relay could write on the wrong repository, and said the right one while doing it.**
 Inside a fork, `gh repo view` answers with the PARENT and ignores `GH_REPO`; that is where `$REPO`
-came from, and `$REPO` is what the delete pass addresses. A `--post` round from a fork of
+came from, and `$REPO` is what the delete pass addresses. A posting round from a fork of
 `android/snippets` would have deleted and posted on a stranger's pull request with every banner
 naming the fork. The repository is now read off the URL `gh pr view` resolved, an unusable URL
 refuses rather than falling back, the comment itself passes `--repo`, and the host comes off the same
