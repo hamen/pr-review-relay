@@ -259,6 +259,38 @@ else
   echo "  FAIL GH_HOST was set to something that is not a hostname"; FAIL=$((FAIL+1))
 fi
 
+# gh reads GH_HOST as an Enterprise host. Setting it to github.com can miss the
+# github.com login entirely, so the default host stays unset.
+_gh_default=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/dflt_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/owner/repo/pull/7" GH_API_LOG="$WORK/dflt_api.log" \
+      bash "$RELAY" --pr 7 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/dflt_api.log" 2>/dev/null
+)
+if grep -q 'host=default' <<< "$_gh_default" && ! grep -q 'host=github.com' <<< "$_gh_default"; then
+  echo "  ok   [-] github.com is left as gh's default host, not pinned as an Enterprise one"; PASS=$((PASS+1))
+else
+  echo "  FAIL GH_HOST was pinned to github.com"; FAIL=$((FAIL+1))
+fi
+
+# A repository may be named "pull". `%%/pull/*` takes the longest suffix and ate
+# everything after the first one.
+_pullrepo=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/pull_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/owner/pull/pull/34" GH_API_LOG="$WORK/pull_api.log" \
+      bash "$RELAY" --pr 34 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/pull_api.log" 2>/dev/null
+)
+if grep -q 'repos/owner/pull/issues/34/comments' <<< "$_pullrepo"; then
+  echo "  ok   [-] a repository named pull resolves to owner/pull, not owner"; PASS=$((PASS+1))
+else
+  echo "  FAIL a repository named pull was mis-parsed"; FAIL=$((FAIL+1))
+fi
+
 # `--pr` takes a URL as well as a number, and the number is pasted into API
 # routes. Left as a URL the delete pass builds `issues/https://.../comments`,
 # fails behind `|| true`, and every round adds another copy of the same review.
