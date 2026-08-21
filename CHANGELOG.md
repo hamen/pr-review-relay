@@ -37,7 +37,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Changed
 
-- **The per-reviewer timeout defaults to 500s, up from 300s.** The panel runs reasoning models at
+- **The per-reviewer timeout defaults to 500s, up from 300s.** (Merged before the fixes above and
+  unreleased until now, so it ships here.) The panel runs reasoning models at
   high effort now; 300 was tuned when it did not, and an ordinary plan review no longer fits inside
   it — one session lost three consecutive `grok45high` attempts to the clock on a plan whose only
   fault was being thorough. A timeout is not silent (exit `3`, and the round refuses to count), but
@@ -569,7 +570,7 @@ First tagged release.
 - **`--context-file`**: prepend a doc / spec / API reference so every reviewer verifies the PR against it.
 - **Bounded loop**: a per-PR round cap keeps read→fix→re-run from spiraling; re-runs are idempotent.
 
-[1.6.0]: https://github.com/hamen/pr-review-relay/compare/v1.5.0...v1.6.0
+[1.6.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.6.0
 [1.5.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.5.0
 [1.4.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.4.0
 [1.3.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.3.0

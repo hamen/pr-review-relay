@@ -40,7 +40,8 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 
 ## 🆕 What's new
 
-**v1.6.0** — **the relay could write on the wrong repository, and said the right one while doing it.**
+**v1.6.0** — *the fixes below landed on `main` in #34; this is the release that names them.* **The
+relay could write on the wrong repository, and said the right one while doing it.**
 Inside a fork, `gh repo view` answers with the PARENT and ignores `GH_REPO`; that is where `$REPO`
 came from, and `$REPO` is what the delete pass addresses. A `--post` round from a fork of
 `android/snippets` would have deleted and posted on a stranger's pull request with every banner
