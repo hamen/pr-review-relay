@@ -279,7 +279,21 @@ opencode_is_selected && opencode_resolve_bin
 [ -z "$PR" ] && PR=$(gh pr view --json number -q .number 2>/dev/null)
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+# The repository is read off the pull request that was just resolved, NOT from
+# `gh repo view`. Inside a fork that command answers with the PARENT, and unlike
+# `gh pr view` it ignores GH_REPO, so the two disagree exactly where it costs the
+# most: $REPO is what the posting path deletes comments through and what the
+# review prompt names. Run from a fork of android/snippets it resolved to
+# android/snippets, so a --post round would have deleted and written comments on a
+# stranger's pull request while every banner named ours. Parsing the URL keeps one
+# source of truth — whatever `gh pr view` was aimed at is what gets written to.
+case "$PR_URL" in
+  http://*/*/*/pull/*|https://*/*/*/pull/*)
+    REPO=${PR_URL#*://*/}
+    REPO=${REPO%%/pull/*}
+    ;;
+  *) REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true) ;;
+esac
 # --max-rounds must be a non-negative integer, else the arithmetic below breaks and
 # silently bypasses the cap — reject it as a usage error instead.
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac

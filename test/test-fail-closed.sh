@@ -62,10 +62,10 @@ case "$1 $2" in
       else
         echo "aaaaaaa1111111111111111111111111111111111"
       fi
-    elif printf '%s\n' "$@" | grep -q url; then echo "http://example.test/pr/1"
+    elif printf '%s\n' "$@" | grep -q url; then echo "${GH_PR_URL:-http://example.test/pr/1}"
     elif printf '%s\n' "$@" | grep -q number; then echo 1
     fi ;;
-  "repo view") echo "owner/repo" ;;
+  "repo view") echo "${GH_REPO_VIEW:-owner/repo}" ;;
   # GH_DIFF_HANG makes the diff fetch block forever, so a test can kill the relay
   # *during* the network call and assert what evidence already exists on disk.
   "pr diff")   if [ -n "${GH_DIFF_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0; echo "diff --git a/x b/x"; echo "+change" ;;
@@ -170,6 +170,27 @@ runx() {
 runx 3 "explicitly requested unknown reviewer → fail"   --reviewers claude,bogus --parallel
 runx 3 "malicious reviewer name is contained, still fails" --reviewers 'claude,../../PWNED' --parallel
 runx 0 "duplicate reviewer is deduped → clean pass"     --reviewers claude,claude --parallel
+
+# --- the fork trap ------------------------------------------------------------
+# `gh repo view` answers with the PARENT inside a fork, and unlike `gh pr view` it
+# ignores GH_REPO. While $REPO came from that command, a --post round launched from
+# a fork of android/snippets aimed its comment deletes and writes at
+# android/snippets — a stranger's pull request — while every banner named the fork.
+# The repository now comes off the resolved pull request URL. The round key, and so
+# the run log line, is built from $REPO, which is what this reads.
+_fork_out=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/StellarElements/android-dac-snippets/pull/1" \
+      GH_REPO_VIEW="android/snippets" \
+      bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel 2>&1
+)
+if grep -q 'StellarElements_android-dac-snippets#1' <<< "$_fork_out" &&
+   ! grep -q 'android_snippets#1' <<< "$_fork_out"; then
+  echo "  ok   [-] the pull request's own repository wins over the fork's parent"; PASS=$((PASS+1))
+else
+  echo "  FAIL the parent repository won: a --post round would write on it"; FAIL=$((FAIL+1))
+fi
 
 # --- the bench, part 2: persistence, expiry, and the contract change ----------
 # bench_run <expected> <desc> <bench-file-contents> -- <relay args...>
