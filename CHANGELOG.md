@@ -6,9 +6,41 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-08-21
+
+### Fixed
+
+- **The relay took its repository from `gh repo view`, which answers with the PARENT inside a fork —
+  and ignores `GH_REPO`, unlike `gh pr view`.** `$REPO` is what the posting path deletes comments
+  through and what the review prompt names, so a posting round launched from a fork of
+  `android/snippets` would have deleted and written comments upstream, on a stranger's pull request,
+  while every banner on screen named the fork. It surfaced on a read-only run: the banner said the
+  fork and the run log beside it said the parent. The repository is now read off the URL that
+  `gh pr view` resolved — one source of truth, whatever gh was aimed at is what gets written to — and
+  a URL that cannot be reduced to `owner/name` **refuses** instead of falling back to the command
+  this change exists to stop trusting.
+- **The write named no repository at all.** `gh pr comment N` resolves the number against the parent
+  inside a fork, just as `gh repo view` does — so before the fix above, the deletes and the comment
+  both landed upstream, and fixing only where `$REPO` comes from would have left the comment there
+  while the deletes moved home. It passes `--repo` now, and one `export GH_REPO` pins the SHA reads,
+  the diff, and the agents that inherit the environment to the same repository the round was resolved
+  against.
+- **`--pr <url>` reached the API as a URL.** `$PR` is pasted into `repos/owner/name/issues/$PR/comments`,
+  where a URL builds `issues/https://.../comments` and fails silently behind the delete pass's
+  `|| true` — so the previous review was never removed and every round left another copy on the pull
+  request. The number is taken from the URL, and a URL carrying no number refuses.
+- **Enterprise hosts resolved to github.com.** `$REPO` is `owner/name` with no host in it, so
+  `gh api repos/$REPO/...` went wherever gh defaults — for a GHE checkout, a same-named repository on
+  github.com that we do not own. The host comes off the pull request URL now, with credentials
+  stripped (`user:pass@host` is not a hostname) and the port kept. `github.com` is deliberately left
+  as gh's default rather than exported, since gh reads `GH_HOST` as an Enterprise host.
+- **A repository named `pull`.** `${REPO%%/pull/*}` removes the longest suffix, so
+  `owner/pull/pull/34` reduced to `owner` and the pull request was rejected.
+
 ### Changed
 
-- **The per-reviewer timeout defaults to 500s, up from 300s.** The panel runs reasoning models at
+- **The per-reviewer timeout defaults to 500s, up from 300s.** (Merged before the fixes above and
+  unreleased until now, so it ships here.) The panel runs reasoning models at
   high effort now; 300 was tuned when it did not, and an ordinary plan review no longer fits inside
   it — one session lost three consecutive `grok45high` attempts to the clock on a plan whose only
   fault was being thorough. A timeout is not silent (exit `3`, and the round refuses to count), but
@@ -540,6 +572,7 @@ First tagged release.
 - **`--context-file`**: prepend a doc / spec / API reference so every reviewer verifies the PR against it.
 - **Bounded loop**: a per-PR round cap keeps read→fix→re-run from spiraling; re-runs are idempotent.
 
+[1.6.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.6.0
 [1.5.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.5.0
 [1.4.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.4.0
 [1.3.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.3.0

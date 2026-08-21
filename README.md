@@ -40,6 +40,17 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 
 ## 🆕 What's new
 
+**v1.6.0** — *the fixes below landed on `main` in #34; this is the release that names them.* **The
+relay could write on the wrong repository, and said the right one while doing it.**
+Inside a fork, `gh repo view` answers with the PARENT and ignores `GH_REPO`; that is where `$REPO`
+came from, and `$REPO` is what the delete pass addresses. A posting round from a fork of
+`android/snippets` would have deleted and posted on a stranger's pull request with every banner
+naming the fork. The repository is now read off the URL `gh pr view` resolved, an unusable URL
+refuses rather than falling back, the comment itself passes `--repo`, and the host comes off the same
+URL so an Enterprise round stops resolving to a same-named repository on github.com. Also: `--pr <url>`
+reaches the API as a number, so the delete pass works and a round no longer leaves a second copy of
+its review; and a repository named `pull` parses.
+
 **v1.5.0** — **an agent out of quota is benched, the gate ships with the repo, and every run leaves
 evidence.** A quota-exhausted reviewer used to fail on every repo until its quota reset, and one
 failed reviewer makes the whole round not clean — so the first run that sees the error now writes the
