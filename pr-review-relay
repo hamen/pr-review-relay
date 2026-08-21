@@ -289,10 +289,20 @@ PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
 # source of truth — whatever `gh pr view` was aimed at is what gets written to.
 case "$PR_URL" in
   http://*/*/*/pull/*|https://*/*/*/pull/*)
-    REPO=${PR_URL#*://*/}
+    _rest=${PR_URL#*://}
+    PR_HOST=${_rest%%/*}          # the host the pull request actually lives on
+    REPO=${_rest#*/}
     REPO=${REPO%%/pull/*}
+    # `--pr` accepts a URL as well as a number, and $PR is pasted into API routes
+    # below. Left as a URL it builds `repos/owner/name/issues/https://.../comments`,
+    # which fails silently behind `|| true` — so the delete pass never removes the
+    # previous review and every round leaves another copy on the pull request.
+    _num=${PR_URL##*/pull/}
+    _num=${_num%%[!0-9]*}
+    [ -n "$_num" ] && PR=$_num
+    unset _rest _num
     ;;
-  *) REPO="" ;;
+  *) REPO=""; PR_HOST="" ;;
 esac
 # Exactly owner/name, and nothing else. A URL with a doubled or trailing slash
 # leaves "owner/repo/" here, which addresses a different path once it is pasted
@@ -302,6 +312,13 @@ case "$REPO" in
   */*) ;;
   *) REPO="" ;;
 esac
+if [ -n "$PR_HOST" ]; then
+  # Every gh call after this one targets the host the pull request is on. Without
+  # it, `gh api repos/owner/name/...` goes to whatever host gh defaults to, so on
+  # GitHub Enterprise the deletes would address a same-named repository on
+  # github.com — a repository we do not own and cannot see.
+  export GH_HOST="$PR_HOST"
+fi
 if [ -z "$REPO" ]; then
   # No fallback to `gh repo view`. That command answers with the PARENT inside a
   # fork and ignores GH_REPO, so falling back to it is the exact bug this block
@@ -568,7 +585,7 @@ echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-no
 _origin_url=$(git remote get-url origin 2>/dev/null || true)
 if [ -n "$_origin_url" ]; then
   _origin=${_origin_url#*://}; _origin=${_origin#*@}
-  case $_origin in *:*) _origin=${_origin#*:} ;; */*) _origin=${_origin#*/} ;; esac
+  case "$_origin" in *:*) _origin=${_origin#*:} ;; */*) _origin=${_origin#*/} ;; esac
   _origin=${_origin%.git}; _origin=${_origin%/}
   _oname=${_origin##*/}; _oowner=${_origin%/*}; _oowner=${_oowner##*/}
   [ -n "$_oname" ] && [ -n "$_oowner" ] && _origin="$_oowner/$_oname" || _origin=""

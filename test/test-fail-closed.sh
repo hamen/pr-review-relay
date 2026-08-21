@@ -69,9 +69,9 @@ case "$1 $2" in
   # GH_DIFF_HANG makes the diff fetch block forever, so a test can kill the relay
   # *during* the network call and assert what evidence already exists on disk.
   "pr diff")   if [ -n "${GH_DIFF_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0; echo "diff --git a/x b/x"; echo "+change" ;;
-  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted $*" >> "$GH_POST_LOG"; exit 0 ;;
+  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted host=${GH_HOST:-default} $*" >> "$GH_POST_LOG"; exit 0 ;;
   "api "*|"api")
-    [ -n "${GH_API_LOG:-}" ] && echo "api $*" >> "$GH_API_LOG"
+    [ -n "${GH_API_LOG:-}" ] && echo "api host=${GH_HOST:-default} $*" >> "$GH_API_LOG"
     echo "" ;;
   *) echo "" ;;
 esac
@@ -210,11 +210,50 @@ _fork_post=$(
       bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
   cat "$WORK/fork_posted.log" "$WORK/fork_api.log" 2>/dev/null
 )
-if grep -q -- '--repo StellarElements/android-dac-snippets' <<< "$_fork_post" &&
-   ! grep -q 'android/snippets/issues' <<< "$_fork_post"; then
-  echo "  ok   [-] the comment and the deletes both address the fork, not the parent"; PASS=$((PASS+1))
+_writes=$(grep -c . <<< "$_fork_post")
+_ours=$(grep -c 'StellarElements/android-dac-snippets' <<< "$_fork_post")
+if [ "$_writes" -gt 0 ] && [ "$_writes" = "$_ours" ] &&
+   grep -q -- '--repo StellarElements/android-dac-snippets' <<< "$_fork_post"; then
+  echo "  ok   [-] every write names the fork ($_writes of $_writes), none the parent"; PASS=$((PASS+1))
 else
-  echo "  FAIL a write was addressed at the parent repository"; FAIL=$((FAIL+1))
+  echo "  FAIL only $_ours of $_writes writes named the fork"; FAIL=$((FAIL+1))
+fi
+
+# GitHub Enterprise: $REPO is owner/name with no host in it, so an api route built
+# from it goes wherever gh defaults — for us, a same-named repository on
+# github.com that we do not own. The host comes off the pull request URL now.
+_ent=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/ent_posted.log"; : > "$WORK/ent_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://ghe.example.com/owner/repo/pull/7" \
+      GH_POST_LOG="$WORK/ent_posted.log" GH_API_LOG="$WORK/ent_api.log" \
+      bash "$RELAY" --pr 7 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/ent_posted.log" "$WORK/ent_api.log" 2>/dev/null
+)
+if grep -q 'host=ghe.example.com' <<< "$_ent" && ! grep -q 'host=default' <<< "$_ent"; then
+  echo "  ok   [-] writes go to the host the pull request is on, not gh's default"; PASS=$((PASS+1))
+else
+  echo "  FAIL a write went to the default host for an Enterprise pull request"; FAIL=$((FAIL+1))
+fi
+
+# `--pr` takes a URL as well as a number, and the number is pasted into API
+# routes. Left as a URL the delete pass builds `issues/https://.../comments`,
+# fails behind `|| true`, and every round adds another copy of the same review.
+_urlform=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/url_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/owner/repo/pull/34" GH_API_LOG="$WORK/url_api.log" \
+      bash "$RELAY" --pr https://github.com/owner/repo/pull/34 --author antigravity \
+      --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/url_api.log" 2>/dev/null
+)
+if grep -q 'repos/owner/repo/issues/34/comments' <<< "$_urlform" &&
+   ! grep -q 'issues/http' <<< "$_urlform"; then
+  echo "  ok   [-] --pr <url> reaches the API as a number, so the delete pass works"; PASS=$((PASS+1))
+else
+  echo "  FAIL --pr <url> reached an API route unresolved"; FAIL=$((FAIL+1))
 fi
 
 # A URL that cannot be reduced to owner/name used to fall back to `gh repo view`
