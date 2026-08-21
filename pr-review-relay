@@ -279,7 +279,79 @@ opencode_is_selected && opencode_resolve_bin
 [ -z "$PR" ] && PR=$(gh pr view --json number -q .number 2>/dev/null)
 [ -z "$PR" ] && { echo "No PR found for the current branch. Pass --pr <n>."; exit 1; }
 PR_URL=$(gh pr view "$PR" --json url -q .url 2>/dev/null || true)
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+# The repository is read off the pull request that was just resolved, NOT from
+# `gh repo view`. Inside a fork that command answers with the PARENT, and unlike
+# `gh pr view` it ignores GH_REPO, so the two disagree exactly where it costs the
+# most: $REPO is what the posting path deletes comments through and what the
+# review prompt names. Run from a fork of android/snippets it resolved to
+# android/snippets, so a --post round would have deleted and written comments on a
+# stranger's pull request while every banner named ours. Parsing the URL keeps one
+# source of truth — whatever `gh pr view` was aimed at is what gets written to.
+case "$PR_URL" in
+  http://*/*/*/pull/*|https://*/*/*/pull/*)
+    _rest=${PR_URL#*://}
+    PR_HOST=${_rest%%/*}          # the host the pull request actually lives on
+    # userinfo is not part of the host. `https://user:pass@ghe.example.com/...`
+    # would otherwise export GH_HOST=user:pass@ghe.example.com, which is not a
+    # hostname, and gh then resolves somewhere nobody chose.
+    PR_HOST=${PR_HOST##*@}
+    # A port is KEPT. Dropping it points at a different endpoint on the same
+    # machine, which is the silent-wrong-target failure this block exists to
+    # remove; if gh cannot use it, it says so out loud instead.
+    REPO=${_rest#*/}
+    REPO=${REPO%/pull/*}
+    # `--pr` accepts a URL as well as a number, and $PR is pasted into API routes
+    # below. Left as a URL it builds `repos/owner/name/issues/https://.../comments`,
+    # which fails silently behind `|| true` — so the delete pass never removes the
+    # previous review and every round leaves another copy on the pull request.
+    _num=${PR_URL##*/pull/}
+    _num=${_num%%[!0-9]*}
+    [ -n "$_num" ] && PR=$_num
+    unset _rest _num
+    ;;
+  *) REPO=""; PR_HOST="" ;;
+esac
+# Exactly owner/name, and nothing else. A URL with a doubled or trailing slash
+# leaves "owner/repo/" here, which addresses a different path once it is pasted
+# into an API route.
+case "$REPO" in
+  */*/*|*/|/*|"") REPO="" ;;
+  */*) ;;
+  *) REPO="" ;;
+esac
+if [ -n "$REPO" ]; then
+  # Everything below this line — the SHA reads, the diff, the comment, and the
+  # agents that inherit this environment — resolves against the repository the
+  # round was pinned to, instead of against whatever checkout it happens to run
+  # in. Normalising `--pr <url>` to a number made this mandatory: a URL is
+  # unambiguous on its own, a bare number is not.
+  export GH_REPO="$REPO"
+fi
+case "$PR_HOST" in github.com|www.github.com) PR_HOST="" ;; esac
+if [ -n "$PR_HOST" ]; then
+  # Every gh call after this one targets the host the pull request is on. Without
+  # it, `gh api repos/owner/name/...` goes to whatever host gh defaults to, so on
+  # GitHub Enterprise the deletes would address a same-named repository on
+  # github.com — a repository we do not own and cannot see.
+  export GH_HOST="$PR_HOST"
+fi
+if [ -z "$REPO" ]; then
+  # No fallback to `gh repo view`. That command answers with the PARENT inside a
+  # fork and ignores GH_REPO, so falling back to it is the exact bug this block
+  # exists to remove — and it would only ever fire on the runs where we already
+  # know least about what we are pointed at.
+  echo "Could not determine the repository for PR #$PR from '$PR_URL'." >&2
+  echo "  Refusing to guess: every guess here writes on somebody's pull request." >&2
+  echo "  The URL comes from \`gh pr view\`: set GH_REPO=owner/name so that call resolves," >&2
+  echo "  or run from a checkout where it does, or pass --pr with the full pull request URL." >&2
+  exit 1
+fi
+case "$PR" in
+  ''|*[!0-9]*)
+    echo "Could not resolve PR '$PR' to a number." >&2
+    echo "  It is pasted into API routes, where a URL builds issues/https://... and fails silently." >&2
+    exit 1 ;;
+esac
 # --max-rounds must be a non-negative integer, else the arithmetic below breaks and
 # silently bypasses the cap — reject it as a usage error instead.
 case "$MAX_ROUNDS" in ''|*[!0-9]*) echo "invalid --max-rounds: '$MAX_ROUNDS' (want a non-negative integer)" >&2; exit 2;; esac
@@ -528,6 +600,23 @@ HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || true
 # fetch would otherwise carry a log with no SHA in it, and the SHA is what ties a review to code.
 relay_log "start sha=${HEAD_SHA:-<unreadable>} mode=$MODE author=${AUTHOR:-none}"
 echo "▶ Relay review for PR #$PR ${PR_URL:+($PR_URL)} — author: ${AUTHOR:-none} — mode: $MODE${HEAD_SHA:+ — sha: ${HEAD_SHA:0:7}}"
+# Name the repository every write will address, and say when the checkout you are
+# standing in is a different one. Inside a fork those two differ in silence, and
+# the difference is normally discovered by finding your comment on a stranger's
+# pull request. This does not refuse — reviewing an upstream pull request from a
+# fork checkout is a legitimate thing to do — it just refuses to be quiet about it.
+_origin_url=$(git remote get-url origin 2>/dev/null || true)
+if [ -n "$_origin_url" ]; then
+  _origin=${_origin_url#*://}; _origin=${_origin#*@}
+  case "$_origin" in *:*) _origin=${_origin#*:} ;; */*) _origin=${_origin#*/} ;; esac
+  _origin=${_origin%.git}; _origin=${_origin%/}
+  _oname=${_origin##*/}; _oowner=${_origin%/*}; _oowner=${_oowner##*/}
+  [ -n "$_oname" ] && [ -n "$_oowner" ] && _origin="$_oowner/$_oname" || _origin=""
+  if [ -n "$_origin" ] && [ "$_origin" != "$REPO" ]; then
+    echo "  ! this checkout is $_origin — every write below goes to $REPO instead"
+  fi
+fi
+unset _origin_url _origin _oname _oowner
 # (The fail-closed early-abort on an unreadable HEAD SHA lives AFTER the round-cap
 #  check below, so a PR already at the cap still reports exit 4, not 3.)
 
@@ -1093,7 +1182,11 @@ review_with() {
     rm -f "$out_file" "$comment_body"; return 0
   fi
   rm -f "$out_file"
-  if gh pr comment "$PR" --body-file "$comment_body" >/dev/null; then
+  # --repo, always. Without it gh resolves the number against the PARENT inside a
+  # fork, so the deletes above would land on our repository and this write on
+  # theirs. $REPO is the one the round was resolved against; nothing else may
+  # decide where a comment goes.
+  if gh pr comment "$PR" --repo "$REPO" --body-file "$comment_body" >/dev/null; then
     echo "  ✓ $name review posted (collapsed)"
     [ "$unclean" = 1 ] && echo fail > "$STATUS_DIR/$skey" || echo ok > "$STATUS_DIR/$skey"
   else

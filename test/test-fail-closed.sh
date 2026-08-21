@@ -39,6 +39,11 @@ relay_isolate_git "$WORK"
 cat > "$BIN/gh" <<'GH'
 #!/usr/bin/env bash
 case "$1 $2" in
+  "pr view"|"pr diff")
+    [ -n "${GH_READ_LOG:-}" ] && echo "read repo=${GH_REPO:-none} $*" >> "$GH_READ_LOG"
+    ;;
+esac
+case "$1 $2" in
   "pr view")
     if printf '%s\n' "$@" | grep -q headRefOid; then
       if [ -n "${GH_SHA_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi
@@ -62,14 +67,17 @@ case "$1 $2" in
       else
         echo "aaaaaaa1111111111111111111111111111111111"
       fi
-    elif printf '%s\n' "$@" | grep -q url; then echo "http://example.test/pr/1"
+    elif printf '%s\n' "$@" | grep -q url; then echo "${GH_PR_URL-http://example.test/owner/repo/pull/1}"
     elif printf '%s\n' "$@" | grep -q number; then echo 1
     fi ;;
-  "repo view") echo "owner/repo" ;;
+  "repo view") echo "${GH_REPO_VIEW:-owner/repo}" ;;
   # GH_DIFF_HANG makes the diff fetch block forever, so a test can kill the relay
   # *during* the network call and assert what evidence already exists on disk.
   "pr diff")   if [ -n "${GH_DIFF_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0; echo "diff --git a/x b/x"; echo "+change" ;;
-  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted" >> "$GH_POST_LOG"; exit 0 ;;
+  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted host=${GH_HOST:-default} $*" >> "$GH_POST_LOG"; exit 0 ;;
+  "api "*|"api")
+    [ -n "${GH_API_LOG:-}" ] && echo "api host=${GH_HOST:-default} $*" >> "$GH_API_LOG"
+    echo "" ;;
   *) echo "" ;;
 esac
 exit 0
@@ -170,6 +178,197 @@ runx() {
 runx 3 "explicitly requested unknown reviewer → fail"   --reviewers claude,bogus --parallel
 runx 3 "malicious reviewer name is contained, still fails" --reviewers 'claude,../../PWNED' --parallel
 runx 0 "duplicate reviewer is deduped → clean pass"     --reviewers claude,claude --parallel
+
+# --- the fork trap ------------------------------------------------------------
+# `gh repo view` answers with the PARENT inside a fork, and unlike `gh pr view` it
+# ignores GH_REPO. While $REPO came from that command, a --post round launched from
+# a fork of android/snippets aimed its comment deletes and writes at
+# android/snippets — a stranger's pull request — while every banner named the fork.
+# The repository now comes off the resolved pull request URL. The round key, and so
+# the run log line, is built from $REPO, which is what this reads.
+_fork_out=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/StellarElements/android-dac-snippets/pull/1" \
+      GH_REPO_VIEW="android/snippets" \
+      bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel 2>&1
+)
+if grep -q 'StellarElements_android-dac-snippets#1' <<< "$_fork_out" &&
+   ! grep -q 'android_snippets#1' <<< "$_fork_out"; then
+  echo "  ok   [-] the pull request's own repository wins over the fork's parent"; PASS=$((PASS+1))
+else
+  echo "  FAIL the parent repository won: a --post round would write on it"; FAIL=$((FAIL+1))
+fi
+
+# Where a POST actually goes. The round key above is a banner; this reads the
+# routes of the two calls that write. `gh pr comment N` with no repository
+# resolves the number against the PARENT inside a fork, so before --repo was
+# passed the deletes landed on our repository and the comment on theirs — with
+# every line on screen naming ours.
+_fork_post=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/fork_posted.log"; : > "$WORK/fork_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/StellarElements/android-dac-snippets/pull/1" \
+      GH_REPO_VIEW="android/snippets" \
+      GH_POST_LOG="$WORK/fork_posted.log" GH_API_LOG="$WORK/fork_api.log" \
+      bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/fork_posted.log" "$WORK/fork_api.log" 2>/dev/null
+)
+_writes=$(grep -c . <<< "$_fork_post")
+_ours=$(grep -c 'StellarElements/android-dac-snippets' <<< "$_fork_post")
+if [ "$_writes" -gt 0 ] && [ "$_writes" = "$_ours" ] &&
+   grep -q -- '--repo StellarElements/android-dac-snippets' <<< "$_fork_post"; then
+  echo "  ok   [-] every write names the fork ($_writes of $_writes), none the parent"; PASS=$((PASS+1))
+else
+  echo "  FAIL only $_ours of $_writes writes named the fork"; FAIL=$((FAIL+1))
+fi
+
+# GitHub Enterprise: $REPO is owner/name with no host in it, so an api route built
+# from it goes wherever gh defaults — for us, a same-named repository on
+# github.com that we do not own. The host comes off the pull request URL now.
+_ent=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/ent_posted.log"; : > "$WORK/ent_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://ghe.example.com/owner/repo/pull/7" \
+      GH_POST_LOG="$WORK/ent_posted.log" GH_API_LOG="$WORK/ent_api.log" \
+      bash "$RELAY" --pr 7 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/ent_posted.log" "$WORK/ent_api.log" 2>/dev/null
+)
+if grep -q 'host=ghe.example.com' <<< "$_ent" && ! grep -q 'host=default' <<< "$_ent"; then
+  echo "  ok   [-] writes go to the host the pull request is on, not gh's default"; PASS=$((PASS+1))
+else
+  echo "  FAIL a write went to the default host for an Enterprise pull request"; FAIL=$((FAIL+1))
+fi
+
+# The host slice of a URL is not always a hostname. Credentials in front of it
+# and a port behind it both arrive here, and GH_HOST takes a hostname.
+_hosts=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/host_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://user:pass@ghe.example.com:8443/owner/repo/pull/7" \
+      GH_API_LOG="$WORK/host_api.log" \
+      bash "$RELAY" --pr 7 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/host_api.log" 2>/dev/null
+)
+if grep -q 'host=ghe.example.com:8443' <<< "$_hosts" && ! grep -q '@' <<< "$_hosts"; then
+  echo "  ok   [-] credentials are stripped from the host and the port is kept"; PASS=$((PASS+1))
+else
+  echo "  FAIL GH_HOST was set to something that is not a hostname"; FAIL=$((FAIL+1))
+fi
+
+# gh reads GH_HOST as an Enterprise host. Setting it to github.com can miss the
+# github.com login entirely, so the default host stays unset.
+_gh_default=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/dflt_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/owner/repo/pull/7" GH_API_LOG="$WORK/dflt_api.log" \
+      bash "$RELAY" --pr 7 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/dflt_api.log" 2>/dev/null
+)
+if grep -q 'host=default' <<< "$_gh_default" && ! grep -q 'host=github.com' <<< "$_gh_default"; then
+  echo "  ok   [-] github.com is left as gh's default host, not pinned as an Enterprise one"; PASS=$((PASS+1))
+else
+  echo "  FAIL GH_HOST was pinned to github.com"; FAIL=$((FAIL+1))
+fi
+
+# A repository may be named "pull". `%%/pull/*` takes the longest suffix and ate
+# everything after the first one.
+_pullrepo=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/pull_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/owner/pull/pull/34" GH_API_LOG="$WORK/pull_api.log" \
+      bash "$RELAY" --pr 34 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/pull_api.log" 2>/dev/null
+)
+if grep -q 'repos/owner/pull/issues/34/comments' <<< "$_pullrepo"; then
+  echo "  ok   [-] a repository named pull resolves to owner/pull, not owner"; PASS=$((PASS+1))
+else
+  echo "  FAIL a repository named pull was mis-parsed"; FAIL=$((FAIL+1))
+fi
+
+# `--pr` takes a URL as well as a number, and the number is pasted into API
+# routes. Left as a URL the delete pass builds `issues/https://.../comments`,
+# fails behind `|| true`, and every round adds another copy of the same review.
+_urlform=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/url_api.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/owner/repo/pull/34" GH_API_LOG="$WORK/url_api.log" \
+      bash "$RELAY" --pr https://github.com/owner/repo/pull/34 --author antigravity \
+      --reviewers claude,codex --parallel >/dev/null 2>&1
+  cat "$WORK/url_api.log" 2>/dev/null
+)
+if grep -q 'repos/owner/repo/issues/34/comments' <<< "$_urlform" &&
+   ! grep -q 'issues/http' <<< "$_urlform"; then
+  echo "  ok   [-] --pr <url> reaches the API as a number, so the delete pass works"; PASS=$((PASS+1))
+else
+  echo "  FAIL --pr <url> reached an API route unresolved"; FAIL=$((FAIL+1))
+fi
+
+# Reads, not only writes. Reducing `--pr <url>` to a number removed the one thing
+# that made those calls unambiguous, so `gh pr view 34` and `gh pr diff 34` would
+# resolve against the checkout — review repository A, post the result on
+# repository B, with nothing on screen showing it.
+_reads=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/read.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/StellarElements/android-dac-snippets/pull/34" \
+      GH_READ_LOG="$WORK/read.log" \
+      bash "$RELAY" --pr https://github.com/StellarElements/android-dac-snippets/pull/34 \
+      --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+  # The first read resolves the URL itself and cannot be pinned yet; every read
+  # after that must be.
+  tail -n +2 "$WORK/read.log" 2>/dev/null
+)
+_nreads=$(grep -c . <<< "$_reads")
+_pinned=$(grep -c 'repo=StellarElements/android-dac-snippets' <<< "$_reads")
+if [ "$_nreads" -gt 0 ] && [ "$_nreads" = "$_pinned" ]; then
+  echo "  ok   [-] every read after the first is pinned to the same repository ($_pinned)"; PASS=$((PASS+1))
+else
+  echo "  FAIL $_pinned of $_nreads reads were pinned; the rest used the checkout"; FAIL=$((FAIL+1))
+fi
+
+# `--pr <url>` with nothing numeric on the end. The rewrite leaves $PR as the URL,
+# and it is pasted into API routes, so refuse rather than build issues/https://...
+_nonum_rc=$(
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$WORK/nonum.log"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+      GH_PR_URL="https://github.com/owner/repo/pull/" GH_POST_LOG="$WORK/nonum.log" \
+      bash "$RELAY" --pr https://github.com/owner/repo/pull/ --author antigravity \
+      --reviewers claude,codex --parallel >/dev/null 2>&1
+  echo "$?"
+)
+if [ "$_nonum_rc" != 0 ] && [ ! -s "$WORK/nonum.log" ]; then
+  echo "  ok   [$_nonum_rc] --pr with a URL carrying no number refuses"; PASS=$((PASS+1))
+else
+  echo "  FAIL [rc=$_nonum_rc] a URL with no number reached the API path"; FAIL=$((FAIL+1))
+fi
+
+# A URL that cannot be reduced to owner/name used to fall back to `gh repo view`
+# — the parent, in a fork — so the one run that knew least about its target was
+# the one that guessed. It now refuses.
+for _bad in "" "http://example.test/pr/1" "https://github.com/owner/repo//pull/1"; do
+  _rc=$(
+    rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+    : > "$WORK/bad_posted.log"
+    env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
+        GH_PR_URL="$_bad" GH_REPO_VIEW="android/snippets" GH_POST_LOG="$WORK/bad_posted.log" \
+        bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --parallel >/dev/null 2>&1
+    echo "$?"
+  )
+  if [ "$_rc" != 0 ] && [ ! -s "$WORK/bad_posted.log" ]; then
+    echo "  ok   [$_rc] an unusable pull request URL refuses instead of guessing (${_bad:-empty})"; PASS=$((PASS+1))
+  else
+    echo "  FAIL [rc=$_rc] guessed the repository from an unusable URL (${_bad:-empty})"; FAIL=$((FAIL+1))
+  fi
+done
 
 # --- the bench, part 2: persistence, expiry, and the contract change ----------
 # bench_run <expected> <desc> <bench-file-contents> -- <relay args...>
