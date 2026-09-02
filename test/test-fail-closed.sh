@@ -750,9 +750,21 @@ oc_run() { # oc_run <expected_exit> <desc> [VAR=val ...] [-- <relay args...>]
 # different shapes, and #36 had to fix one of them (the relative-TMPDIR run) purely
 # because a name had been left off. One list, one place to add the sixth.
 #
-# `${1-...}` and not `${1:-...}`: an explicit empty argument is a caller bug and
-# should blow up on `rm -f ""`, not silently wipe $OC_ARGV instead.
-oc_reset() { local f="${1-$OC_ARGV}"; rm -f "$f" "$f.cfg" "$f.cwd" "$f.projcfg" "$f.stdin"; }
+# `${1-...}` and not `${1:-...}`: with `:-`, an explicit empty argument would
+# silently redirect the wipe onto $OC_ARGV instead of the caller's target.
+#
+# The empty prefix then has to be REFUSED, not merely allowed to fail. `rm -f ""` is
+# a silent no-op on GNU coreutils — exit 0, no diagnostic — while the four names
+# beside it collapse to the RELATIVE paths `.cfg .cwd .projcfg .stdin` and are
+# deleted from whatever directory the suite is standing in. Measured: a directory
+# holding those four files plus one other keeps only the other, and `rm` still
+# reports success. So the guard is the whole protection; there is nothing
+# downstream to catch it.
+oc_reset() { # oc_reset [prefix]  (defaults to $OC_ARGV)
+  local f="${1-$OC_ARGV}"
+  [ -n "$f" ] || { echo "  FAIL oc_reset called with an empty prefix"; FAIL=$((FAIL+1)); return 1; }
+  rm -f "$f" "$f.cfg" "$f.cwd" "$f.projcfg" "$f.stdin"
+}
 
 oc_assert() { # oc_assert <desc> <grep-mode: has|hasnt> <pattern>
   local desc="$1" mode="$2" pat="$3"
@@ -789,9 +801,24 @@ else echo "  FAIL oc_reset left:$_left"; FAIL=$((FAIL+1)); fi
 # The default argument, which twelve of the thirteen call sites rely on.
 for _sfx in "" .cfg .cwd .projcfg .stdin; do : > "$OC_ARGV$_sfx"; done
 oc_reset
-if [ ! -e "$OC_ARGV" ] && [ ! -e "$OC_ARGV.projcfg" ]; then
-  echo "  ok   [-] oc_reset with no argument defaults to \$OC_ARGV"; PASS=$((PASS+1))
-else echo "  FAIL oc_reset default argument did not clear \$OC_ARGV"; FAIL=$((FAIL+1)); fi
+_left=""
+for _sfx in "" .cfg .cwd .projcfg .stdin; do [ -e "$OC_ARGV$_sfx" ] && _left="$_left $OC_ARGV$_sfx"; done
+if [ -z "$_left" ]; then echo "  ok   [-] oc_reset with no argument defaults to \$OC_ARGV"; PASS=$((PASS+1))
+else echo "  FAIL oc_reset default argument left:$_left"; FAIL=$((FAIL+1)); fi
+
+# An EMPTY argument must be refused outright. Without the guard this deletes
+# `.cfg`/`.cwd`/`.projcfg`/`.stdin` out of the current directory and `rm` still
+# exits 0 — a test helper quietly removing files that are not its own.
+_ocrdir="$WORK/oc-reset-empty"; mkdir -p "$_ocrdir"
+for _sfx in .cfg .cwd .projcfg .stdin bystander; do : > "$_ocrdir/$_sfx"; done
+# Subshell: the guard's own FAIL increment is deliberately not counted here — this
+# assertion is about the files, and the guard firing is the expected path.
+( cd "$_ocrdir" && oc_reset "" ) >/dev/null 2>&1
+_survived=1
+for _sfx in .cfg .cwd .projcfg .stdin bystander; do [ -e "$_ocrdir/$_sfx" ] || _survived=0; done
+if [ "$_survived" = 1 ]; then
+  echo "  ok   [-] oc_reset refuses an empty prefix instead of clearing the cwd"; PASS=$((PASS+1))
+else echo "  FAIL oc_reset with an empty prefix deleted files from the cwd"; FAIL=$((FAIL+1)); fi
 
 oc_run 0 "opencode runs read-only under its own agent, link mode"
 oc_assert "link mode selects the relay agent" has "--agent pr-review-relay-ro"
