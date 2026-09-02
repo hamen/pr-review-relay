@@ -19,8 +19,9 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   The diff is now fed on **stdin**, which OpenCode appends to the prompt whole. The staged file, its
   short-write guard and its path canonicalisation all stay — only the flag changed to a redirect, so
   a pipeline cannot report `141` for a large diff the agent never drained. Verified live to 90 KB
-  under the same deny-everything policy, and pinned by a 2001-line regression test that asserts the
-  delivered bytes exactly. The prompt no longer tells the agent that nothing is on stdin.
+  under the same deny-everything policy, and pinned by a 2000-line regression test that compares what
+  arrived against the source byte for byte. There is no measured upper bound above 90 KB, which the
+  code says out loud. The prompt no longer tells the agent that nothing is on stdin.
 
   No permission, working-directory, or guard changes: the read-only posture is untouched.
 

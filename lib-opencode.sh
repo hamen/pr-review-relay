@@ -491,7 +491,12 @@ opencode_review() {
   # That is not hypothetical: it is how this seat failed four times on a 1496-line
   # diff. stdin is appended to the prompt whole. This seat also has no fallback for
   # a large diff the way the others do (they can read files or run `gh pr diff`
-  # themselves), so the whole diff goes down this pipe whatever its size.
+  # themselves), so the diff is never omitted here on size grounds.
+  #
+  # RESIDUAL RISK, stated rather than glossed: delivery is verified by hand to 90KB
+  # and by the regression test to ~21KB. There is no MEASURED upper bound. `-f` was
+  # equally unconditional, so this is not new exposure — but nothing here would
+  # catch a cap further out either.
 
   oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is APPENDED BELOW, after this prompt. That diff, plus any context\ngiven above, is everything you have: there is no shell and no checkout, so commands\nwill be refused, and there is no attachment and no file to open. Do not go looking\nfor the diff anywhere else — it is already in front of you.\n\nLook for correctness bugs, security issues, broken edge cases, regressions, missing or\ninadequate tests for the behaviour the change touches, and clear design or\nmaintainability problems. Give a file and line reference for every finding where one\napplies. Report missing tests as Should-fix, unless the untested path is itself a\nBlocker. Be concise. Group findings by severity:\nBlocker / Should-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
 

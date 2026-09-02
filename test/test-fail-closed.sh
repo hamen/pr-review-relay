@@ -890,10 +890,12 @@ _exp="$( GH_BIG_DIFF_LINES=$OC_BIG_LINES "$BIN/gh" pr diff 1 )"
 _exp_bytes=$(printf '%s' "$_exp" | wc -c | tr -d ' ')
 _got_bytes=$(wc -c < "$OC_ARGV.stdin" 2>/dev/null | tr -d ' ')
 _got_lines=$(wc -l < "$OC_ARGV.stdin" 2>/dev/null | tr -d ' ')
-if [ "$_got_bytes" = "$_exp_bytes" ]; then
+# cmp, not a byte COUNT: equal lengths would also pass for a same-length mangling,
+# and "the right number of bytes" is not the claim being made here.
+if printf '%s' "$_exp" | cmp -s - "$OC_ARGV.stdin"; then
   echo "  ok   [-] the whole diff arrives byte for byte ($_got_bytes B, $_got_lines lines)"; PASS=$((PASS+1))
 else
-  echo "  FAIL diff truncated on delivery (got ${_got_bytes}B, want ${_exp_bytes}B)"; FAIL=$((FAIL+1))
+  echo "  FAIL diff altered or truncated on delivery (got ${_got_bytes}B, want ${_exp_bytes}B)"; FAIL=$((FAIL+1))
 fi
 if [ "${_got_lines:-0}" -gt 1035 ]; then
   echo "  ok   [-] delivery clears the ~1035-line attachment cap"; PASS=$((PASS+1))
@@ -1155,7 +1157,7 @@ else echo "  FAIL [got $rc, want 2] '.' on PATH slipped through"; FAIL=$((FAIL+1
 # A RELATIVE TMPDIR makes mktemp return relative paths, which then resolve against
 # the attachment dir once opencode_review cds into it.
 mkdir -p "$WORK/reltmp"
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV" "$OC_ARGV.stdin"
 ( cd "$WORK" && env PATH="$BIN:$PATH" TMPDIR="reltmp" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
     bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )

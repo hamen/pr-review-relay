@@ -766,9 +766,12 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
   **posts** the result: a prompt-injected diff could have had the model read a credential and quote it
   into a public PR comment.
 - **Shell is denied, so OpenCode never fetches the PR itself** — the diff is fed on stdin instead, in
-  both modes and whatever its size. It was an `-f` attachment until 1.6.1: OpenCode injects only the
-  first ~1035 lines of one and leaves the agent to fetch the rest, which an agent with every tool
-  denied cannot do, so it stalled and posted a note about the truncation as its review. Narrower designs were tried first and each was demonstrably
+  both modes, and it is never omitted on size grounds the way the inline fallback is for the other
+  seats (they can read files or run `gh pr diff`; this one cannot). Delivery is verified by hand to
+  90 KB and by test to ~21 KB; there is no measured upper bound. It was an `-f` attachment until this
+  release: OpenCode injects only the first ~1035 lines of one and leaves the agent to fetch the rest,
+  which an agent with every tool denied cannot do, so it stalled and posted a note about the
+  truncation as its review. Narrower designs were tried first and each was demonstrably
   bypassable: the original `--dangerously-skip-permissions` (an undocumented alias for `--auto`, so it
   approved everything); selecting the built-in `plan` agent (its permissions and even its mode are
   user-configurable — it ran `id`, and redirecting it to a subagent fell back to `build`); allowing just `gh pr view` / `gh pr diff` (defeated by shell
