@@ -233,6 +233,10 @@ panel_resolve() {
 # Exit codes are three-valued on purpose: "no verdict at all" and "a verdict, then a
 # stall" are different problems with different fixes, and a caller that can only say
 # "not a review" leaves the reader to work out which one they have.
+# `local` below is not POSIX, but dash — and every shell this file is tested against —
+# implements it, and the loaders above already rely on it. That is the difference from
+# `<<<`, refused a few lines down: `<<<` is a PARSE error, so it would take the whole
+# file down at SOURCE time rather than failing this one function at call time.
 review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verdict then stall
   local _rlr_norm= _rlr_marker= _rlr_approve= _rlr_tail=
 
@@ -275,12 +279,12 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
 
   [ -n "$_rlr_marker" ] || return 1   # nothing that claims a verdict
 
-  # The exemption for an approving review is deliberately narrow, and it is checked
-  # on the CLOSING SENTENCE below rather than here. Exempting the whole body was too
-  # wide: "Looks good. Let me read the remainder before concluding." was accepted —
-  # a stall wearing an approval. What the exemption must protect is the opposite
-  # order, "after reading the rest of the diff, this looks good", where the reading
-  # is finished and the verdict is the last word.
+  # The exemption for a review that ends in a verdict is checked on the CLOSING
+  # SENTENCE below, not on the body. Exempting the whole body was too wide: "Looks
+  # good. Let me read the remainder before concluding." was accepted — a stall
+  # wearing an approval. What the exemption must protect is the opposite order,
+  # "after reading the rest of the diff, this looks good", where the reading is
+  # finished and the verdict is the last word.
 
   # LAST SENTENCE only, not a byte window. Mid-transcript narration is normal — a
   # successful codex run says "let me read the diff first" on its way to a verdict —
@@ -289,25 +293,44 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
   # be vetoed despite ending in a verdict. Measured: that fixture failed a 500-byte
   # window and passes this.
   #
-  # Every recovered failure announces the future work as its FINAL sentence, so this
-  # anchor keeps all of them.
+  # Every recovered failure announces the future work as the last thing it says, so
+  # the anchor is the closing sentence of the LAST NON-EMPTY LINE — computed from the
+  # ORIGINAL text, before the newline collapse above.
   #
-  # Split on ". " — a period FOLLOWED BY A SPACE — not a bare period. A bare period
-  # also ends a filename, a path or a version, and the bodies this guards are full of
-  # them: `Blocker: none yet. Let me read attachment.txt.` split on the last `.` leaves
-  # "txt", the stall phrase vanishes, and unfinished work is accepted and posted.
-  # Measured. Whitespace is already collapsed above, so ". " is reliable here.
-  _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[. ]*$//' -e 's/.*\. //')
+  # Both halves are load-bearing, and each one was a measured false verdict:
+  #
+  #   LINE first, because collapsing newlines merges narration into the review that
+  #   follows it. `Let me read the rest\n\nShould-fix\n- The guard is wrong` is a
+  #   complete review — a raw transcript, which is what codex returns — and became a
+  #   single sentence containing a stall phrase. Rejected. On the last line it is
+  #   "- the guard is wrong", which is no stall at all.
+  #
+  #   SENTENCE within that line, because a line can hold both. "Looks good. Let me
+  #   read the remainder before concluding." is a stall wearing an approval, and only
+  #   the closing sentence separates it from "after reading the rest, this looks good".
+  #
+  # Sentence enders are ". ", "! " and "? " — the punctuation FOLLOWED BY A SPACE. A
+  # bare period also ends a filename, a path or a version, and the bodies this guards
+  # cite them constantly: `Blocker: none yet. Let me read attachment.txt.` split on a
+  # bare `.` leaves "txt", the stall vanishes, and unfinished work is posted.
+  _rlr_tail=$(printf '%s\n' "$1" \
+    | grep -v '^[[:space:]]*$' | tail -n 1 \
+    | tr '\t' ' ' | tr -s ' ' | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/[.!? ]*$//' -e 's/.*[.!?] //')
+  _rlr_tail=" $_rlr_tail "
   printf '%s' "$_rlr_tail" | grep -E \
     'reading the rest|reading the remainder|read the remaining|before i can|before concluding|before reviewing|let me read|i need the rest' \
     >/dev/null || return 0
 
   # The closing sentence mentions unfinished work. That is a stall UNLESS the same
-  # sentence also delivers the verdict — "after reading the rest of the diff, this
-  # looks good" is a review; "let me read the remainder before concluding" is not,
-  # whatever an earlier sentence claimed.
-  printf '%s' "$_rlr_tail" \
-    | grep -E '(^|[^a-z0-9_])(lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' \
+  # sentence also delivers a verdict — of EITHER kind. Severity counts, not only
+  # approval: `Nit: drop "let me read" from the comment.` is a finding whose text
+  # happens to quote a stall phrase, and rejecting it would fail the round over a
+  # reviewer's choice of example. Recovered body B is unaffected: its `Blocker` is on
+  # a different line from its closing sentence, which is the whole point of the
+  # anchor.
+  printf '%s' "$_rlr_tail" | grep -E \
+    '(^|[^a-z0-9_])(blockers?|nits?|should[- ]fix(es)?|lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' \
     >/dev/null && return 0
 
   return 2   # claims a verdict, then says it is still working

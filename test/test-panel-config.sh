@@ -270,7 +270,9 @@ rlr() { # rlr <yes|no|stall> <label> <body>
   local want="$1" label="$2" body="$3" got
   review_looks_like_a_review "$body"
   case $? in 0) got=yes;; 2) got=stall;; *) got=no;; esac
-  [ "$want" = no ] && [ "$got" = stall ] && got=no   # "no" accepts either rejection
+  # NO collapse: "no" means exit 1 (no verdict) and "stall" means exit 2. Rewriting
+  # one into the other would let a fixture keep passing after its rejection REASON
+  # changed, and the two reasons now print different sentences to the human.
   if [ "$got" = "$want" ]; then ok "review gate: $label"; else bad "review gate: $label — got $got, want $want"; fi
 }
 
@@ -279,7 +281,7 @@ rlr no "recovered A — capped at line 1183" \
   'The diff is capped at line 1183 — I need the rest of it before I can verify the PR against the plan. Let me read the remaining chunks.'
 # B is why the stall check exists at all: it NAMES a severity, at a word boundary, not
 # echoed from any prompt — and it is an agent saying it has not finished.
-rlr no "recovered B — names Blocker, still a stall" \
+rlr stall "recovered B — names Blocker, still a stall" \
   'Blocker
 - None visible in the readable portion of the diff (lines 1–1182 of the attachment). Reading the remainder before concluding.'
 rlr no "recovered C — reading the rest" 'Reading the rest of the diff before reviewing.'
@@ -308,9 +310,9 @@ rlr yes "severity: Should-fixes"     'Should-fixes: a couple.'
 # A bare period is not a sentence boundary: it also ends a filename, a path or a
 # version, and the bodies this guards cite them constantly. Splitting on `.` instead
 # of `. ` made every one of these accepted — measured.
-rlr no "stall ending in a filename"  'Blocker: none yet. Let me read attachment.txt.'
-rlr no "stall ending in a path"      'Blocker: none. Reading the rest of /tmp/oc-diff.auQm5v.'
-rlr no "stall ending in a version"   'Blocker: none. I need the rest before I can verify v1.2.'
+rlr stall "stall ending in a filename"  'Blocker: none yet. Let me read attachment.txt.'
+rlr stall "stall ending in a path"   'Blocker: none. Reading the rest of /tmp/oc-diff.auQm5v.'
+rlr stall "stall ending in a version" 'Blocker: none. I need the rest before I can verify v1.2.'
 rlr yes "severity: Should fix, space" 'Should fix: the thing.'
 rlr yes "severity: bold markdown"    '**Blocker** — none'
 rlr yes "approval: nothing to flag"  'Nothing to flag.'
@@ -359,6 +361,20 @@ rlr no "echo: in CAPS" \
 # concluding." — a stall wearing an approval. Order is what separates them.
 rlr yes   "stall: read first, verdict last" 'After reading the rest of the diff, this looks good.'
 rlr stall "stall: verdict first, then still reading" 'Looks good. Let me read the remainder before concluding.'
+# The stall anchor is the closing sentence OF THE LAST NON-EMPTY LINE, and both halves
+# were measured rejecting real reviews before they were added.
+# Line: collapsing newlines merged narration into the review that followed it, which
+# is the shape of a raw codex transcript.
+rlr yes "anchor: raw transcript, review on later lines" 'Let me read the rest
+
+Should-fix
+- The guard is wrong'
+# Verdict of EITHER kind immunises the closing sentence, not only approval: a finding
+# may legitimately quote a stall phrase as its example.
+rlr yes "anchor: a finding that quotes a stall phrase" 'Nit: drop "let me read" from the comment.'
+rlr yes "anchor: severity in the closing sentence" 'Should-fix: check this before I can merge.'
+# "! " and "? " end sentences too, not only ". ".
+rlr stall "anchor: question mark ends a sentence" 'Blocker: none. Should I read the remainder before concluding? Let me read the rest'
 rlr stall "stall: recovered B is reported AS a stall" 'Blocker
 - None visible in the readable portion of the diff. Reading the remainder before concluding.'
 rlr no    "no verdict is reported as no verdict" 'Reading the rest of the diff before reviewing.'
