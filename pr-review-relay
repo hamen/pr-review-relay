@@ -1159,8 +1159,13 @@ review_with() {
   # banner into $out, the round is already unclean, and the body is posted
   # deliberately as evidence. What is left cannot be judged for completeness: a
   # missing verdict marker may be the relay's doing, not the reviewer's.
-  if [ "$TRUNCATED" != 1 ] && ! review_looks_like_a_review "$out"; then
-    echo "  ! $name: not a review — it names no severity (Blocker/Should-fix/Nit) and does not say it looks good, or it says it is still reading. NOT posted." >&2
+  review_looks_like_a_review "$out"; local _nr=$?
+  if [ "$TRUNCATED" != 1 ] && [ "$_nr" -ne 0 ]; then
+    if [ "$_nr" = 2 ]; then
+      echo "  ! $name: not a review — it names a verdict and then says it is still reading. NOT posted." >&2
+    else
+      echo "  ! $name: not a review — it names no severity (Blocker/Should-fix/Nit) and does not say it looks good. NOT posted." >&2
+    fi
     echo "    $name returned:" >&2
     printf '%s\n' "$out" | sed 's/^/    │ /' >&2
     echo fail > "$STATUS_DIR/$skey"

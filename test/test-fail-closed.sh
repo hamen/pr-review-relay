@@ -1366,6 +1366,13 @@ if [ -f "$RL" ]; then
   else
     echo "  FAIL review-local rejected silently"; FAIL=$((FAIL+1))
   fi
+  # stderr IS the delivery for this caller — it posts nowhere — so the body has to be
+  # visible there, or the gate deletes the evidence it rejected.
+  if grep -q 'Reading the rest of the diff' <<< "$_rlnr"; then
+    echo "  ok   [-] review-local shows the rejected body"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local swallowed the rejected body"; FAIL=$((FAIL+1))
+  fi
   # From here on the runs must NOT dispatch opencode, so clear the recorded files:
   # asserting on them afterwards would be reading the successful run above.
   oc_reset
@@ -2898,15 +2905,19 @@ printf '%s' "$_nr_out" | grep -q '========== Claude review =========='
 [ $? -ne 0 ]; ok_if $? "a non-review does not print under the review banner" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
 printf '%s' "$_nr_out" | grep -q 'not a review'; ok_if $? "the relay says why it rejected the body" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
 printf '%s' "$_nr_out" | grep -q 'Reading the rest of the diff'; ok_if $? "the rejected body itself is shown" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
+# The two rejection reasons are different problems with different fixes, so they must
+# not read the same. "no verdict" here; "a verdict, then a stall" on the body below.
+printf '%s' "$_nr_out" | grep -q 'names no severity'; ok_if $? "a body with no verdict says so" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
 
 # The recovered body that names a severity. A gate built only on markers accepts this
 # one, which is the whole reason the stall check exists.
 s_reset; : > "$WORK/posted.log"
-env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+_nrs_out=$(env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" NONREVIEW_STALL=claude \
-  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>&1)
 _nrs_rc=$?
 [ "$_nrs_rc" = 3 ]; ok_if $? "a stall that names Blocker still fails the round" "rc=$_nrs_rc"
+printf '%s' "$_nrs_out" | grep -q 'still reading'; ok_if $? "a stall is reported as a stall, not as a missing verdict" "out=$(printf '%s' "$_nrs_out" | tail -3 | tr '\n' '|')"
 [ ! -s "$WORK/posted.log" ]; ok_if $? "a stall that names Blocker is not posted" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
 
 # Ordering, pinned. The bench short-circuits on `rc != 0 AND a quota match`, so a
@@ -2928,6 +2939,19 @@ _nrq_rc=$?
 # "Looks good". This is the half that proves the bench's conjunction, not merely its
 # position: if the bench ever matched on text alone, this seat would be benched instead
 # of reviewed.
+# The rc!=0 asymmetry, asserted rather than assumed. A crashed reviewer that still
+# named a verdict keeps its old behaviour: POSTED, marked unclean. Exit 3 alone cannot
+# show this — it is equally true of "rejected and not posted" — so the post log is the
+# assertion. Without it, a gate that also swallowed rc!=0 bodies would keep every
+# existing test green while quietly deleting partial reviews.
+s_reset; : > "$WORK/posted.log"
+env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" FAIL_RC=claude \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+_nrf_rc=$?
+[ "$_nrf_rc" = 3 ]; ok_if $? "a crashed reviewer with a verdict still fails the round" "rc=$_nrf_rc"
+[ -s "$WORK/posted.log" ]; ok_if $? "and it is still POSTED — the gate does not swallow rc!=0 bodies" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+
 s_reset; : > "$WORK/posted.log"
 env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" QUOTA_TEXT_OK=claude \

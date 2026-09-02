@@ -296,7 +296,15 @@ rlr yes "severity: Blockers plural"  '## Blockers
 - two of them'
 rlr yes "severity: Nits: plural"     'Nits:
 - naming'
+rlr yes "severity: Nit alone"        'Nit: the naming.'
+rlr yes "severity: Should-fix alone"  'Should-fix: the guard.'
 rlr yes "severity: Should-fixes"     'Should-fixes: a couple.'
+# A bare period is not a sentence boundary: it also ends a filename, a path or a
+# version, and the bodies this guards cite them constantly. Splitting on `.` instead
+# of `. ` made every one of these accepted — measured.
+rlr no "stall ending in a filename"  'Blocker: none yet. Let me read attachment.txt.'
+rlr no "stall ending in a path"      'Blocker: none. Reading the rest of /tmp/oc-diff.auQm5v.'
+rlr no "stall ending in a version"   'Blocker: none. I need the rest before I can verify v1.2.'
 rlr yes "severity: Should fix, space" 'Should fix: the thing.'
 rlr yes "severity: bold markdown"    '**Blocker** — none'
 rlr yes "approval: nothing to flag"  'Nothing to flag.'

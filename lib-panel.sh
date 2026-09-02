@@ -230,7 +230,10 @@ panel_resolve() {
 #
 # No `<<<` either, and that one IS load-bearing: it is a parse error in dash, which
 # would make this whole file unsourceable rather than just this function.
-review_looks_like_a_review() { # <text>   0 = yes, 1 = no
+# Exit codes are three-valued on purpose: "no verdict at all" and "a verdict, then a
+# stall" are different problems with different fixes, and a caller that can only say
+# "not a review" leaves the reader to work out which one they have.
+review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verdict then stall
   local _rlr_norm= _rlr_marker= _rlr_approve= _rlr_tail=
 
   # Collapse every whitespace run to one space and lowercase the lot. Both matter:
@@ -270,7 +273,7 @@ review_looks_like_a_review() { # <text>   0 = yes, 1 = no
     | grep -E '(^|[^a-z0-9_])(lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' >/dev/null \
     && { _rlr_marker=1; _rlr_approve=1; }
 
-  [ -n "$_rlr_marker" ] || return 1
+  [ -n "$_rlr_marker" ] || return 1   # nothing that claims a verdict
 
   # An approving review may legitimately describe reading: "after reading the rest
   # of the diff, this looks good" is a verdict, not a stall. None of the recovered
@@ -285,12 +288,17 @@ review_looks_like_a_review() { # <text>   0 = yes, 1 = no
   # window and passes this.
   #
   # Every recovered failure announces the future work as its FINAL sentence, so this
-  # anchor keeps all of them. Drop a trailing period, then take everything after the
-  # last one — greedy .* leaves exactly the closing sentence.
-  _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[. ]*$//' -e 's/.*\.//')
+  # anchor keeps all of them.
+  #
+  # Split on ". " — a period FOLLOWED BY A SPACE — not a bare period. A bare period
+  # also ends a filename, a path or a version, and the bodies this guards are full of
+  # them: `Blocker: none yet. Let me read attachment.txt.` split on the last `.` leaves
+  # "txt", the stall phrase vanishes, and unfinished work is accepted and posted.
+  # Measured. Whitespace is already collapsed above, so ". " is reliable here.
+  _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[. ]*$//' -e 's/.*\. //')
   printf '%s' "$_rlr_tail" | grep -E \
     'reading the rest|reading the remainder|read the remaining|before i can|before concluding|before reviewing|let me read|i need the rest' \
-    >/dev/null && return 1
+    >/dev/null && return 2   # claims a verdict, then says it is still working
 
   return 0
 }

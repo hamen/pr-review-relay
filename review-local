@@ -247,8 +247,13 @@ review_with() {
   # its stdout banner IS the delivery: a rejected body must NOT go out under
   # "========== Name review ==========", or the launching agent reads a non-review as
   # a review — the same harm, the other caller. Labelled stderr instead.
-  if ! review_looks_like_a_review "$out"; then
-    echo "  ! $name: not a review — it names no severity (Blocker/Should-fix/Nit) and does not say it looks good, or it says it is still reading." >&2
+  review_looks_like_a_review "$out"; local _nr=$?
+  if [ "$_nr" -ne 0 ]; then
+    if [ "$_nr" = 2 ]; then
+      echo "  ! $name: not a review — it names a verdict and then says it is still reading." >&2
+    else
+      echo "  ! $name: not a review — it names no severity (Blocker/Should-fix/Nit) and does not say it looks good." >&2
+    fi
     echo "    $name returned:" >&2
     printf '%s\n' "$out" | sed 's/^/    │ /' >&2
     printf 'fail' > "$FAILDIR/k_$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
