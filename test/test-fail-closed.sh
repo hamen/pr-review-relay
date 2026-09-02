@@ -730,7 +730,7 @@ oc_run() { # oc_run <expected_exit> <desc> [VAR=val ...] [-- <relay args...>]
   while [ $# -gt 0 ]; do
     case "$1" in --) shift; relay_args=("$@"); break;; *) envs+=("$1"); shift;; esac
   done
-  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV" "$OC_ARGV.stdin"
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; oc_reset
   # Clear PR_RELAY_OPENCODE_MODEL first: the "unset → no -m" assertion below tests the
   # DEFAULT, so a developer who exports the variable in their own shell (a normal thing to
   # do — it is a documented knob) would otherwise fail the suite on an unmodified checkout.
@@ -745,6 +745,27 @@ oc_run() { # oc_run <expected_exit> <desc> [VAR=val ...] [-- <relay args...>]
   if [ "$rc" = "$expect" ]; then echo "  ok   [$rc] $desc"; PASS=$((PASS+1))
   else echo "  FAIL [got $rc, want $expect] $desc"; FAIL=$((FAIL+1)); fi
 }
+# The stub writes FIVE files per run — the argv log plus four sidecars beside it.
+# Every reset site used to hand-list the ones it happened to care about, in three
+# different shapes, and #36 had to fix one of them (the relative-TMPDIR run) purely
+# because a name had been left off. One list, one place to add the sixth.
+#
+# `${1-...}` and not `${1:-...}`: with `:-`, an explicit empty argument would
+# silently redirect the wipe onto $OC_ARGV instead of the caller's target.
+#
+# The empty prefix then has to be REFUSED, not merely allowed to fail. `rm -f ""` is
+# a silent no-op on GNU coreutils — exit 0, no diagnostic — while the four names
+# beside it collapse to the RELATIVE paths `.cfg .cwd .projcfg .stdin` and are
+# deleted from whatever directory the suite is standing in. Measured: a directory
+# holding those four files plus one other keeps only the other, and `rm` still
+# reports success. So the guard is the whole protection; there is nothing
+# downstream to catch it.
+oc_reset() { # oc_reset [prefix]  (defaults to $OC_ARGV)
+  local f="${1-$OC_ARGV}"
+  [ -n "$f" ] || { echo "  FAIL oc_reset called with an empty prefix"; FAIL=$((FAIL+1)); return 1; }
+  rm -f "$f" "$f.cfg" "$f.cwd" "$f.projcfg" "$f.stdin"
+}
+
 oc_assert() { # oc_assert <desc> <grep-mode: has|hasnt> <pattern>
   local desc="$1" mode="$2" pat="$3"
   local got; got="$(cat "$OC_ARGV" 2>/dev/null || true)"
@@ -766,6 +787,38 @@ oc_stdin() { # oc_stdin <desc> <has|hasnt> <pattern>
            else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
   esac
 }
+
+# oc_reset itself, before anything depends on it. A cleanup helper that clears the
+# wrong path makes tests pass by erasing evidence, and no pass-count check would
+# show it: a successful dispatch rewrites the sidecars either way.
+_ocr="$WORK/oc-reset-probe"
+for _sfx in "" .cfg .cwd .projcfg .stdin; do : > "$_ocr$_sfx"; done
+oc_reset "$_ocr"
+_left=""
+for _sfx in "" .cfg .cwd .projcfg .stdin; do [ -e "$_ocr$_sfx" ] && _left="$_left $_ocr$_sfx"; done
+if [ -z "$_left" ]; then echo "  ok   [-] oc_reset clears the argv log and all four sidecars"; PASS=$((PASS+1))
+else echo "  FAIL oc_reset left:$_left"; FAIL=$((FAIL+1)); fi
+# The default argument, which twelve of the thirteen call sites rely on.
+for _sfx in "" .cfg .cwd .projcfg .stdin; do : > "$OC_ARGV$_sfx"; done
+oc_reset
+_left=""
+for _sfx in "" .cfg .cwd .projcfg .stdin; do [ -e "$OC_ARGV$_sfx" ] && _left="$_left $OC_ARGV$_sfx"; done
+if [ -z "$_left" ]; then echo "  ok   [-] oc_reset with no argument defaults to \$OC_ARGV"; PASS=$((PASS+1))
+else echo "  FAIL oc_reset default argument left:$_left"; FAIL=$((FAIL+1)); fi
+
+# An EMPTY argument must be refused outright. Without the guard this deletes
+# `.cfg`/`.cwd`/`.projcfg`/`.stdin` out of the current directory and `rm` still
+# exits 0 — a test helper quietly removing files that are not its own.
+_ocrdir="$WORK/oc-reset-empty"; mkdir -p "$_ocrdir"
+for _sfx in .cfg .cwd .projcfg .stdin bystander; do : > "$_ocrdir/$_sfx"; done
+# Subshell: the guard's own FAIL increment is deliberately not counted here — this
+# assertion is about the files, and the guard firing is the expected path.
+( cd "$_ocrdir" && oc_reset "" ) >/dev/null 2>&1
+_survived=1
+for _sfx in .cfg .cwd .projcfg .stdin bystander; do [ -e "$_ocrdir/$_sfx" ] || _survived=0; done
+if [ "$_survived" = 1 ]; then
+  echo "  ok   [-] oc_reset refuses an empty prefix instead of clearing the cwd"; PASS=$((PASS+1))
+else echo "  FAIL oc_reset with an empty prefix deleted files from the cwd"; FAIL=$((FAIL+1)); fi
 
 oc_run 0 "opencode runs read-only under its own agent, link mode"
 oc_assert "link mode selects the relay agent" has "--agent pr-review-relay-ro"
@@ -917,7 +970,7 @@ FAKEHOME="$WORK/fakehome"; make_strict_opencode "$FAKEHOME/.opencode/bin"
 BIN5="$WORK/bin5"; mkdir -p "$BIN5"
 for t in gh claude; do ln -sf "$BIN/$t" "$BIN5/$t"; done
 ln -sf "$(command -v node)" "$BIN5/node" 2>/dev/null
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; oc_reset
 env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
   GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
@@ -939,7 +992,7 @@ fi
 # the relay returns 3 — which passes locally (node in /usr/bin) but is red on CI,
 # where setup-node installs outside /usr/bin and /bin. Symlink it in, as BIN5 does.
 ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
-rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -f "$WORK/sha_counter"; oc_reset
 # TMPDIR under $WORK so the run's round state (which falls back to
 # $TMPDIR/pr-review-relay-$(id -u) when HOME and XDG_CACHE_HOME are both unset)
 # stays inside the test sandbox. Without this the suite writes to the real
@@ -957,7 +1010,7 @@ else echo "  FAIL [got $rc, want 0] minimal env aborted the relay"; FAIL=$((FAIL
 # a `cd "$ATTACH_DIR"`, so it has to be resolved to an absolute path up front or it
 # executes from the wrong directory.
 BIN7="$WORK/bin7"; make_strict_opencode "$BIN7"
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; oc_reset
 ( cd "$WORK" && env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="./bin7/opencode" \
     bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
@@ -1045,7 +1098,7 @@ else echo "  FAIL [got $rc, want 2] bare override bypassed the containment guard
 
 # ...while an explicit PATH-ful override outside the repo remains usable.
 BINOUT="$WORK/binout"; make_strict_opencode "$BINOUT"
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; oc_reset
 ( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="$BINOUT/opencode" \
     bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
@@ -1070,7 +1123,7 @@ else echo "  FAIL [got $rc, want 2] symlink chain bypassed containment"; FAIL=$(
 mkdir -p "$WORK/legit/real" "$WORK/legit/bin"
 make_strict_opencode "$WORK/legit/real"
 ln -sf "$WORK/legit/real/opencode" "$WORK/legit/bin/opencode"
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; oc_reset
 ( cd "$WORK/dotpath" && env PATH="$WORK/legit/bin:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
     bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
@@ -1157,7 +1210,7 @@ else echo "  FAIL [got $rc, want 2] '.' on PATH slipped through"; FAIL=$((FAIL+1
 # A RELATIVE TMPDIR makes mktemp return relative paths, which then resolve against
 # the attachment dir once opencode_review cds into it.
 mkdir -p "$WORK/reltmp"
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV" "$OC_ARGV.stdin"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; oc_reset
 ( cd "$WORK" && env PATH="$BIN:$PATH" TMPDIR="reltmp" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
     bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
@@ -1194,7 +1247,7 @@ if [ "$rc" = 2 ]; then echo "  ok   [2] an explicit in-repo override is refused"
 else echo "  FAIL [got $rc, want 2] explicit in-repo override only warned"; FAIL=$((FAIL+1)); fi
 
 # ...unless the user deliberately opts in.
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; oc_reset
 ( cd "$WORK/dotpath" && env PATH="$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
     PR_RELAY_OPENCODE_ALLOW_IN_REPO=1 PR_RELAY_OPENCODE_BIN="$WORK/dotpath/oc-inrepo" \
@@ -1228,7 +1281,7 @@ else echo "  FAIL [got $rc, want 2] logical '..' let a repo-local PATH entry thr
 
 # PR_RELAY_OPENCODE_BIN wins over both PATH and the stock location.
 BIN6="$WORK/bin6"; make_strict_opencode "$BIN6"
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; oc_reset
 env PATH="$BIN5:/usr/bin:/bin" HOME="$FAKEHOME" XDG_CACHE_HOME="$WORK/cache" \
   GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_BIN="$BIN6/opencode" \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1
@@ -1252,7 +1305,7 @@ if [ -f "$RL" ]; then
     git checkout -qb feature
     echo changed > f.txt; git add f.txt; git commit -qm change
   ) >/dev/null 2>&1
-  rm -f "$OC_ARGV" "$OC_ARGV.cfg" "$OC_ARGV.stdin"
+  oc_reset
   ( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" \
       bash "$RL" --base mainline --reviewers opencode >/dev/null 2>&1 )
   rc=$?
@@ -1284,7 +1337,7 @@ if [ -f "$RL" ]; then
   rl_assert "review-local: defines its own agent" has '"pr-review-relay-ro"' "$OC_ARGV.cfg"
   # From here on the runs must NOT dispatch opencode, so clear the recorded files:
   # asserting on them afterwards would be reading the successful run above.
-  rm -f "$OC_ARGV" "$OC_ARGV.cfg" "$OC_ARGV.cwd" "$OC_ARGV.projcfg" "$OC_ARGV.stdin"
+  oc_reset
   # An explicitly requested but missing reviewer must FAIL, matching the relay —
   # otherwise `review-local --reviewers opencode` on a machine without it prints a
   # skip and exits 0, which reads as "reviewed".
@@ -1304,7 +1357,7 @@ if [ -f "$RL" ]; then
   if [ "$rc" = 3 ]; then echo "  ok   [3] review-local fails when no reviewer ran"; PASS=$((PASS+1))
   else echo "  FAIL [got $rc, want 3] review-local reported success with zero reviewers"; FAIL=$((FAIL+1)); fi
   # Duplicates are deduped, and empty items tolerated, like the relay.
-  rm -f "$OC_ARGV"
+  oc_reset
   ( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" \
       bash "$RL" --base mainline --reviewers 'opencode,,opencode' >/dev/null 2>&1 )
   rc=$?
@@ -2020,6 +2073,11 @@ done
   ARGV_LOG="$CL_ARGV" bash "$RL" --author codex --reviewers claude --base HEAD~1 >/dev/null 2>&1 )
 pr_criteria "review-local prompt" "$CL_ARGV"
 pr_assert "review-local prompt asks for conventions" "$CL_ARGV" 'AGENTS.md, CLAUDE.md' has
+# This clause said "the opencode reviewer receives it as an attached file" for as
+# long as the attachment existed, and kept saying it after #36 replaced it — because
+# #36 pinned opencode's OWN prompt and nothing pinned this one. Needle is `attached`
+# rather than `attached file`: the source wraps mid-phrase, and grep is line-oriented.
+pr_assert "review-local prompt never claims an attachment" "$CL_ARGV" 'attached' hasnot
 
 # The THIRD relay prompt is the local-context one, reached only when the stubbed gh reports this
 # checkout as the PR head. Codex flagged that --link and --diff alone leave it uncovered, which is
@@ -2038,7 +2096,7 @@ pr_assert "relay/local-context prompt asks for conventions" "$CL_ARGV" 'AGENTS.m
 # itself rather than taking it off PATH. grok: only via --prompt-file, stdin is ignored.
 OC_PROMPT_ARGV="$WORK/oc-prompt-argv.log"
 BIN_OCP="$WORK/bin-ocp"; make_strict_opencode "$BIN_OCP"
-rm -f "$OC_PROMPT_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+oc_reset "$OC_PROMPT_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
 env PATH="$BIN:$PATH" HOME="$WORK/home" \
   XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
   GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_PROMPT_ARGV" \

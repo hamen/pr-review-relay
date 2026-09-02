@@ -163,7 +163,7 @@ trap 'rm -rf "$FAILDIR"' EXIT
 # as ATTACH_DIR rather than leaving a second temp dir with a different standard.
 relay_assert_tmpdir_outside_repo "$FAILDIR"
 
-# opencode (diff attach) and grok (prompt-file + isolated cwd) need ATTACH_DIR.
+# opencode (staged diff) and grok (prompt-file + isolated cwd) need ATTACH_DIR.
 ATTACH_DIR=""
 if opencode_is_selected || grok_is_selected; then
   ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
@@ -178,8 +178,7 @@ echo "  diff: $(printf '%s' "$DIFF" | wc -l) lines, $(printf '%s' "$DIFF" | wc -
 read -r -d '' PROMPT <<'P' || true
 You are reviewing an in-progress local branch that has not yet been opened as a
 pull request. The diff is provided
-to you (on stdin or appended below; the opencode reviewer receives it as an
-attached file; the grok reviewer receives the full diff in a prompt-file).
+to you on stdin or appended below.
 Review it for correctness bugs, security
 issues, broken edge cases, regressions, missing or inadequate tests for the
 behaviour the change touches, violations of the repository's own conventions,

@@ -644,7 +644,7 @@ trap 'rm -rf "$STATUS_DIR"' EXIT
 # command substitution, backgrounded subshells as under --parallel): all cleaned on
 # SIGTERM, and adding a TERM handler measurably delayed it. SIGKILL leaks, but no
 # trap of any kind can prevent that.
-# opencode (diff attach) and grok (prompt-file + isolated cwd) need a temp dir outside
+# opencode (staged diff) and grok (prompt-file + isolated cwd) need a temp dir outside
 # STATUS_DIR. Don't allocate (or widen the trap) when neither is selected.
 ATTACH_DIR=""
 if opencode_is_selected || grok_is_selected; then
