@@ -179,3 +179,113 @@ panel_resolve() {
   if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
   printf '%s' "$fallback"
 }
+
+# --- Is this actually a review? ----------------------------------------------
+# The relay used to fail closed only on an EMPTY review, so anything with one
+# non-whitespace character posted as a verdict and the round exited 0. Measured, on
+# 2026-09-01: four bodies of 156-246 bytes, all exit 0, all posted, none a review —
+# and a four-seat panel silently became two while printing success.
+#
+# This does NOT invent a standard. Every prompt, for every seat, in both callers,
+# already says: "Group findings by severity: Blocker / Should-fix / Nit. If it looks
+# good, say so in one line." So the contract a reviewer already accepted is: name a
+# severity, or say it looks good.
+#
+# Two checks, both must hold:
+#
+#   POSITIVE  a severity or approval marker, at a word boundary, that is not merely
+#             the prompt echoed back.
+#   NEGATIVE  it must not announce work still to come.
+#
+# The negative check exists because of one recovered body:
+#
+#     Blocker
+#     - None visible in the readable portion of the diff (lines 1-1182 of the
+#       attachment). Reading the remainder before concluding.
+#
+# That names a severity, at a word boundary, not echoed from any prompt — and it is
+# a stall. A marker-only gate accepts it. It is why the stall list is here at all.
+#
+# The stall veto is deliberately narrow, because "let me read" is also what a
+# SUCCESSFUL run says on its way to a verdict (codex runs without
+# --output-last-message, so its stdout is a raw transcript). So the veto applies
+# only when there is no approval marker, and only to the TAIL — every recovered
+# failure announces the future work as the last thing it says.
+#
+# grep, not a shell built-in: this function runs from review_with, long after the
+# PATH guard, unlike the config loader above it.
+#
+# No `-q`, for portability rather than for a bug seen here. The worry is real in
+# principle: `set -o pipefail` is on in both callers, so if grep exits at its first
+# match the writer takes SIGPIPE and the PIPELINE reports 141 — a valid review
+# rejected for being large. MEASURED on this machine (bash 5.2.37, GNU grep 3.11):
+# it does not happen. `printf '%s' "$big" | grep -qE 'match-at-the-start'` returned 0
+# on 20 runs each at 100KB, 200KB, 1MB and 5MB. GNU grep drains its input. The same
+# shape with `head -c 1` in place of grep returns 141 every time, so SIGPIPE here is
+# reachable — this grep simply does not trigger it.
+#
+# So `>/dev/null` instead of `-q` is not fixing an observed failure; it is refusing
+# to depend on one implementation's draining behaviour, at a cost of nothing. BSD and
+# busybox grep are not measured here.
+#
+# No `<<<` either, and that one IS load-bearing: it is a parse error in dash, which
+# would make this whole file unsourceable rather than just this function.
+review_looks_like_a_review() { # <text>   0 = yes, 1 = no
+  _rlr_norm= _rlr_marker= _rlr_approve= _rlr_tail=
+
+  # Collapse every whitespace run to one space and lowercase the lot. Both matter:
+  # the prompt this guards against is hard-wrapped FIVE different ways across the
+  # five sites (review-local breaks inside "If it looks / good"), so nothing can be
+  # matched as a flat literal; and lowercasing makes every match below
+  # case-insensitive by construction, the strip included.
+  # The leading and trailing space are load-bearing: they give a body that is
+  # exactly "LGTM" the word neighbours the boundary patterns need.
+  _rlr_norm=" $(printf '%s' "$1" | tr '\n\r\t' '   ' | tr -s ' ' | tr '[:upper:]' '[:lower:]') "
+
+  # Strip the prompt's own instructions before looking for markers. There are TWO
+  # marker-bearing sentences, not one — the "report missing tests" line names both
+  # Should-fix and Blocker — so an agent that reflects its instructions back would
+  # otherwise pass this gate trivially, which is the very failure class it exists
+  # to catch.
+  _rlr_norm=$(printf '%s' "$_rlr_norm" | sed \
+    -e 's/report missing tests as should-fix, unless the untested path is itself a blocker\.//g' \
+    -e 's/group findings by severity: blocker \/ should-fix \/ nit\.//g' \
+    -e 's/blocker \/ should-fix \/ nit//g' \
+    -e 's/if it looks good, say so in one line\.//g')
+
+  # A verdict, named. Plurals are in the pattern, not bolted on as extra approval
+  # phrases: "## Blockers" and "Nits:" are ordinary review headings, and rejecting a
+  # finished review for using them would be this gate failing at its own job.
+  # Boundaries are "not alphanumeric" rather than \< \>, which is a GNU extension:
+  # markdown puts *, # and : against these words constantly.
+  printf '%s' "$_rlr_norm" \
+    | grep -E '(^|[^a-z0-9])(blockers?|nits?|should[- ]fixe?s?)([^a-z0-9]|$)' >/dev/null \
+    && _rlr_marker=1
+  printf '%s' "$_rlr_norm" \
+    | grep -E '(^|[^a-z0-9])(lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9]|$)' >/dev/null \
+    && { _rlr_marker=1; _rlr_approve=1; }
+
+  [ -n "$_rlr_marker" ] || return 1
+
+  # An approving review may legitimately describe reading: "after reading the rest
+  # of the diff, this looks good" is a verdict, not a stall. None of the recovered
+  # failures carries an approval marker, so this exemption costs nothing.
+  [ -n "$_rlr_approve" ] && return 0
+
+  # LAST SENTENCE only, not a byte window. Mid-transcript narration is normal — a
+  # successful codex run says "let me read the diff first" on its way to a verdict —
+  # and a byte window is the wrong shape for it: on a short body the window is the
+  # whole body, so "let me read the diff first. now the tests. should-fix: ..." would
+  # be vetoed despite ending in a verdict. Measured: that fixture failed a 500-byte
+  # window and passes this.
+  #
+  # Every recovered failure announces the future work as its FINAL sentence, so this
+  # anchor keeps all of them. Drop a trailing period, then take everything after the
+  # last one — greedy .* leaves exactly the closing sentence.
+  _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[. ]*$//' -e 's/.*\.//')
+  printf '%s' "$_rlr_tail" | grep -E \
+    'reading the rest|reading the remainder|read the remaining|before i can|before concluding|before reviewing|let me read|i need the rest' \
+    >/dev/null && return 1
+
+  return 0
+}

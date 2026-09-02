@@ -251,6 +251,108 @@ if env -u HOME -i PATH=/usr/bin:/bin bash -c 'set -u; . "$0"; panel_config_load;
   ok "an unset HOME does not abort the loader"
 else bad "unset HOME aborted panel_config_load"; fi
 
+
+# --- review_looks_like_a_review ---------------------------------------------
+# The relay used to fail closed only on an EMPTY review, so a stall or a fragment of
+# garbage posted as a verdict and the round exited 0. Four such bodies were recovered
+# byte-exact from ~/.cache/pr-review-relay on 2026-09-01 and are the fixtures below;
+# they are the point of this helper, so they are quoted rather than paraphrased.
+#
+# NOT via resolve(): that runs under `env -i PATH=/usr/bin:/bin` for config-precedence
+# reasons that do not apply here, and this helper needs the real PATH for grep/sed/tr.
+. "$LIB"
+
+rlr() { # rlr <yes|no> <label> <body>
+  local want="$1" label="$2" body="$3" got
+  if review_looks_like_a_review "$body"; then got=yes; else got=no; fi
+  if [ "$got" = "$want" ]; then ok "review gate: $label"; else bad "review gate: $label — got $got, want $want"; fi
+}
+
+# The four recovered failures. All exited 0. All were posted as verdicts.
+rlr no "recovered A — capped at line 1183" \
+  'The diff is capped at line 1183 — I need the rest of it before I can verify the PR against the plan. Let me read the remaining chunks.'
+# B is why the stall check exists at all: it NAMES a severity, at a word boundary, not
+# echoed from any prompt — and it is an agent saying it has not finished.
+rlr no "recovered B — names Blocker, still a stall" \
+  'Blocker
+- None visible in the readable portion of the diff (lines 1–1182 of the attachment). Reading the remainder before concluding.'
+rlr no "recovered C — reading the rest" 'Reading the rest of the diff before reviewing.'
+rlr no "recovered D — mojibake tool-call fragment" \
+  '៭Read"},{"filePath":"/tmp/tmp.L1BXCtTGcA/oc-diff.auQm5v","offset":1318'
+
+# Real closing lines from this panel, verbatim. A gate that rejects the reviews this
+# repo's own reviewers actually write is the wrong gate — two of these three contain
+# no severity word at all, which is why the approval list exists.
+rlr yes "real: codex closing #37"    'No findings. `bin/ci` passed: 355 tests, 0 failures.'
+rlr yes "real: grok closing #36"     'Looks good: stdin redirect replaces `-f` as planned, prompt and tests match.'
+rlr yes "real: opencode closing #37" '**LGTM** — the diff implements the plan exactly.'
+
+# Markers, including the plural headings reviewers actually use. `## Blockers` and
+# `Nits:` are ordinary style; rejecting a finished review over them would be this
+# gate failing at its own job.
+rlr yes "severity: Blocker heading"  '## Blocker
+- something real'
+rlr yes "severity: Blockers plural"  '## Blockers
+- two of them'
+rlr yes "severity: Nits: plural"     'Nits:
+- naming'
+rlr yes "severity: Should-fixes"     'Should-fixes: a couple.'
+rlr yes "severity: Should fix, space" 'Should fix: the thing.'
+rlr yes "severity: bold markdown"    '**Blocker** — none'
+rlr yes "approval: No blockers."     'No blockers.'
+rlr yes "approval: bare LGTM"        'LGTM'
+rlr yes "approval: lowercase"        'lgtm'
+
+# Word boundaries. `nit` lives inside unit/init/monitor/definitely, `blocker` inside
+# unblocked; a substring match would call ordinary prose a verdict.
+rlr no "boundary: unit test"      'I read the unit test and it seemed fine to me.'
+rlr no "boundary: initial/monitor" 'The initial monitor definitely needs work here.'
+rlr no "boundary: unblocked"      'This unblocked the pipeline nicely.'
+
+# Prompt echo. Every prompt contains TWO marker-bearing sentences, and the pair is
+# hard-wrapped five different ways across the five sites — review-local breaks inside
+# "If it looks / good" — so these are the real wrappings, not a tidy one-liner.
+rlr no "echo: relay prompt (wraps after Nit.)" \
+  'Report missing tests as Should-fix, unless the untested path is itself a Blocker.
+Be concise. Group findings by severity: Blocker / Should-fix / Nit.
+If it looks good, say so in one line.'
+rlr no "echo: review-local prompt (wraps inside looks/good)" \
+  'Report missing tests as Should-fix, unless the untested path is itself a
+Blocker. Be concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
+good, say so in one line.'
+rlr no "echo: opencode prompt (wraps before Blocker)" \
+  'Report missing tests as Should-fix, unless the untested path is itself a
+Blocker. Be concise. Group findings by severity:
+Blocker / Should-fix / Nit. If it looks good, say so in one line.'
+rlr no "echo: in CAPS" \
+  'REPORT MISSING TESTS AS SHOULD-FIX, UNLESS THE UNTESTED PATH IS ITSELF A BLOCKER. BE CONCISE. GROUP FINDINGS BY SEVERITY: BLOCKER / SHOULD-FIX / NIT. IF IT LOOKS GOOD, SAY SO IN ONE LINE.'
+
+# The stall check must not eat a real review. "let me read" is also what a SUCCESSFUL
+# codex run says on its way to a verdict — it runs without --output-last-message, so
+# its stdout is a raw transcript. Hence: only when there is no approval marker, and
+# only in the closing sentence.
+rlr yes "stall: approval that mentions reading" 'After reading the rest of the diff, this looks good.'
+rlr yes "stall: narration first, verdict last" \
+  'Let me read the diff first. Now checking the tests. Should-fix: the helper needs a guard.'
+
+# Known limit, asserted so it is deliberate rather than discovered: a negated approval
+# still contains the approval marker.
+rlr yes "known limit: negated approval passes" 'I do not think this looks good.'
+
+# A large body must be handled at all — no argv limit, no truncation, no pipeline
+# accident. This does NOT catch a `-q` regression: measured on GNU grep 3.11, `-q`
+# returns 0 up to 5MB because grep drains its input, so swapping it back is
+# behaviourally identical here. The helper avoids `-q` on portability grounds, not
+# because this fixture would fail without it — said plainly, because a test that
+# looks like it guards something it does not is worse than no test.
+_rlr_big="LGTM — everything checks out.
+$(head -c 200000 /dev/zero | tr '\0' 'x')"
+rlr yes "pipefail: 200 KB body with a marker at the start" "$_rlr_big"
+
+# Empty belongs to the callers' own empty branch, which has its own message and dumps
+# stderr. The helper still says no, so ordering is the callers' responsibility.
+rlr no "empty body" ''
+
 echo "-------------------------------------------"
 echo "panel config tests: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
