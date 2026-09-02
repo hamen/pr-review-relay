@@ -641,6 +641,12 @@ A reply now has to do what every reviewer prompt already asks for: **name a seve
 one of the four recovered failures reads `Blocker` / *"…Reading the remainder before concluding"*, so
 naming a severity is not on its own enough.
 
+The stall test reads the **closing sentence**, and order is what it turns on:
+*"After reading the rest of the diff, this looks good"* is a verdict and passes;
+*"Looks good. Let me read the remainder before concluding"* is a stall wearing an approval,
+and is rejected. An approval earlier in the body does not buy an exemption for a closing
+sentence that says the work is unfinished.
+
 A body that fails either test is **not posted**, is printed in full on stderr so you can see what came
 back, and fails the round (`3`). A review the relay itself truncated is exempt: the missing verdict may
 be the relay's own doing, and that case is already unclean and already published as evidence.

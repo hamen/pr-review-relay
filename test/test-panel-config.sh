@@ -262,9 +262,15 @@ else bad "unset HOME aborted panel_config_load"; fi
 # reasons that do not apply here, and this helper needs the real PATH for grep/sed/tr.
 . "$LIB"
 
-rlr() { # rlr <yes|no> <label> <body>
+# want: yes | no | stall  — "stall" pins the THREE-valued contract (0 a review,
+# 1 no verdict, 2 a verdict then a stall). Collapsing every non-zero to "no" would
+# leave the two rejection reasons interchangeable, and both callers now print a
+# different sentence for each.
+rlr() { # rlr <yes|no|stall> <label> <body>
   local want="$1" label="$2" body="$3" got
-  if review_looks_like_a_review "$body"; then got=yes; else got=no; fi
+  review_looks_like_a_review "$body"
+  case $? in 0) got=yes;; 2) got=stall;; *) got=no;; esac
+  [ "$want" = no ] && [ "$got" = stall ] && got=no   # "no" accepts either rejection
   if [ "$got" = "$want" ]; then ok "review gate: $label"; else bad "review gate: $label — got $got, want $want"; fi
 }
 
@@ -348,7 +354,14 @@ rlr no "echo: in CAPS" \
 # codex run says on its way to a verdict — it runs without --output-last-message, so
 # its stdout is a raw transcript. Hence: only when there is no approval marker, and
 # only in the closing sentence.
-rlr yes "stall: approval that mentions reading" 'After reading the rest of the diff, this looks good.'
+# The exemption for an approving review is checked on the CLOSING SENTENCE only.
+# Exempting the whole body accepted "Looks good. Let me read the remainder before
+# concluding." — a stall wearing an approval. Order is what separates them.
+rlr yes   "stall: read first, verdict last" 'After reading the rest of the diff, this looks good.'
+rlr stall "stall: verdict first, then still reading" 'Looks good. Let me read the remainder before concluding.'
+rlr stall "stall: recovered B is reported AS a stall" 'Blocker
+- None visible in the readable portion of the diff. Reading the remainder before concluding.'
+rlr no    "no verdict is reported as no verdict" 'Reading the rest of the diff before reviewing.'
 rlr yes "stall: narration first, verdict last" \
   'Let me read the diff first. Now checking the tests. Should-fix: the helper needs a guard.'
 

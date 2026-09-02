@@ -275,10 +275,12 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
 
   [ -n "$_rlr_marker" ] || return 1   # nothing that claims a verdict
 
-  # An approving review may legitimately describe reading: "after reading the rest
-  # of the diff, this looks good" is a verdict, not a stall. None of the recovered
-  # failures carries an approval marker, so this exemption costs nothing.
-  [ -n "$_rlr_approve" ] && return 0
+  # The exemption for an approving review is deliberately narrow, and it is checked
+  # on the CLOSING SENTENCE below rather than here. Exempting the whole body was too
+  # wide: "Looks good. Let me read the remainder before concluding." was accepted —
+  # a stall wearing an approval. What the exemption must protect is the opposite
+  # order, "after reading the rest of the diff, this looks good", where the reading
+  # is finished and the verdict is the last word.
 
   # LAST SENTENCE only, not a byte window. Mid-transcript narration is normal — a
   # successful codex run says "let me read the diff first" on its way to a verdict —
@@ -298,7 +300,15 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
   _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[. ]*$//' -e 's/.*\. //')
   printf '%s' "$_rlr_tail" | grep -E \
     'reading the rest|reading the remainder|read the remaining|before i can|before concluding|before reviewing|let me read|i need the rest' \
-    >/dev/null && return 2   # claims a verdict, then says it is still working
+    >/dev/null || return 0
 
-  return 0
+  # The closing sentence mentions unfinished work. That is a stall UNLESS the same
+  # sentence also delivers the verdict — "after reading the rest of the diff, this
+  # looks good" is a review; "let me read the remainder before concluding" is not,
+  # whatever an earlier sentence claimed.
+  printf '%s' "$_rlr_tail" \
+    | grep -E '(^|[^a-z0-9_])(lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' \
+    >/dev/null && return 0
+
+  return 2   # claims a verdict, then says it is still working
 }

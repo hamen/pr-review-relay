@@ -19,7 +19,9 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   A reply must now do what every reviewer prompt already asks for — **name a severity
   (Blocker / Should-fix / Nit), or say it looks good** — and must not announce work still to come.
   Both halves are needed: one recovered failure reads `Blocker` followed by *"…Reading the remainder
-  before concluding"*, so a marker on its own is not a verdict. A rejected body is **not posted**, is
+  before concluding"*, so a marker on its own is not a verdict. The stall test reads the closing
+  sentence and turns on order — *"after reading the rest, this looks good"* passes, *"looks good, let
+  me read the remainder"* does not. A rejected body is **not posted**, is
   printed in full on stderr, and fails the round. Relay-truncated reviews are exempt, since the
   missing marker may be the relay's own doing.
 

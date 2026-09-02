@@ -1348,30 +1348,52 @@ if [ -f "$RL" ]; then
   #
   # $FAILDIR is mktemp -d with an EXIT trap and no env override, so it cannot be
   # inspected after the run. The observable contract is the exit code and the message.
+  # Streams captured SEPARATELY. Merging them with 2>&1 cannot prove the documented
+  # rule — a rejected body goes to stderr and never to stdout, which is the channel
+  # the launching agent reads as the review.
   _rlnr=$( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" NONREVIEW=claude \
-      bash "$RL" --base mainline --reviewers claude 2>&1 )
+      bash "$RL" --base mainline --reviewers claude 2>"$WORK/rl_err.log" )
   _rlnr_rc=$?
-  if [ "$_rlnr_rc" != 0 ]; then
-    echo "  ok   [$_rlnr_rc] review-local fails on a non-review"; PASS=$((PASS+1))
+  _rlnr_err=$(cat "$WORK/rl_err.log")
+  # Exit 3, not merely non-zero: 1 and 2 are usage errors and 4 is a loop cap, so
+  # "non-zero" would pass for three wrong reasons.
+  if [ "$_rlnr_rc" = 3 ]; then
+    echo "  ok   [3] review-local fails on a non-review"; PASS=$((PASS+1))
   else
-    echo "  FAIL [got 0] review-local accepted a non-review"; FAIL=$((FAIL+1))
+    echo "  FAIL [got $_rlnr_rc, want 3] review-local exit code on a non-review"; FAIL=$((FAIL+1))
+  fi
+  if ! grep -q 'Reading the rest of the diff' <<< "$_rlnr"; then
+    echo "  ok   [-] review-local keeps the rejected body off stdout"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local put the rejected body on stdout"; FAIL=$((FAIL+1))
   fi
   if ! grep -q '========== Claude review ==========' <<< "$_rlnr"; then
     echo "  ok   [-] review-local does not print a non-review under the review banner"; PASS=$((PASS+1))
   else
     echo "  FAIL review-local printed a non-review as a review"; FAIL=$((FAIL+1))
   fi
-  if grep -q 'not a review' <<< "$_rlnr"; then
+  if grep -q 'not a review' <<< "$_rlnr_err"; then
     echo "  ok   [-] review-local says why it rejected the body"; PASS=$((PASS+1))
   else
     echo "  FAIL review-local rejected silently"; FAIL=$((FAIL+1))
   fi
   # stderr IS the delivery for this caller — it posts nowhere — so the body has to be
   # visible there, or the gate deletes the evidence it rejected.
-  if grep -q 'Reading the rest of the diff' <<< "$_rlnr"; then
-    echo "  ok   [-] review-local shows the rejected body"; PASS=$((PASS+1))
+  if grep -q 'Reading the rest of the diff' <<< "$_rlnr_err"; then
+    echo "  ok   [-] review-local shows the rejected body on stderr"; PASS=$((PASS+1))
   else
     echo "  FAIL review-local swallowed the rejected body"; FAIL=$((FAIL+1))
+  fi
+  # Recovered body B, end to end, on THIS caller. The relay side pins it; review-local
+  # did not, so a caller that wired the marked-stall path wrong kept the suite green.
+  _rlb=$( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" NONREVIEW_STALL=claude \
+      bash "$RL" --base mainline --reviewers claude 2>"$WORK/rl_err_b.log" )
+  _rlb_rc=$?
+  if [ "$_rlb_rc" = 3 ] && grep -q 'still reading' "$WORK/rl_err_b.log" \
+     && ! grep -q '========== Claude review ==========' <<< "$_rlb"; then
+    echo "  ok   [3] review-local rejects a stall that names Blocker"; PASS=$((PASS+1))
+  else
+    echo "  FAIL [got $_rlb_rc] review-local mishandled a marked stall"; FAIL=$((FAIL+1))
   fi
   # From here on the runs must NOT dispatch opencode, so clear the recorded files:
   # asserting on them afterwards would be reading the successful run above.
@@ -2891,10 +2913,13 @@ _tot=$(wc -c < "$_side" 2>/dev/null || echo 0)
 # post log, the way --no-post is asserted below. (Grepping GH_POST_LOG for the body
 # would pass vacuously — the log records the argv and the body travels in --body-file.)
 s_reset; : > "$WORK/posted.log"
+# Separate streams: merging them cannot prove the body stays OFF stdout, which is
+# what the launching agent reads as the review.
 _nr_out=$(env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" NONREVIEW=claude \
-  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>&1)
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>"$WORK/nr_err.log")
 _nr_rc=$?
+_nr_err=$(cat "$WORK/nr_err.log")
 [ "$_nr_rc" = 3 ]; ok_if $? "a non-review fails the round" "rc=$_nr_rc"
 [ ! -s "$WORK/posted.log" ]; ok_if $? "a non-review is not posted to the PR" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
 # The delivery contract, asserted rather than implied. The launching agent reads the
@@ -2903,21 +2928,24 @@ _nr_rc=$?
 # body has to be visible SOMEWHERE, or the gate deletes the evidence it rejected.
 printf '%s' "$_nr_out" | grep -q '========== Claude review =========='
 [ $? -ne 0 ]; ok_if $? "a non-review does not print under the review banner" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
-printf '%s' "$_nr_out" | grep -q 'not a review'; ok_if $? "the relay says why it rejected the body" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
-printf '%s' "$_nr_out" | grep -q 'Reading the rest of the diff'; ok_if $? "the rejected body itself is shown" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_err" | grep -q 'not a review'; ok_if $? "the relay says why it rejected the body" "err=$(printf '%s' "$_nr_err" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_out" | grep -q 'Reading the rest of the diff'
+[ $? -ne 0 ]; ok_if $? "the rejected body stays off stdout" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_err" | grep -q 'Reading the rest of the diff'; ok_if $? "the rejected body itself is shown on stderr" "err=$(printf '%s' "$_nr_err" | tail -3 | tr '\n' '|')"
 # The two rejection reasons are different problems with different fixes, so they must
 # not read the same. "no verdict" here; "a verdict, then a stall" on the body below.
-printf '%s' "$_nr_out" | grep -q 'names no severity'; ok_if $? "a body with no verdict says so" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_err" | grep -q 'names no severity'; ok_if $? "a body with no verdict says so" "err=$(printf '%s' "$_nr_err" | tail -3 | tr '\n' '|')"
 
 # The recovered body that names a severity. A gate built only on markers accepts this
 # one, which is the whole reason the stall check exists.
 s_reset; : > "$WORK/posted.log"
 _nrs_out=$(env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" NONREVIEW_STALL=claude \
-  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>&1)
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>"$WORK/nrs_err.log")
 _nrs_rc=$?
+_nrs_err=$(cat "$WORK/nrs_err.log")
 [ "$_nrs_rc" = 3 ]; ok_if $? "a stall that names Blocker still fails the round" "rc=$_nrs_rc"
-printf '%s' "$_nrs_out" | grep -q 'still reading'; ok_if $? "a stall is reported as a stall, not as a missing verdict" "out=$(printf '%s' "$_nrs_out" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nrs_err" | grep -q 'still reading'; ok_if $? "a stall is reported as a stall, not as a missing verdict" "err=$(printf '%s' "$_nrs_err" | tail -3 | tr '\n' '|')"
 [ ! -s "$WORK/posted.log" ]; ok_if $? "a stall that names Blocker is not posted" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
 
 # Ordering, pinned. The bench short-circuits on `rc != 0 AND a quota match`, so a
