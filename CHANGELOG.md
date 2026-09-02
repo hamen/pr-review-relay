@@ -25,6 +25,12 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
   No permission, working-directory, or guard changes: the read-only posture is untouched.
 
+- **`review-local`'s shared prompt still told five reviewers that OpenCode gets the diff as an attached
+  file.** It has not since the change above. The sentence survived because that change pinned
+  OpenCode's own prompt and nothing pinned this one — so it is deleted *and* pinned now. The clause was
+  narration about two seats that never read the string in the first place (`opencode` and `grok`
+  compose their own prompts), so it is gone rather than corrected.
+
 ## [1.6.0] — 2026-08-21
 
 ### Fixed
