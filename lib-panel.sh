@@ -231,7 +231,7 @@ panel_resolve() {
 # No `<<<` either, and that one IS load-bearing: it is a parse error in dash, which
 # would make this whole file unsourceable rather than just this function.
 review_looks_like_a_review() { # <text>   0 = yes, 1 = no
-  _rlr_norm= _rlr_marker= _rlr_approve= _rlr_tail=
+  local _rlr_norm= _rlr_marker= _rlr_approve= _rlr_tail=
 
   # Collapse every whitespace run to one space and lowercase the lot. Both matter:
   # the prompt this guards against is hard-wrapped FIVE different ways across the
@@ -258,11 +258,16 @@ review_looks_like_a_review() { # <text>   0 = yes, 1 = no
   # finished review for using them would be this gate failing at its own job.
   # Boundaries are "not alphanumeric" rather than \< \>, which is a GNU extension:
   # markdown puts *, # and : against these words constantly.
+  # `_` counts as a WORD character, not a boundary. Without that, a raw transcript
+  # containing an identifier like `monitor_nit_state` reads as a verdict — measured,
+  # it was accepted — and a raw transcript is exactly what a broken agent emits (one
+  # of the recovered failures is a leaked tool-call fragment).
+  # `should[- ]fix(es)?` and not `fixe?s?`, which also matched `should-fixs`.
   printf '%s' "$_rlr_norm" \
-    | grep -E '(^|[^a-z0-9])(blockers?|nits?|should[- ]fixe?s?)([^a-z0-9]|$)' >/dev/null \
+    | grep -E '(^|[^a-z0-9_])(blockers?|nits?|should[- ]fix(es)?)([^a-z0-9_]|$)' >/dev/null \
     && _rlr_marker=1
   printf '%s' "$_rlr_norm" \
-    | grep -E '(^|[^a-z0-9])(lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9]|$)' >/dev/null \
+    | grep -E '(^|[^a-z0-9_])(lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' >/dev/null \
     && { _rlr_marker=1; _rlr_approve=1; }
 
   [ -n "$_rlr_marker" ] || return 1

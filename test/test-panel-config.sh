@@ -299,7 +299,16 @@ rlr yes "severity: Nits: plural"     'Nits:
 rlr yes "severity: Should-fixes"     'Should-fixes: a couple.'
 rlr yes "severity: Should fix, space" 'Should fix: the thing.'
 rlr yes "severity: bold markdown"    '**Blocker** — none'
+rlr yes "approval: nothing to flag"  'Nothing to flag.'
+rlr yes "approval: none found"       'Blockers: none found.'
 rlr yes "approval: No blockers."     'No blockers.'
+# Underscores are word characters, not boundaries. A raw transcript full of
+# identifiers is exactly what a broken agent emits, and `monitor_nit_state` read as a
+# verdict until this was fixed — measured, not imagined.
+rlr no "boundary: identifier with _nit_" 'monitor_nit_state pending and nothing else'
+rlr no "boundary: _blocker_ as a name"   'setting _blocker_ = 1 and moving on'
+rlr no "boundary: should-fixs is not a marker" 'should-fixs: whatever'
+rlr yes "case: uppercase severity"   'BLOCKER: the guard is missing.'
 rlr yes "approval: bare LGTM"        'LGTM'
 rlr yes "approval: lowercase"        'lgtm'
 

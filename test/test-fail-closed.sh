@@ -2884,12 +2884,20 @@ _tot=$(wc -c < "$_side" 2>/dev/null || echo 0)
 # post log, the way --no-post is asserted below. (Grepping GH_POST_LOG for the body
 # would pass vacuously — the log records the argv and the body travels in --body-file.)
 s_reset; : > "$WORK/posted.log"
-env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+_nr_out=$(env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
   GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" NONREVIEW=claude \
-  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>&1)
 _nr_rc=$?
 [ "$_nr_rc" = 3 ]; ok_if $? "a non-review fails the round" "rc=$_nr_rc"
 [ ! -s "$WORK/posted.log" ]; ok_if $? "a non-review is not posted to the PR" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+# The delivery contract, asserted rather than implied. The launching agent reads the
+# relay's stdout, so a rejected body must not arrive there wearing a review header —
+# that would be the same harm the gate exists to stop, one channel over. And the
+# body has to be visible SOMEWHERE, or the gate deletes the evidence it rejected.
+printf '%s' "$_nr_out" | grep -q '========== Claude review =========='
+[ $? -ne 0 ]; ok_if $? "a non-review does not print under the review banner" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_out" | grep -q 'not a review'; ok_if $? "the relay says why it rejected the body" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_out" | grep -q 'Reading the rest of the diff'; ok_if $? "the rejected body itself is shown" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
 
 # The recovered body that names a severity. A gate built only on markers accepts this
 # one, which is the whole reason the stall check exists.
@@ -2914,6 +2922,19 @@ _nrq_rc=$?
 # Two seats on purpose: benching the ONLY reviewer empties the panel, which is its own
 # exit 3, and would hide whether the bench or the gate produced it.
 [ "$_nrq_rc" = 0 ]; ok_if $? "quota is benched before the non-review gate can see it" "rc=$_nrq_rc"
+
+# The sibling. QUOTA_TEXT_OK exits 0, so the bench does NOT short-circuit it (the bench
+# needs rc!=0 AND a quota match) — it reaches the gate and passes only because it says
+# "Looks good". This is the half that proves the bench's conjunction, not merely its
+# position: if the bench ever matched on text alone, this seat would be benched instead
+# of reviewed.
+s_reset; : > "$WORK/posted.log"
+env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" QUOTA_TEXT_OK=claude \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+_nrqt_rc=$?
+[ "$_nrqt_rc" = 0 ]; ok_if $? "a review that merely mentions quota passes the gate" "rc=$_nrqt_rc"
+[ -s "$WORK/posted.log" ]; ok_if $? "and it is posted, not benched" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
 
 # --no-post. The reviews are the delivery on stdout, and the pull request is not touched: used when
 # the PR belongs to someone else and a human has to read the review before anybody else does. The
