@@ -6,6 +6,24 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `opencode` reviewer silently reviewed only the first ~1035 lines of a large pull request —
+  and posted a note about it as though it were a verdict.** The diff went in as an OpenCode `-f`
+  attachment, and OpenCode injects only part of a large one, expecting the agent to read the rest.
+  This agent runs with `"*": "deny"`, so it cannot read anything: it stalled and returned whatever it
+  had. On a 1496-line pull request the seat failed four times across both input modes, and **three of
+  those exited `0`**, because the relay only fails closed on an EMPTY review — so a round could thin
+  itself from four reviewers to two and still report success. Not a model or a quota problem: it is
+  size-dependent, and it had begun biting in other repositories the same evening.
+  The diff is now fed on **stdin**, which OpenCode appends to the prompt whole. The staged file, its
+  short-write guard and its path canonicalisation all stay — only the flag changed to a redirect, so
+  a pipeline cannot report `141` for a large diff the agent never drained. Verified live to 90 KB
+  under the same deny-everything policy, and pinned by a 2001-line regression test that asserts the
+  delivered bytes exactly. The prompt no longer tells the agent that nothing is on stdin.
+
+  No permission, working-directory, or guard changes: the read-only posture is untouched.
+
 ## [1.6.0] — 2026-08-21
 
 ### Fixed
