@@ -332,12 +332,12 @@ opencode_resolve_bin() {
 # DENY EVERYTHING. Not "deny writes and allow reads" — nothing at all.
 #
 # The read tools were allowed for most of this change's life, on the assumption the
-# reviewer needed them. It does not: the diff arrives as prompt CONTENT via -f, not
-# through a tool call, so a review of the attachment works with every tool denied
-# (verified — same findings, no tools).
+# reviewer needed them. It does not: the diff arrives as prompt CONTENT on stdin,
+# not through a tool call, so the review works with every tool denied (verified —
+# same findings, no tools).
 #
 # Keeping read/grep/glob was the last exfiltration route. They were not confined to
-# the attachment, and the relay POSTS the result to the PR — so a prompt-injected
+# the diff, and the relay POSTS the result to the PR — so a prompt-injected
 # diff could have the model read a credential file and quote it into a public
 # comment. Nothing to deny halfway: the reviewer needs no filesystem at all. Seven weaker designs were tried
 # during cross-review and every one was verified broken by hand before being
@@ -371,7 +371,7 @@ opencode_resolve_bin() {
 #
 # "share": "disabled" is not incidental. With a user config set to `"share":"auto"`
 # — OpenCode's own docs warn about it for proprietary code — the session, including
-# the attached diff, is published to a public link. For a private PR that is silent
+# the diff, is published to a public link. For a private PR that is silent
 # exfiltration triggered by someone else's setting, so the policy pins it off.
 #
 # KNOWN, ACCEPTED RESIDUAL: this is not OpenCode's final config layer — managed
@@ -402,10 +402,14 @@ OPENCODE_RO_CONFIG='{"share":"disabled","permission":{"*":"deny"},"agent":{"pr-r
 #
 # Prints the review on stdout; returns the agent's exit code.
 #
-# The diff is ATTACHED as a file rather than inlined: shell is denied, so the agent
-# can never fetch anything itself, and attaching keeps a large diff off the argv
+# The diff is fed on STDIN rather than inlined in the argv: shell is denied, so the
+# agent can never fetch anything itself, and stdin keeps a large diff off the argv
 # (Windows caps it near 32K) and sidesteps any inline-fallback size threshold that
 # would otherwise leave the reviewer with nothing to read on a big PR.
+#
+# It used to be an `-f` attachment. opencode injects only the first ~1035 lines of
+# one and expects the agent to fetch the rest, which this agent cannot do with every
+# tool denied. stdin is appended to the prompt whole.
 #
 # Run from <attach_dir>, never the repo, AND with OPENCODE_DISABLE_PROJECT_CONFIG=1.
 # Both, because the config loader walks UP from its working directory to the
@@ -414,8 +418,9 @@ OPENCODE_RO_CONFIG='{"share":"disabled","permission":{"*":"deny"},"agent":{"pr-r
 # to be bypassable, so these stay stacked.
 #
 # `--pure` skips external plugins, which load and can execute code at startup
-# regardless of permissions. `-f` takes an array, so `--` must precede the prompt or
-# it is swallowed as another filename and opencode dies with "File not found".
+# regardless of permissions. `--` must precede the prompt: $context_block is
+# prepended raw, and a --context-file can start with a `-`, which the parser would
+# read as a flag. It also keeps the prompt the last element of the argv.
 # relay_assert_tmpdir_outside_repo <dir>
 #
 # mktemp honours TMPDIR, so a TMPDIR inside the checkout puts the attachment dir —
@@ -471,7 +476,7 @@ opencode_review() {
     echo "cannot create the diff attachment in $attach_dir" >&2; return 1
   }
   # Canonicalize before the cd below: with a RELATIVE TMPDIR, mktemp hands back a
-  # relative path, and `-f "$diff_file"` / `2>"$errf"` would then resolve against
+  # relative path, and `<"$diff_file"` / `2>"$errf"` would then resolve against
   # the attachment dir instead of where the files actually are.
   diff_file="$(opencode_abs_path "$diff_file")"
   errf="$(opencode_abs_path "$errf")"
@@ -480,7 +485,20 @@ opencode_review() {
   # the relay would count that as a clean reviewer. Fail instead.
   printf '%s' "$diff" > "$diff_file" || { echo "cannot write the diff attachment" >&2; return 1; }
 
-  oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is ATTACHED to this message as a file. That attachment, plus any\ncontext given above, is everything you have: there is no shell and no checkout, so\ncommands will be refused, nothing is on stdin, and nothing is appended below.\n\nLook for correctness bugs, security issues, broken edge cases, regressions, missing or\ninadequate tests for the behaviour the change touches, and clear design or\nmaintainability problems. Give a file and line reference for every finding where one\napplies. Report missing tests as Should-fix, unless the untested path is itself a\nBlocker. Be concise. Group findings by severity:\nBlocker / Should-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
+  # The file is fed on STDIN, not with `-f`. opencode injects only the first ~1035
+  # lines of an attachment and then leaves the agent to fetch the rest — which it
+  # cannot, because every tool is denied, so it stalls and posts whatever it has.
+  # That is not hypothetical: it is how this seat failed four times on a 1496-line
+  # diff. stdin is appended to the prompt whole. This seat also has no fallback for
+  # a large diff the way the others do (they can read files or run `gh pr diff`
+  # themselves), so the diff is never omitted here on size grounds.
+  #
+  # RESIDUAL RISK, stated rather than glossed: delivery is verified by hand to 90KB
+  # and by the regression test to ~21KB. There is no MEASURED upper bound. `-f` was
+  # equally unconditional, so this is not new exposure — but nothing here would
+  # catch a cap further out either.
+
+  oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is APPENDED BELOW, after this prompt. That diff, plus any context\ngiven above, is everything you have: there is no shell and no checkout, so commands\nwill be refused, and there is no attachment and no file to open. Do not go looking\nfor the diff anywhere else — it is already in front of you.\n\nLook for correctness bugs, security issues, broken edge cases, regressions, missing or\ninadequate tests for the behaviour the change touches, and clear design or\nmaintainability problems. Give a file and line reference for every finding where one\napplies. Report missing tests as Should-fix, unless the untested path is itself a\nBlocker. Be concise. Group findings by severity:\nBlocker / Should-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
 
   # PATH is validated from the repository, but a RELATIVE entry means something
   # different once we cd — it could resolve to a wholly different `timeout`. Pin it
@@ -504,11 +522,15 @@ opencode_review() {
     PATH="$_abs_path"
     OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT="$OPENCODE_RO_CONFIG" \
     timeout "$agent_timeout" "$OPENCODE_BIN" --pure run \
-      -f "$diff_file" --agent pr-review-relay-ro ${model[@]+"${model[@]}"} -- "$oc_prompt" \
-      </dev/null 2>"$errf" )
-  # </dev/null is not cosmetic: opencode reads non-TTY stdin and appends it to the
-  # prompt. The relay pipes data to other reviewers, so whatever it was invoked with
-  # would otherwise reach the model — and the prompt tells it nothing is on stdin.
+      --agent pr-review-relay-ro ${model[@]+"${model[@]}"} -- "$oc_prompt" \
+      <"$diff_file" 2>"$errf" )
+  # The redirect is not cosmetic, and it is a REPLACEMENT for `</dev/null`, never a
+  # removal: opencode reads non-TTY stdin and appends it to the prompt. The relay
+  # pipes data to other reviewers, so without a redirect here whatever it was
+  # invoked with would reach the model. Feeding the diff we chose is the opposite of
+  # inheriting whatever was there. A redirect, not a pipeline: `printf | timeout`
+  # under `set -o pipefail` would return 141 for a >64KB diff the agent never
+  # drained, even though the agent exited 0.
 }
 
 # --- Reviewer selection ------------------------------------------------------

@@ -315,8 +315,8 @@ Flags:
 
 Reviewers that read stdin (`claude` / `codex` / `cursor` / `qwen`) get the diff piped in, so a large branch
 scales the same way `pr-review-relay --diff` does; `agy` takes it as an argument (it doesn't read a
-prompt from stdin); `opencode` receives it as an attached file and reviews it in isolation from the
-repo (see the OpenCode note under [Notes & caveats](#-notes--caveats)). Nothing is pushed or posted
+prompt from stdin); `opencode` reads it from stdin too, staged in a file rather than piped, and
+reviews it in isolation from the repo (see the OpenCode note under [Notes & caveats](#-notes--caveats)). Nothing is pushed or posted
 anywhere — `review-local` only ever prints to your terminal.
 
 ## 🔁 Make it automatic (the handoff)
@@ -760,13 +760,18 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
   *after* the global ones, so the agent actually in use has to carry the policy too. It also runs with `--pure` so external plugins, which execute at startup, don't load.
   Deliberately **not** run with `--auto`, which would auto-approve every `ask` permission.
 - **The OpenCode reviewer gets no tools at all.** Not "no writes" — nothing: `"*": "deny"`, with no
-  allowlist. It does not need any, because the diff reaches it as prompt content via `-f` rather than
-  through a tool call; a review of the attachment is identical with every tool denied. Allowing reads
-  was the last exfiltration route, since they were not confined to the attachment and the relay
+  allowlist. It does not need any, because the diff reaches it as prompt content on stdin rather than
+  through a tool call; the review is identical with every tool denied. Allowing reads
+  was the last exfiltration route, since they were not confined to the diff and the relay
   **posts** the result: a prompt-injected diff could have had the model read a credential and quote it
   into a public PR comment.
-- **Shell is denied, so OpenCode never fetches the PR itself** — the diff is attached to the prompt as
-  a file instead, in both modes and at any size. Narrower designs were tried first and each was demonstrably
+- **Shell is denied, so OpenCode never fetches the PR itself** — the diff is fed on stdin instead, in
+  both modes, and it is never omitted on size grounds the way the inline fallback is for the other
+  seats (they can read files or run `gh pr diff`; this one cannot). Delivery is verified by hand to
+  90 KB and by test to ~21 KB; there is no measured upper bound. It was an `-f` attachment until this
+  release: OpenCode injects only the first ~1035 lines of one and leaves the agent to fetch the rest,
+  which an agent with every tool denied cannot do, so it stalled and posted a note about the
+  truncation as its review. Narrower designs were tried first and each was demonstrably
   bypassable: the original `--dangerously-skip-permissions` (an undocumented alias for `--auto`, so it
   approved everything); selecting the built-in `plan` agent (its permissions and even its mode are
   user-configurable — it ran `id`, and redirecting it to a subagent fell back to `build`); allowing just `gh pr view` / `gh pr diff` (defeated by shell

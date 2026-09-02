@@ -627,10 +627,11 @@ STATUS_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create outcome t
 # Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
 # trap already installed STATUS_DIR would be left behind.
 trap 'rm -rf "$STATUS_DIR"' EXIT
-# Prompt attachments (the opencode reviewer gets the diff as a file) live in their
-# OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs "$STATUS_DIR"/*
-# and treats every file there as a reviewer outcome, so an attachment dropped in
-# there would be counted as a failed reviewer and poison the verdict.
+# The opencode reviewer stages the diff in a file and feeds it on stdin; that file
+# lives in its OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs
+# "$STATUS_DIR"/* and treats every file there as a reviewer outcome, so a staged
+# diff dropped in there would be counted as a failed reviewer and poison the
+# verdict.
 # Both are mktemp -d (mode 700) and both are removed by the EXIT trap, which does
 # run on SIGTERM — a per-function RETURN trap does not, and would leave the full
 # PR diff behind in /tmp.

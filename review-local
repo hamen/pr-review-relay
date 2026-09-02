@@ -151,7 +151,7 @@ opencode_is_selected && opencode_resolve_bin
 
 echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHOR:-none}"
 
-# Prompt attachments (opencode receives the diff as a file) live here; mktemp -d is
+# The diff opencode is fed on stdin is staged here; mktemp -d is
 # mode 700, and the EXIT trap fires on SIGTERM too, so an interrupted review does not
 # leave the branch diff sitting in /tmp.
 # Reviewer failures are recorded as files so they survive the subshells that
@@ -200,8 +200,9 @@ tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo
 # Agents that read stdin (claude / codex / cursor / qwen) get the diff piped in, so a
 # large diff never hits the process argv limit (Windows caps it at ~32K chars).
 # agy doesn't read a prompt from stdin, so it takes prompt+diff as an argument.
-# opencode takes the diff as an ATTACHED FILE (-f) instead, which keeps a large
-# diff off the argv entirely — same approach as pr-review-relay.
+# opencode also reads stdin, but from a staged file rather than a pipe: a pipeline
+# under `set -o pipefail` reports 141 for a large diff the agent never drained.
+# Same approach as pr-review-relay.
 # grok ignores stdin: full diff goes in a --prompt-file; runs from an isolated cwd.
 review_with() {
   local name="$1" out="" rc=0 errf

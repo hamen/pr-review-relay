@@ -73,7 +73,18 @@ case "$1 $2" in
   "repo view") echo "${GH_REPO_VIEW:-owner/repo}" ;;
   # GH_DIFF_HANG makes the diff fetch block forever, so a test can kill the relay
   # *during* the network call and assert what evidence already exists on disk.
-  "pr diff")   if [ -n "${GH_DIFF_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0; echo "diff --git a/x b/x"; echo "+change" ;;
+  # GH_BIG_DIFF_LINES emits a diff of a chosen length, ending in a marker. The
+  # opencode seat used to lose everything past ~1035 lines of an -f attachment, and
+  # the two-line diff below is far too small to reproduce that: a test that only
+  # feeds it proves the plumbing, not the bug.
+  "pr diff")   if [ -n "${GH_DIFF_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0
+               if [ -n "${GH_BIG_DIFF_LINES:-}" ]; then
+                 echo "diff --git a/big b/big"
+                 i=1; while [ "$i" -le "$GH_BIG_DIFF_LINES" ]; do echo "+line $i"; i=$((i+1)); done
+                 echo "+TAIL-MARKER-REACHED"
+                 exit 0
+               fi
+               echo "diff --git a/x b/x"; echo "+change" ;;
   "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted host=${GH_HOST:-default} $*" >> "$GH_POST_LOG"; exit 0 ;;
   "api "*|"api")
     [ -n "${GH_API_LOG:-}" ] && echo "api host=${GH_HOST:-default} $*" >> "$GH_API_LOG"
@@ -675,6 +686,10 @@ make_strict_opencode() { # $1 = dir to install the stub into
 #!/usr/bin/env bash
 # Record argv so the test can assert on it, then enforce the contract.
 printf '%s\n' "$*" > "${OC_ARGV_FILE:?}"
+# Record stdin. The diff is DELIVERED there, so argv alone cannot tell "fed the
+# diff" from "fed nothing" — and feeding nothing is the bug this delivery replaced.
+# Guarded on a non-TTY so an ad-hoc manual run of this stub does not block forever.
+if [ ! -t 0 ]; then cat > "${OC_ARGV_FILE}.stdin"; else : > "${OC_ARGV_FILE}.stdin"; fi
 # Read-only is enforced by the inline permission config, not by --agent alone:
 # a built-in agent can be redirected by user config, so the relay defines its own.
 printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-}" > "${OC_ARGV_FILE}.cfg"
@@ -715,7 +730,7 @@ oc_run() { # oc_run <expected_exit> <desc> [VAR=val ...] [-- <relay args...>]
   while [ $# -gt 0 ]; do
     case "$1" in --) shift; relay_args=("$@"); break;; *) envs+=("$1"); shift;; esac
   done
-  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV" "$OC_ARGV.stdin"
   # Clear PR_RELAY_OPENCODE_MODEL first: the "unset → no -m" assertion below tests the
   # DEFAULT, so a developer who exports the variable in their own shell (a normal thing to
   # do — it is a documented knob) would otherwise fail the suite on an unmodified checkout.
@@ -737,6 +752,17 @@ oc_assert() { # oc_assert <desc> <grep-mode: has|hasnt> <pattern>
     has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
            else echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1)); fi;;
     hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc (argv: $got)"; FAIL=$((FAIL+1));
+           else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
+  esac
+}
+
+oc_stdin() { # oc_stdin <desc> <has|hasnt> <pattern>
+  local desc="$1" mode="$2" pat="$3" got
+  got="$(cat "$OC_ARGV.stdin" 2>/dev/null || true)"
+  case "$mode" in
+    has)   if grep -q -- "$pat" <<< "$got"; then echo "  ok   [-] $desc"; PASS=$((PASS+1));
+           else echo "  FAIL $desc (stdin: $(printf '%s' "$got" | head -c 120))"; FAIL=$((FAIL+1)); fi;;
+    hasnt) if grep -q -- "$pat" <<< "$got"; then echo "  FAIL $desc"; FAIL=$((FAIL+1));
            else echo "  ok   [-] $desc"; PASS=$((PASS+1)); fi;;
   esac
 }
@@ -795,33 +821,95 @@ else
   echo "  FAIL opencode ran in the repo cwd — project opencode.json/mcp would be honoured"; FAIL=$((FAIL+1))
 fi
 
-# Shell is denied, so the reviewer can never fetch the PR: the diff must be ATTACHED
-# in both modes. `-f` takes an array, so `--` must precede the prompt or the prompt
-# is swallowed as another filename (opencode then dies with "File not found").
-oc_assert "attaches the diff with -f" has " -f "
-# Unique per invocation, not a fixed name: both callers dedupe their
-# reviewer list, so two concurrent opencode runs would otherwise truncate and
-# rewrite the same file while the other agent is reading it.
-oc_assert "attachment path is unique per invocation" has "oc-diff\."
+# Shell is denied, so the reviewer can never fetch the PR: the diff must reach it on
+# STDIN in both modes. It used to be an `-f` attachment, and opencode injects only
+# the first ~1035 lines of one — the agent then has to fetch the rest, which it
+# cannot with every tool denied, so it posted a note about the truncation instead of
+# a review. Four times, on one PR.
+oc_assert "never passes the diff as an -f attachment" hasnt " -f "
+oc_assert "no attachment path on the argv" hasnt "oc-diff\."
+# LINK is the default mode, and it is the one where review_with's $feed is empty:
+# opencode_review must redirect its OWN $2, so a seat that looked fine in diff mode
+# cannot ship with nothing at all here.
+oc_stdin "link mode delivers the diff on stdin" has "+change"
+# `--` still precedes the prompt: $context_block is prepended raw and a
+# --context-file can begin with `-`, which the parser would take for a flag.
 oc_assert "separates the prompt with --" has " -- "
 oc_assert "tells the agent it has no shell" has "there is no shell and no checkout"
 # The prompt is BUILT for this reviewer rather than corrected afterwards, so it
 # must not contain the other reviewers' claims at all.
+# "provided on stdin" is the OTHER reviewers' wording, and it names a CHANNEL. An
+# agent with every tool denied that goes looking for a stream is the truncation bug
+# with a new name, so the prompt says the diff is APPENDED BELOW — which is
+# literally what opencode does with non-TTY stdin — and this stays forbidden.
 oc_assert "never claims the diff is on stdin" hasnt "provided on stdin"
+oc_assert "does not deny the delivery it just used" hasnt "nothing is on stdin"
+oc_assert "does not tell it nothing follows" hasnt "nothing is appended below"
+oc_assert "tells the agent the diff is appended" has "APPENDED BELOW"
 oc_assert "never tells it to run gh" hasnt "gh pr view"
 
 oc_run 0 "opencode runs read-only, diff mode" -- --diff
 oc_assert "diff-mode argv still read-only" has "--agent pr-review-relay-ro"
-oc_assert "diff mode also attaches the diff" has " -f "
+oc_assert "diff mode passes no attachment either" hasnt " -f "
+oc_stdin "diff mode delivers the diff on stdin too" has "+change"
 # Prove we are actually in diff mode. Checking for the diff body would NOT prove it:
 # link mode inlines the same diff as a fallback under LINK_DIFF_FALLBACK_MAX_BYTES.
 # The prompt preamble is the real discriminator between the two modes.
-# Mode no longer changes this reviewer's prompt: it always gets the attachment
+# Mode no longer changes this reviewer's prompt: it always gets the diff on stdin
 # and an accurate description, so both modes must look the same here.
-oc_assert "diff mode uses the same composed prompt" has "ATTACHED to this message"
+oc_assert "diff mode uses the same composed prompt" has "APPENDED BELOW, after this prompt"
 
 oc_run 0 "PR_RELAY_OPENCODE_MODEL set → model pinned" PR_RELAY_OPENCODE_MODEL=opencode/some-model
 oc_assert "sets exactly -m <value>" has "-m opencode/some-model"
+
+# The project config is disabled on the RELAY side too, not only in review-local.
+# opencode's loader walks UP from its cwd to a worktree root, so a planted
+# opencode.json with an `mcp` server runs its command before permissions apply —
+# verified by hand: it executed without this variable and did not with it. An
+# outside-the-repo cwd is not sufficient on its own, and only review-local pinned it.
+oc_run 0 "relay disables the project config"
+if [ "$(cat "$OC_ARGV.projcfg" 2>/dev/null || true)" = "1" ]; then
+  echo "  ok   [-] relay sets OPENCODE_DISABLE_PROJECT_CONFIG=1"; PASS=$((PASS+1))
+else
+  echo "  FAIL relay did not set OPENCODE_DISABLE_PROJECT_CONFIG (got '$(cat "$OC_ARGV.projcfg" 2>/dev/null)')"; FAIL=$((FAIL+1))
+fi
+
+# THE REGRESSION THIS DELIVERY EXISTS FOR. The `-f` attachment was injected only up
+# to ~1035 lines, and the assertions above use a two-line fixture, so they would all
+# pass with the truncation still present. Feed well past that point and require the
+# LAST line to arrive, byte for byte.
+#
+# The expected size is computed the same way the relay computes $DIFF — command
+# substitution, which strips trailing newlines — so this is an exact count, not an
+# approximation. A file redirect adds nothing of its own; a here-string would have
+# added a newline here.
+OC_BIG_LINES=2000
+oc_run 0 "opencode receives a diff far past the old attachment cap" GH_BIG_DIFF_LINES=$OC_BIG_LINES
+oc_stdin "the last line of a 2000-line diff arrives" has "TAIL-MARKER-REACHED"
+_exp="$( GH_BIG_DIFF_LINES=$OC_BIG_LINES "$BIN/gh" pr diff 1 )"
+_exp_bytes=$(printf '%s' "$_exp" | wc -c | tr -d ' ')
+_got_bytes=$(wc -c < "$OC_ARGV.stdin" 2>/dev/null | tr -d ' ')
+_got_lines=$(wc -l < "$OC_ARGV.stdin" 2>/dev/null | tr -d ' ')
+# cmp, not a byte COUNT: equal lengths would also pass for a same-length mangling,
+# and "the right number of bytes" is not the claim being made here.
+if printf '%s' "$_exp" | cmp -s - "$OC_ARGV.stdin"; then
+  echo "  ok   [-] the whole diff arrives byte for byte ($_got_bytes B, $_got_lines lines)"; PASS=$((PASS+1))
+else
+  echo "  FAIL diff altered or truncated on delivery (got ${_got_bytes}B, want ${_exp_bytes}B)"; FAIL=$((FAIL+1))
+fi
+if [ "${_got_lines:-0}" -gt 1035 ]; then
+  echo "  ok   [-] delivery clears the ~1035-line attachment cap"; PASS=$((PASS+1))
+else
+  echo "  FAIL delivery is back under the old attachment cap ($_got_lines lines)"; FAIL=$((FAIL+1))
+fi
+
+# Link mode omits the inline diff from $PROMPT above LINK_DIFF_FALLBACK_MAX_BYTES,
+# because the other seats can read files or run `gh pr diff` themselves. This one
+# has bash denied and has NO such fallback, so the delivery must ignore that
+# threshold entirely — omitting the diff here would leave the reviewer with nothing,
+# which is the same bug wearing a different hat. grok pins the same divergence.
+oc_run 0 "opencode keeps the diff under a tiny link threshold" LINK_DIFF_FALLBACK_MAX_BYTES=1
+oc_stdin "diff survives LINK_DIFF_FALLBACK_MAX_BYTES=1" has "+change"
 
 # PATH miss + stock install at \$HOME/.opencode/bin → reviewer must still RUN,
 # not be skipped by the `command -v` check that precedes dispatch.
@@ -1069,14 +1157,19 @@ else echo "  FAIL [got $rc, want 2] '.' on PATH slipped through"; FAIL=$((FAIL+1
 # A RELATIVE TMPDIR makes mktemp return relative paths, which then resolve against
 # the attachment dir once opencode_review cds into it.
 mkdir -p "$WORK/reltmp"
-rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter" "$OC_ARGV" "$OC_ARGV.stdin"
 ( cd "$WORK" && env PATH="$BIN:$PATH" TMPDIR="reltmp" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" OC_ARGV_FILE="$OC_ARGV" \
     bash "$RELAY" --pr 1 --author antigravity --reviewers claude,opencode >/dev/null 2>&1 )
 rc=$?
 if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then echo "  ok   [0] a relative TMPDIR still produces a usable review"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc] relative TMPDIR broke the attachment paths"; FAIL=$((FAIL+1)); fi
-oc_assert "attachment path is absolute" has " -f /"
+# The path left the argv with `-f`, so absoluteness is no longer observable there.
+# It still MATTERS: opencode_review cds into the attach dir, so a relative mktemp
+# path would make the redirect miss. Assert the consequence instead — without this
+# the check above is only "rc=0 and argv non-empty", which a broken canonicalisation
+# would still satisfy.
+oc_stdin "a relative TMPDIR still delivers the diff on stdin" has "+change"
 
 # CDPATH can steer `cd`, so a relative PATH entry could be canonicalized to a
 # CDPATH match outside the repo while the shell still resolves commands from the
@@ -1159,7 +1252,7 @@ if [ -f "$RL" ]; then
     git checkout -qb feature
     echo changed > f.txt; git add f.txt; git commit -qm change
   ) >/dev/null 2>&1
-  rm -f "$OC_ARGV" "$OC_ARGV.cfg"
+  rm -f "$OC_ARGV" "$OC_ARGV.cfg" "$OC_ARGV.stdin"
   ( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" \
       bash "$RL" --base mainline --reviewers opencode >/dev/null 2>&1 )
   rc=$?
@@ -1180,15 +1273,18 @@ if [ -f "$RL" ]; then
   }
   rl_assert "review-local: relay's own agent"   has   "--agent pr-review-relay-ro" "$OC_ARGV"
   rl_assert "review-local: --pure"              has   "--pure"           "$OC_ARGV"
-  rl_assert "review-local: attaches the diff"   has   " -f "             "$OC_ARGV"
+  rl_assert "review-local: no -f attachment"    hasnt " -f "             "$OC_ARGV"
   rl_assert "review-local: no legacy flag"      hasnt "--dangerously-skip-permissions" "$OC_ARGV"
-  rl_assert "review-local: overrides the stdin wording" has "ATTACHED" "$OC_ARGV"
+  rl_assert "review-local: says the diff is appended" has "APPENDED BELOW" "$OC_ARGV"
+  # The two callers have drifted before, so pin the delivery here too and not only
+  # on the relay side.
+  rl_assert "review-local: delivers the diff on stdin" has "changed" "$OC_ARGV.stdin"
   rl_assert "review-local: default-deny policy" has   '"\*":"deny"'     "$OC_ARGV.cfg"
   rl_assert "review-local: never allows bash"   hasnt '"bash":"allow"'  "$OC_ARGV.cfg"
   rl_assert "review-local: defines its own agent" has '"pr-review-relay-ro"' "$OC_ARGV.cfg"
   # From here on the runs must NOT dispatch opencode, so clear the recorded files:
   # asserting on them afterwards would be reading the successful run above.
-  rm -f "$OC_ARGV" "$OC_ARGV.cfg" "$OC_ARGV.cwd" "$OC_ARGV.projcfg"
+  rm -f "$OC_ARGV" "$OC_ARGV.cfg" "$OC_ARGV.cwd" "$OC_ARGV.projcfg" "$OC_ARGV.stdin"
   # An explicitly requested but missing reviewer must FAIL, matching the relay —
   # otherwise `review-local --reviewers opencode` on a machine without it prints a
   # skip and exits 0, which reads as "reviewed".
