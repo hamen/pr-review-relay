@@ -375,6 +375,20 @@ rlr yes "anchor: a finding that quotes a stall phrase" 'Nit: drop "let me read" 
 rlr yes "anchor: severity in the closing sentence" 'Should-fix: check this before I can merge.'
 # "! " and "? " end sentences too, not only ". ".
 rlr stall "anchor: question mark ends a sentence" 'Blocker: none. Should I read the remainder before concluding? Let me read the rest'
+# Line wraps must not decide the verdict. Anchoring to the last physical LINE was
+# tried and broke in BOTH directions, measured: the first of these was accepted
+# because the closing line is "concluding.", and the second was rejected because
+# its heading sat one line up. Normalising before anchoring is what fixes both.
+rlr stall "wrap: a stall broken across a line" 'Blocker
+- None visible yet. Let me read the remainder before
+concluding.'
+rlr yes "wrap: a finding whose heading is on the line above" 'Blocker
+- Sanitize the path before I can approve this.'
+rlr yes "wrap: the same finding written inline" 'Blocker: Sanitize the path before I can approve this.'
+# Markdown emphasis is stripped before anything is matched. Without that the prompt
+# strip is byte-literal while the marker matcher is not, so a bolded echo survived
+# the strip and then satisfied the matcher.
+rlr no "echo: prompt echoed in markdown emphasis" 'Report missing tests as **Should-fix**, unless the untested path is itself a **Blocker**. Be concise. Group findings by severity: **Blocker** / **Should-fix** / **Nit**. If it looks good, say so in one line.'
 rlr stall "stall: recovered B is reported AS a stall" 'Blocker
 - None visible in the readable portion of the diff. Reading the remainder before concluding.'
 rlr no    "no verdict is reported as no verdict" 'Reading the rest of the diff before reviewing.'

@@ -208,9 +208,10 @@ panel_resolve() {
 #
 # The stall veto is deliberately narrow, because "let me read" is also what a
 # SUCCESSFUL run says on its way to a verdict (codex runs without
-# --output-last-message, so its stdout is a raw transcript). So the veto applies
-# only when there is no approval marker, and only to the TAIL — every recovered
-# failure announces the future work as the last thing it says.
+# --output-last-message, so its stdout is a raw transcript). So it applies only to
+# the CLOSING SENTENCE — every recovered failure announces the future work as the
+# last thing it says — and even there a sentence that carries its own verdict, of
+# either kind, is exempt.
 #
 # grep, not a shell built-in: this function runs from review_with, long after the
 # PATH guard, unlike the config loader above it.
@@ -238,7 +239,7 @@ panel_resolve() {
 # `<<<`, refused a few lines down: `<<<` is a PARSE error, so it would take the whole
 # file down at SOURCE time rather than failing this one function at call time.
 review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verdict then stall
-  local _rlr_norm= _rlr_marker= _rlr_approve= _rlr_tail=
+  local _rlr_norm= _rlr_marker= _rlr_tail=
 
   # Collapse every whitespace run to one space and lowercase the lot. Both matter:
   # the prompt this guards against is hard-wrapped FIVE different ways across the
@@ -247,7 +248,16 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
   # case-insensitive by construction, the strip included.
   # The leading and trailing space are load-bearing: they give a body that is
   # exactly "LGTM" the word neighbours the boundary patterns need.
-  _rlr_norm=" $(printf '%s' "$1" | tr '\n\r\t' '   ' | tr -s ' ' | tr '[:upper:]' '[:lower:]') "
+  # Markdown emphasis is deleted before anything is matched or stripped. Without
+  # it the prompt strip is byte-literal while the marker matcher is not, so an echo
+  # written as `**Blocker** / **Should-fix** / **Nit**` survives the strip and then
+  # satisfies the matcher — measured, it was accepted as a review.
+  #
+  # `*` and backtick only, deliberately NOT `_`. Underscore is emphasis in markdown
+  # and a word character in code, and agents emit far more identifiers than
+  # underscore-italics: stripping it would turn `_blocker_`, which reads as a
+  # variable, into a verdict.
+  _rlr_norm=" $(printf '%s' "$1" | tr -d '*`' | tr '\n\r\t' '   ' | tr -s ' ' | tr '[:upper:]' '[:lower:]') "
 
   # Strip the prompt's own instructions before looking for markers. There are TWO
   # marker-bearing sentences, not one — the "report missing tests" line names both
@@ -275,7 +285,7 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
     && _rlr_marker=1
   printf '%s' "$_rlr_norm" \
     | grep -E '(^|[^a-z0-9_])(lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' >/dev/null \
-    && { _rlr_marker=1; _rlr_approve=1; }
+    && _rlr_marker=1
 
   [ -n "$_rlr_marker" ] || return 1   # nothing that claims a verdict
 
@@ -294,29 +304,31 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
   # window and passes this.
   #
   # Every recovered failure announces the future work as the last thing it says, so
-  # the anchor is the closing sentence of the LAST NON-EMPTY LINE — computed from the
-  # ORIGINAL text, before the newline collapse above.
+  # the anchor is the CLOSING SENTENCE of the whitespace-normalised body.
   #
-  # Both halves are load-bearing, and each one was a measured false verdict:
+  # Not the last physical LINE. That was tried, to stop narration merging into the
+  # review below it, and it made the verdict depend on where a line happens to wrap —
+  # measured, in both directions:
   #
-  #   LINE first, because collapsing newlines merges narration into the review that
-  #   follows it. `Let me read the rest\n\nShould-fix\n- The guard is wrong` is a
-  #   complete review — a raw transcript, which is what codex returns — and became a
-  #   single sentence containing a stall phrase. Rejected. On the last line it is
-  #   "- the guard is wrong", which is no stall at all.
+  #   `Blocker\n- None visible yet. Let me read the remainder before\nconcluding.`
+  #   was ACCEPTED, because the last line is "concluding." and holds no stall phrase.
   #
-  #   SENTENCE within that line, because a line can hold both. "Looks good. Let me
-  #   read the remainder before concluding." is a stall wearing an approval, and only
-  #   the closing sentence separates it from "after reading the rest, this looks good".
+  #   `Blocker\n- Sanitize the path before I can approve this.` was REJECTED, because
+  #   the heading sat on the line above and the closing line looked like a bare stall.
+  #   The same text with `Blocker:` inline was accepted. Markdown formatting decided
+  #   the verdict, which it must never do.
   #
-  # Sentence enders are ". ", "! " and "? " — the punctuation FOLLOWED BY A SPACE. A
-  # bare period also ends a filename, a path or a version, and the bodies this guards
-  # cite them constantly: `Blocker: none yet. Let me read attachment.txt.` split on a
-  # bare `.` leaves "txt", the stall vanishes, and unfinished work is posted.
-  _rlr_tail=$(printf '%s\n' "$1" \
-    | grep -v '^[[:space:]]*$' | tail -n 1 \
-    | tr '\t' ' ' | tr -s ' ' | tr '[:upper:]' '[:lower:]' \
-    | sed -e 's/[.!? ]*$//' -e 's/.*[.!?] //')
+  # Normalising first kills both: a wrap becomes a space, so the sentence is whole
+  # whichever way it was typed. What the line anchor was protecting against — a raw
+  # transcript like `Let me read the rest\n\nShould-fix\n- The guard is wrong` — is
+  # handled instead by the marker exemption below, since that sentence carries its
+  # own verdict.
+  #
+  # Sentence enders are ". ", "! " and "? " — punctuation FOLLOWED BY A SPACE. A bare
+  # period also ends a filename, a path or a version, and the bodies this guards cite
+  # them constantly: `Blocker: none yet. Let me read attachment.txt.` split on a bare
+  # `.` leaves "txt", the stall vanishes, and unfinished work is posted.
+  _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[.!? ]*$//' -e 's/.*[.!?] //')
   _rlr_tail=" $_rlr_tail "
   printf '%s' "$_rlr_tail" | grep -E \
     'reading the rest|reading the remainder|read the remaining|before i can|before concluding|before reviewing|let me read|i need the rest' \
