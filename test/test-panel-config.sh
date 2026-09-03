@@ -315,6 +315,15 @@ rlr stall "stall ending in a path"   'Blocker: none. Reading the rest of /tmp/oc
 rlr stall "stall ending in a version" 'Blocker: none. I need the rest before I can verify v1.2.'
 rlr yes "severity: Should fix, space" 'Should fix: the thing.'
 rlr yes "severity: bold markdown"    '**Blocker** — none'
+# MID-SENTENCE, which the plan asked for and every other positive fixture missed:
+# they are all sentence-initial or headings, and mid-sentence is exactly where the
+# [^a-z0-9_] boundary classes would regress first.
+rlr yes "severity: Nit mid-sentence"  'There is one more Nit buried in the guard.'
+rlr yes "approval: LGTM mid-sentence" 'Read it twice and it is LGTM as far as I can tell.'
+# grok and opencode both found this hole: a marked stall phrased only with the words
+# an earlier pass dropped. Restoring `before concluding` closes it, and it fires on
+# no valid fixture — measured phrase by phrase.
+rlr stall "stall: phrased only with 'before concluding'" 'Blocker: none yet, I will stop before concluding.'
 rlr yes "approval: nothing to flag"  'Nothing to flag.'
 rlr yes "approval: none found"       'Blockers: none found.'
 rlr yes "approval: No blockers."     'No blockers.'

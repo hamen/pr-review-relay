@@ -180,6 +180,7 @@ case "$LOG_MAX_BYTES" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_LOG_MAX_BYTES: '$
 # on stdout being empty; it no longer does. A non-zero exit WITH output is still posted (marked
 # unclean) ONLY IF that output looks like a review — see review_looks_like_a_review in lib-panel.sh.
 # An error message that names no severity is now rejected rather than published as a verdict.
+# The same correction applies to the two notes further down that still describe the old promise.
 # Same value in review-local and pr-review-distill; the tests assert all three.
 CURSOR_REVIEW_MODEL="$(panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)"
 
@@ -214,7 +215,9 @@ AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_antigravity "")"
 # safe because its error goes to stderr and stdout stays empty; claude's does the opposite.
 # The fallback turns a guaranteed-wasted round into a real review. This repo is public — most
 # installs are not on the account that chose `opus`.
-# RESIDUAL: if the fallback model fails the same way, the error text is still what gets posted.
+# RESIDUAL: if the fallback model fails the same way, the round is still burnt — but the error text
+# is no longer POSTED. CLI error prose names no severity, so the non-review gate rejects it and the
+# seat is reported as failed instead of publishing a fake review.
 CLAUDE_REVIEW_MODEL="$(panel_resolve CLAUDE_REVIEW_MODEL MODEL_claude opus)"
 CLAUDE_REVIEW_EFFORT="$(panel_resolve CLAUDE_REVIEW_EFFORT EFFORT_claude "")"
 CLAUDE_REVIEW_FALLBACK_MODEL="$(panel_resolve CLAUDE_REVIEW_FALLBACK_MODEL MODEL_claude_fallback sonnet)"
@@ -1103,9 +1106,11 @@ review_with() {
   # Out of quota? Decide BEFORE anything is posted, and look at BOTH streams.
   #
   # Checking only the empty-output branch below would miss the case this exists for: an agent that
-  # prints its quota error on STDOUT has non-empty output, sails past the empty check, and the
-  # error text gets published as if it were a review — an unclean round whose PR comment says
-  # "Please upgrade your subscription".
+  # prints its quota error on STDOUT has non-empty output and sails past the empty check. Before the
+  # non-review gate that text was PUBLISHED as if it were a review — an unclean round whose PR
+  # comment said "Please upgrade your subscription". The gate would now reject it as unmarked, but
+  # this bench must still come first: a quota failure is a benched seat with a reset time, not a
+  # reviewer that answered badly.
   #
   # The child does not touch the bench file. It records the finding beside its own status, exactly
   # as it records pass/fail, and the parent merges after the wait. Two agents discovering quota in

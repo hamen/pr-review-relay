@@ -330,23 +330,24 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
   # `.` leaves "txt", the stall vanishes, and unfinished work is posted.
   _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[.!? ]*$//' -e 's/.*[.!?] //')
   _rlr_tail=" $_rlr_tail "
-  # FOUR phrases, each calibrated on a recovered body, and every one of them names
-  # work still to come rather than merely mentioning reading.
+  # Each phrase names work still to come, rather than merely mentioning reading.
   #
-  # Four more were dropped, and dropping them is what resolved a conflict no anchor
-  # could: `before i can`, `before concluding`, `before reviewing` and a bare
-  # `read the remaining` are ordinary review English. Measured — of the eight,
-  # `before i can` was the ONLY one that fired on the valid finding
-  # `Blocker\n- Sanitize the path before I can approve this.`, and it fired on NONE
-  # of the four recovered failures. Two bodies of identical shape needed opposite
-  # verdicts; the phrase list, not the anchoring, was what separated them.
+  # TWO of the original eight are gone, and only two — an earlier pass dropped four,
+  # which was three too many. Measured, phrase by phrase, against the fixtures:
   #
-  # `read the remaining` also matched the PAST tense — "I read the remaining tests
-  # as well" — while `let me read` already covers the body it was added for.
+  #   before i can        fires on the VALID finding "Sanitize the path before I can
+  #                       approve this" and on none of the recovered failures. Gone.
+  #   read the remaining  fires on the PAST tense, "I read the remaining tests as
+  #                       well". Replaced by its future forms, which do not; the
+  #                       body it was added for says "let me read the remaining"
+  #                       and is already covered.
+  #   before concluding   fires on NO valid fixture, and it is what catches
+  #   before reviewing    `Blocker: I will stop before concluding.` — the hole grok
+  #                       and opencode both pointed at. Restored.
   #
   # Boundaries, so `let me read` does not match `let me readjust`.
   printf '%s' "$_rlr_tail" | grep -E \
-    '(^|[^a-z])(reading the rest|reading the remainder|let me read|i need the rest)([^a-z]|$)' \
+    "(^|[^a-z])(reading the rest|reading the remainder|let me read|i need the rest|before concluding|before reviewing|i('ll| will) read the remaining)([^a-z]|\$)" \
     >/dev/null || return 0
 
   # The closing sentence mentions unfinished work. That is a stall UNLESS a verdict
@@ -367,8 +368,11 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
   #
   # So: cut everything up to and including the LAST stall phrase (greedy .*), and ask
   # whether a verdict survives in what follows.
+  # sed -E is the host sed, not dash's builtin — GNU and BSD both have it; busybox
+  # without -E would leave the order rule inert, which is a fail-OPEN direction and
+  # is why it is named here rather than left to be discovered.
   _rlr_after=$(printf '%s' "$_rlr_tail" | sed -E \
-    's/.*(reading the rest|reading the remainder|let me read|i need the rest)//')
+    "s/.*(reading the rest|reading the remainder|let me read|i need the rest|before concluding|before reviewing|i('ll| will) read the remaining)//")
   printf '%s' "$_rlr_after" | grep -E \
     '(^|[^a-z0-9_])(blockers?|nits?|should[- ]fix(es)?|lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' \
     >/dev/null && return 0
