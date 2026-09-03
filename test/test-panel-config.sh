@@ -371,7 +371,20 @@ Should-fix
 - The guard is wrong'
 # Verdict of EITHER kind immunises the closing sentence, not only approval: a finding
 # may legitimately quote a stall phrase as its example.
-rlr yes "anchor: a finding that quotes a stall phrase" 'Nit: drop "let me read" from the comment.'
+# DELIBERATE COST OF THE ORDER RULE, and a change of position: grok asked for this
+# to be accepted, and it was, until the order rule landed. It is not separable from
+# `Blocker` + `Reading the remainder before concluding.` — both are a verdict
+# followed by a stall phrase in one sentence, and no surface rule tells a quoted
+# phrase from a real announcement.
+#
+# So the choice is which way to err. Rejecting this costs a failed round on a review
+# that QUOTES a stall phrase — and the only body realistically doing that is a review
+# of this very feature, which is how grok hit it. Accepting it costs the bug this
+# whole change exists to close, silently. Fail closed.
+#
+# The rejected body is printed in full on stderr, so a human sees in one line that
+# the gate was wrong rather than the reviewer.
+rlr stall "cost: a finding that QUOTES a stall phrase is rejected" 'Nit: drop "let me read" from the comment.'
 rlr yes "anchor: severity in the closing sentence" 'Should-fix: check this before I can merge.'
 # "! " and "? " end sentences too, not only ". ".
 rlr stall "anchor: question mark ends a sentence" 'Blocker: none. Should I read the remainder before concluding? Let me read the rest'
@@ -389,6 +402,31 @@ rlr yes "wrap: the same finding written inline" 'Blocker: Sanitize the path befo
 # strip is byte-literal while the marker matcher is not, so a bolded echo survived
 # the strip and then satisfied the matcher.
 rlr no "echo: prompt echoed in markdown emphasis" 'Report missing tests as **Should-fix**, unless the untested path is itself a **Blocker**. Be concise. Group findings by severity: **Blocker** / **Should-fix** / **Nit**. If it looks good, say so in one line.'
+# ORDER, not presence. Both of the next two hold a marker and a stall phrase in the
+# same closing sentence once whitespace is collapsed; only their order differs, and
+# every anchoring rule tried before this one fixed one and broke the other in a loop.
+# "I was reading, and here is my verdict" is a review; "here is my verdict, and I am
+# still reading" is not.
+rlr stall "order: verdict first, then still reading (no punctuation)" 'Blocker
+Reading the remainder before concluding.'
+rlr stall "order: approval first, then still reading (no punctuation)" 'Looks good
+Let me read the remainder before concluding.'
+rlr yes "order: reading first, verdict last" 'Let me read the rest
+
+Should-fix
+- The guard is wrong'
+# Phrases that are ordinary review English were dropped, and that is what made the
+# two bodies above separable at all. Measured: of the eight original phrases,
+# `before i can` was the ONLY one firing on this valid finding, and it fired on NONE
+# of the four recovered failures.
+rlr yes "phrase: a finding that says 'before I can'" 'Blocker
+- Sanitize the path before I can approve this.'
+rlr yes "phrase: boundary, let me readjust" 'Blocker: the guard is wrong.
+
+Let me readjust the retry timer.'
+rlr yes "phrase: past tense, I read the remaining" 'Should-fix: add a case.
+
+I read the remaining tests as well.'
 rlr stall "stall: recovered B is reported AS a stall" 'Blocker
 - None visible in the readable portion of the diff. Reading the remainder before concluding.'
 rlr no    "no verdict is reported as no verdict" 'Reading the rest of the diff before reviewing.'

@@ -239,7 +239,7 @@ panel_resolve() {
 # `<<<`, refused a few lines down: `<<<` is a PARSE error, so it would take the whole
 # file down at SOURCE time rather than failing this one function at call time.
 review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verdict then stall
-  local _rlr_norm= _rlr_marker= _rlr_tail=
+  local _rlr_norm= _rlr_marker= _rlr_tail= _rlr_after=
 
   # Collapse every whitespace run to one space and lowercase the lot. Both matter:
   # the prompt this guards against is hard-wrapped FIVE different ways across the
@@ -330,18 +330,46 @@ review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verd
   # `.` leaves "txt", the stall vanishes, and unfinished work is posted.
   _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[.!? ]*$//' -e 's/.*[.!?] //')
   _rlr_tail=" $_rlr_tail "
+  # FOUR phrases, each calibrated on a recovered body, and every one of them names
+  # work still to come rather than merely mentioning reading.
+  #
+  # Four more were dropped, and dropping them is what resolved a conflict no anchor
+  # could: `before i can`, `before concluding`, `before reviewing` and a bare
+  # `read the remaining` are ordinary review English. Measured — of the eight,
+  # `before i can` was the ONLY one that fired on the valid finding
+  # `Blocker\n- Sanitize the path before I can approve this.`, and it fired on NONE
+  # of the four recovered failures. Two bodies of identical shape needed opposite
+  # verdicts; the phrase list, not the anchoring, was what separated them.
+  #
+  # `read the remaining` also matched the PAST tense — "I read the remaining tests
+  # as well" — while `let me read` already covers the body it was added for.
+  #
+  # Boundaries, so `let me read` does not match `let me readjust`.
   printf '%s' "$_rlr_tail" | grep -E \
-    'reading the rest|reading the remainder|read the remaining|before i can|before concluding|before reviewing|let me read|i need the rest' \
+    '(^|[^a-z])(reading the rest|reading the remainder|let me read|i need the rest)([^a-z]|$)' \
     >/dev/null || return 0
 
-  # The closing sentence mentions unfinished work. That is a stall UNLESS the same
-  # sentence also delivers a verdict — of EITHER kind. Severity counts, not only
-  # approval: `Nit: drop "let me read" from the comment.` is a finding whose text
-  # happens to quote a stall phrase, and rejecting it would fail the round over a
-  # reviewer's choice of example. Recovered body B is unaffected: its `Blocker` is on
-  # a different line from its closing sentence, which is the whole point of the
-  # anchor.
-  printf '%s' "$_rlr_tail" | grep -E \
+  # The closing sentence mentions unfinished work. That is a stall UNLESS a verdict
+  # comes AFTER it — and ORDER is the whole rule, not mere presence.
+  #
+  # "I was reading, and here is my verdict" is a review.
+  # "Here is my verdict, and I am still reading" is not.
+  #
+  # Presence alone cannot separate them, and four rewrites of this check tried:
+  #
+  #   Blocker / Reading the remainder before concluding.   must be REJECTED
+  #   Let me read the rest / Should-fix / The guard is wrong  must be ACCEPTED
+  #
+  # Both hold a marker and a stall in the same closing sentence once whitespace is
+  # collapsed. Only the order differs. Every anchoring rule tried before this one —
+  # a byte window, the last physical line, a line-break sentence boundary — fixed one
+  # of these and broke the other, in a loop.
+  #
+  # So: cut everything up to and including the LAST stall phrase (greedy .*), and ask
+  # whether a verdict survives in what follows.
+  _rlr_after=$(printf '%s' "$_rlr_tail" | sed -E \
+    's/.*(reading the rest|reading the remainder|let me read|i need the rest)//')
+  printf '%s' "$_rlr_after" | grep -E \
     '(^|[^a-z0-9_])(blockers?|nits?|should[- ]fix(es)?|lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' \
     >/dev/null && return 0
 
