@@ -280,7 +280,7 @@ Environment:
 | `CODEX_REVIEW_MODEL` / `CODEX_REVIEW_EFFORT` | Model and reasoning effort for the `codex` reviewer. **Both default to empty, which means "use whatever `~/.codex/config.toml` says"** — the previous, and still normal, behaviour. Set them to review one PR with a specific model without editing that config, which every other use of the `codex` CLI shares. `CODEX_REVIEW_EFFORT` becomes `-c model_reasoning_effort=…`; note that an invalid model id fails the reviewer (e.g. `gpt-5.6` is rejected on a ChatGPT account, where the id is `gpt-5.6-sol`). Read by `pr-review-relay`, `review-local` **and** `pr-review-distill`. |
 | `AGY_REVIEW_MODEL` | Model for the `antigravity` reviewer, e.g. `gemini-3.1-pro-high` (`agy models` lists them). Empty = agy's own configured default. Read by `pr-review-relay` and `review-local`. |
 | `CLAUDE_REVIEW_MODEL` / `CLAUDE_REVIEW_EFFORT` | Model and effort for the `claude` reviewer. **The model defaults to `opus` — unlike the codex pair, this default is not empty.** Claude was the last seat taking its model from ambient config, so a `/model` switch silently changed what the panel reviewed with; an empty default would have left that in place for everyone. `opus` is a *family alias*: it pins the tier, not a frozen build. `CLAUDE_REVIEW_EFFORT` is opt-in (empty = the CLI's own default) and becomes `--effort …`; set it to `high` for a hard review, at proportional cost. Read by `pr-review-relay`, `review-local` **and** `pr-review-distill`. |
-| `CLAUDE_REVIEW_FALLBACK_MODEL` | Model `claude` falls back to when the pinned one is unavailable. Default: `sonnet`. **This is load-bearing, not a convenience.** Measured on claude 2.1.220, an unavailable model (no entitlement, over quota, retired id) prints `There's an issue with the selected model …` on **stdout** and exits **1**, leaving stderr empty. A non-zero exit *with* output is still POSTED — the relay only marks the round unclean — so without a fallback that error text lands on the PR wearing a `Claude review` header, and the round is burnt. The fallback turns a guaranteed-wasted round into a real review. (Contrast `cursor-agent`, whose unknown-id error goes to **stderr** with stdout empty, so it is correctly reported as a failed reviewer and nothing is posted.) **Residual:** if the fallback model fails the same way, the error text is still what gets posted. |
+| `CLAUDE_REVIEW_FALLBACK_MODEL` | Model `claude` falls back to when the pinned one is unavailable. Default: `sonnet`. **This is load-bearing, not a convenience.** Measured on claude 2.1.220, an unavailable model (no entitlement, over quota, retired id) prints `There's an issue with the selected model …` on **stdout** and exits **1**, leaving stderr empty. A non-zero exit *with* output is still POSTED **if it looks like a review** — so before the [non-review gate](#-what-counts-as-a-review) that error text landed on the PR wearing a `Claude review` header. It no longer does, because CLI error text names no severity; the round is still burnt, which is what the fallback is for. The fallback turns a guaranteed-wasted round into a real review. (Contrast `cursor-agent`, whose unknown-id error goes to **stderr** with stdout empty, so it is correctly reported as a failed reviewer and nothing is posted.) **Residual:** if the fallback model fails the same way, the round is still burnt — the error text is rejected rather than posted, so what you get is a failed reviewer, not a fake review. |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
 | `PR_RELAY_OPENCODE_ALLOW_IN_REPO` | Set to `1` to allow `PR_RELAY_OPENCODE_BIN` to point at a binary **inside the repository under review**. Refused by default: that file is written by whoever wrote the diff. |
 | `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. A value **containing a `/`** that resolves inside the repo is refused too, unless `PR_RELAY_OPENCODE_ALLOW_IN_REPO=1`. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` or `~/` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; the `~user/…` form is *not* supported, give a real path for that; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
@@ -499,9 +499,11 @@ row further down.
 Override with `CURSOR_REVIEW_MODEL` — `cursor-agent --list-models` shows what your account offers.
 An id your account does not have is safe to try: as of `cursor-agent 2026.07`, an unknown model makes
 it exit 1 and print the error on **stderr**, leaving stdout empty, so the relay reports a failed
-reviewer (exit 3) instead of a review. Note the guarantee rests on that stdout being empty — the relay
-does post non-empty stdout even on a non-zero exit, marking the round unclean, so a future CLI that
-printed the error on stdout would surface it as a (clearly broken-looking) review rather than silently.
+reviewer (exit 3) instead of a review. That guarantee used to rest on stdout being empty; it no longer
+has to. A future CLI that printed its error on stdout would be caught by the
+[non-review gate](#-what-counts-as-a-review) — error text names no severity — and rejected rather than
+posted. Non-empty stdout on a non-zero exit is still posted when it *does* look like a review, marked
+unclean.
 
 > Whatever you override to, keep it out of the other reviewers' families. Setting it to `auto`, to a
 > `claude-*` id, or to a `cursor-grok-*` id while you also run the opt-in `grok` reviewer all
@@ -627,10 +629,35 @@ ever holds short event lines. If you want them gone sooner, `--reset` on the PR,
 `✔ Relay done.` alone doesn't mean "everyone reviewed" — so the relay signals the outcome through its
 **exit code**, and fails closed (any doubt → non-zero). A script driving the handoff should branch on it:
 
+### ⛔ What counts as a review
+
+The relay used to fail closed only on an **empty** review, so anything with one non-whitespace
+character was posted as that seat's verdict and the round exited `0`. Measured on 2026-09-01: four
+bodies of 156–246 bytes, all exit `0`, all published, none a review — and a four-seat panel silently
+became two while the banner said success.
+
+A reply now has to do what every reviewer prompt already asks for: **name a severity
+(Blocker / Should-fix / Nit), or say it looks good.** It must also not announce work still to come —
+one of the four recovered failures reads `Blocker` / *"…Reading the remainder before concluding"*, so
+naming a severity is not on its own enough.
+
+The stall test reads the **closing sentence**, and order is what it turns on:
+*"After reading the rest of the diff, this looks good"* is a verdict and passes;
+*"Looks good. Let me read the remainder before concluding"* is a stall wearing an approval,
+and is rejected. An approval earlier in the body does not buy an exemption for a closing
+sentence that says the work is unfinished.
+
+A body that fails either test is **not posted**, is printed in full on stderr so you can see what came
+back, and fails the round (`3`). A review the relay itself truncated is exempt: the missing verdict may
+be the relay's own doing, and that case is already unclean and already published as evidence.
+
+Known limits, deliberately: the markers are English, a negated *"does not look good"* still passes, and
+the stall list is a phrase list calibrated on four real failures — it will miss a novel phrasing.
+
 | Code | Meaning | What to do |
 |------|---------|------------|
 | `0` | Every reviewer that ran produced **and posted** a review, and the PR head didn't move. With `--no-post`, produced is the bar and nothing is posted. May be a **PARTIAL** panel — a reviewer can be skipped (CLI not installed) or [benched](#-benched-reviewers-out-of-quota) (out of quota). The banner says which, and how many. | Everyone *ran* — not that it's approved. Read the reviews, resolve every Blocker/Should-fix, then merge. |
-| `3` | Not a clean round: a reviewer returned empty / timed out / exited non-zero / failed to post, **or** an explicitly-requested reviewer was missing (**except** when it is [benched](#-benched-reviewers-out-of-quota) for quota — that is the one carve-out, and the round can still exit `0` as PARTIAL), **or** no reviewer ran, **or** HEAD moved mid-round (reviews now describe stale code). | Fix the cause and re-run; don't treat as reviewed. |
+| `3` | Not a clean round: a reviewer returned empty / returned something that is [not a review](#-what-counts-as-a-review) / timed out / exited non-zero / failed to post, **or** an explicitly-requested reviewer was missing (**except** when it is [benched](#-benched-reviewers-out-of-quota) for quota — that is the one carve-out, and the round can still exit `0` as PARTIAL), **or** no reviewer ran, **or** HEAD moved mid-round (reviews now describe stale code). | Fix the cause and re-run; don't treat as reviewed. |
 | `4` | A loop cap was reached — either the **round** cap (`--max-rounds`, counted per reviewed SHA) or the **same-SHA dispatch** cap (`PR_RELAY_MAX_SAME_SHA`). The message says which. | Stop looping; escalate to a human. On the same-SHA cap, pushing a fix is what unblocks it. |
 | `1`/`2` | Usage/precondition error (no `gh`, no PR, empty diff, bad arg). | Fix the invocation. |
 

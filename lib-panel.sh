@@ -179,3 +179,203 @@ panel_resolve() {
   if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
   printf '%s' "$fallback"
 }
+
+# --- Is this actually a review? ----------------------------------------------
+# The relay used to fail closed only on an EMPTY review, so anything with one
+# non-whitespace character posted as a verdict and the round exited 0. Measured, on
+# 2026-09-01: four bodies of 156-246 bytes, all exit 0, all posted, none a review —
+# and a four-seat panel silently became two while printing success.
+#
+# This does NOT invent a standard. Every prompt, for every seat, in both callers,
+# already says: "Group findings by severity: Blocker / Should-fix / Nit. If it looks
+# good, say so in one line." So the contract a reviewer already accepted is: name a
+# severity, or say it looks good.
+#
+# Two checks, both must hold:
+#
+#   POSITIVE  a severity or approval marker, at a word boundary, that is not merely
+#             the prompt echoed back.
+#   NEGATIVE  it must not announce work still to come.
+#
+# The negative check exists because of one recovered body:
+#
+#     Blocker
+#     - None visible in the readable portion of the diff (lines 1-1182 of the
+#       attachment). Reading the remainder before concluding.
+#
+# That names a severity, at a word boundary, not echoed from any prompt — and it is
+# a stall. A marker-only gate accepts it. It is why the stall list is here at all.
+#
+# The stall veto is deliberately narrow, because "let me read" is also what a
+# SUCCESSFUL run says on its way to a verdict (codex runs without
+# --output-last-message, so its stdout is a raw transcript). So it applies only to
+# the CLOSING SENTENCE — every recovered failure announces the future work as the
+# last thing it says — and even there a sentence that carries its own verdict, of
+# either kind, is exempt.
+#
+# grep, not a shell built-in: this function runs from review_with, long after the
+# PATH guard, unlike the config loader above it.
+#
+# No `-q`, for portability rather than for a bug seen here. The worry is real in
+# principle: `set -o pipefail` is on in both callers, so if grep exits at its first
+# match the writer takes SIGPIPE and the PIPELINE reports 141 — a valid review
+# rejected for being large. MEASURED on this machine (bash 5.2.37, GNU grep 3.11):
+# it does not happen. `printf '%s' "$big" | grep -qE 'match-at-the-start'` returned 0
+# on 20 runs each at 100KB, 200KB, 1MB and 5MB. GNU grep drains its input. The same
+# shape with `head -c 1` in place of grep returns 141 every time, so SIGPIPE here is
+# reachable — this grep simply does not trigger it.
+#
+# So `>/dev/null` instead of `-q` is not fixing an observed failure; it is refusing
+# to depend on one implementation's draining behaviour, at a cost of nothing. BSD and
+# busybox grep are not measured here.
+#
+# No `<<<` either, and that one IS load-bearing: it is a parse error in dash, which
+# would make this whole file unsourceable rather than just this function.
+# Exit codes are three-valued on purpose: "no verdict at all" and "a verdict, then a
+# stall" are different problems with different fixes, and a caller that can only say
+# "not a review" leaves the reader to work out which one they have.
+# `local` below is not POSIX, but dash — and every shell this file is tested against —
+# implements it, and the loaders above already rely on it. That is the difference from
+# `<<<`, refused a few lines down: `<<<` is a PARSE error, so it would take the whole
+# file down at SOURCE time rather than failing this one function at call time.
+review_looks_like_a_review() { # <text>   0 = a review, 1 = no verdict, 2 = verdict then stall
+  local _rlr_norm= _rlr_marker= _rlr_tail= _rlr_after=
+
+  # Collapse every whitespace run to one space and lowercase the lot. Both matter:
+  # the prompt this guards against is hard-wrapped FIVE different ways across the
+  # five sites (review-local breaks inside "If it looks / good"), so nothing can be
+  # matched as a flat literal; and lowercasing makes every match below
+  # case-insensitive by construction, the strip included.
+  # The leading and trailing space are load-bearing: they give a body that is
+  # exactly "LGTM" the word neighbours the boundary patterns need.
+  # Markdown emphasis is deleted before anything is matched or stripped. Without
+  # it the prompt strip is byte-literal while the marker matcher is not, so an echo
+  # written as `**Blocker** / **Should-fix** / **Nit**` survives the strip and then
+  # satisfies the matcher — measured, it was accepted as a review.
+  #
+  # `*` and backtick only, deliberately NOT `_`. Underscore is emphasis in markdown
+  # and a word character in code, and agents emit far more identifiers than
+  # underscore-italics: stripping it would turn `_blocker_`, which reads as a
+  # variable, into a verdict.
+  _rlr_norm=" $(printf '%s' "$1" | tr -d '*`' | tr '\n\r\t' '   ' | tr -s ' ' | tr '[:upper:]' '[:lower:]') "
+
+  # Strip the prompt's own instructions before looking for markers. There are TWO
+  # marker-bearing sentences, not one — the "report missing tests" line names both
+  # Should-fix and Blocker — so an agent that reflects its instructions back would
+  # otherwise pass this gate trivially, which is the very failure class it exists
+  # to catch.
+  _rlr_norm=$(printf '%s' "$_rlr_norm" | sed \
+    -e 's/report missing tests as should-fix, unless the untested path is itself a blocker\.//g' \
+    -e 's/group findings by severity: blocker \/ should-fix \/ nit\.//g' \
+    -e 's/blocker \/ should-fix \/ nit//g' \
+    -e 's/if it looks good, say so in one line\.//g')
+
+  # A verdict, named. Plurals are in the pattern, not bolted on as extra approval
+  # phrases: "## Blockers" and "Nits:" are ordinary review headings, and rejecting a
+  # finished review for using them would be this gate failing at its own job.
+  # Boundaries are "not alphanumeric" rather than \< \>, which is a GNU extension:
+  # markdown puts *, # and : against these words constantly.
+  # `_` counts as a WORD character, not a boundary. Without that, a raw transcript
+  # containing an identifier like `monitor_nit_state` reads as a verdict — measured,
+  # it was accepted — and a raw transcript is exactly what a broken agent emits (one
+  # of the recovered failures is a leaked tool-call fragment).
+  # `should[- ]fix(es)?` and not `fixe?s?`, which also matched `should-fixs`.
+  printf '%s' "$_rlr_norm" \
+    | grep -E '(^|[^a-z0-9_])(blockers?|nits?|should[- ]fix(es)?)([^a-z0-9_]|$)' >/dev/null \
+    && _rlr_marker=1
+  printf '%s' "$_rlr_norm" \
+    | grep -E '(^|[^a-z0-9_])(lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' >/dev/null \
+    && _rlr_marker=1
+
+  [ -n "$_rlr_marker" ] || return 1   # nothing that claims a verdict
+
+  # The exemption for a review that ends in a verdict is checked on the CLOSING
+  # SENTENCE below, not on the body. Exempting the whole body was too wide: "Looks
+  # good. Let me read the remainder before concluding." was accepted — a stall
+  # wearing an approval. What the exemption must protect is the opposite order,
+  # "after reading the rest of the diff, this looks good", where the reading is
+  # finished and the verdict is the last word.
+
+  # LAST SENTENCE only, not a byte window. Mid-transcript narration is normal — a
+  # successful codex run says "let me read the diff first" on its way to a verdict —
+  # and a byte window is the wrong shape for it: on a short body the window is the
+  # whole body, so "let me read the diff first. now the tests. should-fix: ..." would
+  # be vetoed despite ending in a verdict. Measured: that fixture failed a 500-byte
+  # window and passes this.
+  #
+  # Every recovered failure announces the future work as the last thing it says, so
+  # the anchor is the CLOSING SENTENCE of the whitespace-normalised body.
+  #
+  # Not the last physical LINE. That was tried, to stop narration merging into the
+  # review below it, and it made the verdict depend on where a line happens to wrap —
+  # measured, in both directions:
+  #
+  #   `Blocker\n- None visible yet. Let me read the remainder before\nconcluding.`
+  #   was ACCEPTED, because the last line is "concluding." and holds no stall phrase.
+  #
+  #   `Blocker\n- Sanitize the path before I can approve this.` was REJECTED, because
+  #   the heading sat on the line above and the closing line looked like a bare stall.
+  #   The same text with `Blocker:` inline was accepted. Markdown formatting decided
+  #   the verdict, which it must never do.
+  #
+  # Normalising first kills both: a wrap becomes a space, so the sentence is whole
+  # whichever way it was typed. What the line anchor was protecting against — a raw
+  # transcript like `Let me read the rest\n\nShould-fix\n- The guard is wrong` — is
+  # handled instead by the marker exemption below, since that sentence carries its
+  # own verdict.
+  #
+  # Sentence enders are ". ", "! " and "? " — punctuation FOLLOWED BY A SPACE. A bare
+  # period also ends a filename, a path or a version, and the bodies this guards cite
+  # them constantly: `Blocker: none yet. Let me read attachment.txt.` split on a bare
+  # `.` leaves "txt", the stall vanishes, and unfinished work is posted.
+  _rlr_tail=$(printf '%s' "$_rlr_norm" | sed -e 's/[.!? ]*$//' -e 's/.*[.!?] //')
+  _rlr_tail=" $_rlr_tail "
+  # Each phrase names work still to come, rather than merely mentioning reading.
+  #
+  # TWO of the original eight are gone, and only two — an earlier pass dropped four,
+  # which was three too many. Measured, phrase by phrase, against the fixtures:
+  #
+  #   before i can        fires on the VALID finding "Sanitize the path before I can
+  #                       approve this" and on none of the recovered failures. Gone.
+  #   read the remaining  fires on the PAST tense, "I read the remaining tests as
+  #                       well". Replaced by its future forms, which do not; the
+  #                       body it was added for says "let me read the remaining"
+  #                       and is already covered.
+  #   before concluding   fires on NO valid fixture, and it is what catches
+  #   before reviewing    `Blocker: I will stop before concluding.` — the hole grok
+  #                       and opencode both pointed at. Restored.
+  #
+  # Boundaries, so `let me read` does not match `let me readjust`.
+  printf '%s' "$_rlr_tail" | grep -E \
+    "(^|[^a-z])(reading the rest|reading the remainder|let me read|i need the rest|before concluding|before reviewing|i('ll| will) read the remaining)([^a-z]|\$)" \
+    >/dev/null || return 0
+
+  # The closing sentence mentions unfinished work. That is a stall UNLESS a verdict
+  # comes AFTER it — and ORDER is the whole rule, not mere presence.
+  #
+  # "I was reading, and here is my verdict" is a review.
+  # "Here is my verdict, and I am still reading" is not.
+  #
+  # Presence alone cannot separate them, and four rewrites of this check tried:
+  #
+  #   Blocker / Reading the remainder before concluding.   must be REJECTED
+  #   Let me read the rest / Should-fix / The guard is wrong  must be ACCEPTED
+  #
+  # Both hold a marker and a stall in the same closing sentence once whitespace is
+  # collapsed. Only the order differs. Every anchoring rule tried before this one —
+  # a byte window, the last physical line, a line-break sentence boundary — fixed one
+  # of these and broke the other, in a loop.
+  #
+  # So: cut everything up to and including the LAST stall phrase (greedy .*), and ask
+  # whether a verdict survives in what follows.
+  # sed -E is the host sed, not dash's builtin — GNU and BSD both have it; busybox
+  # without -E would leave the order rule inert, which is a fail-OPEN direction and
+  # is why it is named here rather than left to be discovered.
+  _rlr_after=$(printf '%s' "$_rlr_tail" | sed -E \
+    "s/.*(reading the rest|reading the remainder|let me read|i need the rest|before concluding|before reviewing|i('ll| will) read the remaining)//")
+  printf '%s' "$_rlr_after" | grep -E \
+    '(^|[^a-z0-9_])(blockers?|nits?|should[- ]fix(es)?|lgtm|looks good|no findings|nothing to flag|none found)([^a-z0-9_]|$)' \
+    >/dev/null && return 0
+
+  return 2   # claims a verdict, then says it is still working
+}

@@ -8,6 +8,28 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Fixed
 
+- **A round could lose a reviewer and still report success.** The relay failed closed only on an
+  EMPTY review, so anything with one non-whitespace character posted as that seat's verdict and the
+  round exited `0`. Measured on 2026-09-01, from the relay's own sidecars: four bodies of 156–246
+  bytes, all exit `0`, all published, none a review. Three of four failures on one pull request went
+  that way, so a four-seat panel silently became two — twice — while the banner said success. It is
+  also why the OpenCode truncation below took four rounds to notice: the evidence was legible in the
+  posted comment the whole time, and nothing read it because the exit code said fine.
+
+  A reply must now do what every reviewer prompt already asks for — **name a severity
+  (Blocker / Should-fix / Nit), or say it looks good** — and must not announce work still to come.
+  Both halves are needed: one recovered failure reads `Blocker` followed by *"…Reading the remainder
+  before concluding"*, so a marker on its own is not a verdict. The stall test reads the closing
+  sentence and turns on order — *"after reading the rest, this looks good"* passes, *"looks good, let
+  me read the remainder"* does not. A rejected body is **not posted**, is
+  printed in full on stderr, and fails the round. Relay-truncated reviews are exempt, since the
+  missing marker may be the relay's own doing.
+
+  Calibrated against reviews this panel actually writes, not against guesses: two of the three most
+  recent closing reviews contain no severity word at all. Known limits are documented rather than
+  hidden — English markers, a negated "does not look good" still passes, and the stall list is a
+  phrase list.
+
 - **The `opencode` reviewer silently reviewed only the first ~1035 lines of a large pull request —
   and posted a note about it as though it were a verdict.** The diff went in as an OpenCode `-f`
   attachment, and OpenCode injects only part of a large one, expecting the agent to read the rest.

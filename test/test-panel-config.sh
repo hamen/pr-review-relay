@@ -251,6 +251,215 @@ if env -u HOME -i PATH=/usr/bin:/bin bash -c 'set -u; . "$0"; panel_config_load;
   ok "an unset HOME does not abort the loader"
 else bad "unset HOME aborted panel_config_load"; fi
 
+
+# --- review_looks_like_a_review ---------------------------------------------
+# The relay used to fail closed only on an EMPTY review, so a stall or a fragment of
+# garbage posted as a verdict and the round exited 0. Four such bodies were recovered
+# byte-exact from ~/.cache/pr-review-relay on 2026-09-01 and are the fixtures below;
+# they are the point of this helper, so they are quoted rather than paraphrased.
+#
+# NOT via resolve(): that runs under `env -i PATH=/usr/bin:/bin` for config-precedence
+# reasons that do not apply here, and this helper needs the real PATH for grep/sed/tr.
+. "$LIB"
+
+# want: yes | no | stall  — "stall" pins the THREE-valued contract (0 a review,
+# 1 no verdict, 2 a verdict then a stall). Collapsing every non-zero to "no" would
+# leave the two rejection reasons interchangeable, and both callers now print a
+# different sentence for each.
+rlr() { # rlr <yes|no|stall> <label> <body>
+  local want="$1" label="$2" body="$3" got
+  review_looks_like_a_review "$body"
+  case $? in 0) got=yes;; 2) got=stall;; *) got=no;; esac
+  # NO collapse: "no" means exit 1 (no verdict) and "stall" means exit 2. Rewriting
+  # one into the other would let a fixture keep passing after its rejection REASON
+  # changed, and the two reasons now print different sentences to the human.
+  if [ "$got" = "$want" ]; then ok "review gate: $label"; else bad "review gate: $label — got $got, want $want"; fi
+}
+
+# The four recovered failures. All exited 0. All were posted as verdicts.
+rlr no "recovered A — capped at line 1183" \
+  'The diff is capped at line 1183 — I need the rest of it before I can verify the PR against the plan. Let me read the remaining chunks.'
+# B is why the stall check exists at all: it NAMES a severity, at a word boundary, not
+# echoed from any prompt — and it is an agent saying it has not finished.
+rlr stall "recovered B — names Blocker, still a stall" \
+  'Blocker
+- None visible in the readable portion of the diff (lines 1–1182 of the attachment). Reading the remainder before concluding.'
+rlr no "recovered C — reading the rest" 'Reading the rest of the diff before reviewing.'
+rlr no "recovered D — mojibake tool-call fragment" \
+  '៭Read"},{"filePath":"/tmp/tmp.L1BXCtTGcA/oc-diff.auQm5v","offset":1318'
+
+# Real closing lines from this panel, verbatim. A gate that rejects the reviews this
+# repo's own reviewers actually write is the wrong gate — two of these three contain
+# no severity word at all, which is why the approval list exists.
+rlr yes "real: codex closing #37"    'No findings. `bin/ci` passed: 355 tests, 0 failures.'
+rlr yes "real: grok closing #36"     'Looks good: stdin redirect replaces `-f` as planned, prompt and tests match.'
+rlr yes "real: opencode closing #37" '**LGTM** — the diff implements the plan exactly.'
+
+# Markers, including the plural headings reviewers actually use. `## Blockers` and
+# `Nits:` are ordinary style; rejecting a finished review over them would be this
+# gate failing at its own job.
+rlr yes "severity: Blocker heading"  '## Blocker
+- something real'
+rlr yes "severity: Blockers plural"  '## Blockers
+- two of them'
+rlr yes "severity: Nits: plural"     'Nits:
+- naming'
+rlr yes "severity: Nit alone"        'Nit: the naming.'
+rlr yes "severity: Should-fix alone"  'Should-fix: the guard.'
+rlr yes "severity: Should-fixes"     'Should-fixes: a couple.'
+# A bare period is not a sentence boundary: it also ends a filename, a path or a
+# version, and the bodies this guards cite them constantly. Splitting on `.` instead
+# of `. ` made every one of these accepted — measured.
+rlr stall "stall ending in a filename"  'Blocker: none yet. Let me read attachment.txt.'
+rlr stall "stall ending in a path"   'Blocker: none. Reading the rest of /tmp/oc-diff.auQm5v.'
+rlr stall "stall ending in a version" 'Blocker: none. I need the rest before I can verify v1.2.'
+rlr yes "severity: Should fix, space" 'Should fix: the thing.'
+rlr yes "severity: bold markdown"    '**Blocker** — none'
+# MID-SENTENCE, which the plan asked for and every other positive fixture missed:
+# they are all sentence-initial or headings, and mid-sentence is exactly where the
+# [^a-z0-9_] boundary classes would regress first.
+rlr yes "severity: Nit mid-sentence"  'There is one more Nit buried in the guard.'
+rlr yes "approval: LGTM mid-sentence" 'Read it twice and it is LGTM as far as I can tell.'
+# grok and opencode both found this hole: a marked stall phrased only with the words
+# an earlier pass dropped. Restoring `before concluding` closes it, and it fires on
+# no valid fixture — measured phrase by phrase.
+rlr stall "stall: phrased only with 'before concluding'" 'Blocker: none yet, I will stop before concluding.'
+rlr yes "approval: nothing to flag"  'Nothing to flag.'
+rlr yes "approval: none found"       'Blockers: none found.'
+rlr yes "approval: No blockers."     'No blockers.'
+# Underscores are word characters, not boundaries. A raw transcript full of
+# identifiers is exactly what a broken agent emits, and `monitor_nit_state` read as a
+# verdict until this was fixed — measured, not imagined.
+rlr no "boundary: identifier with _nit_" 'monitor_nit_state pending and nothing else'
+rlr no "boundary: _blocker_ as a name"   'setting _blocker_ = 1 and moving on'
+rlr no "boundary: should-fixs is not a marker" 'should-fixs: whatever'
+rlr yes "case: uppercase severity"   'BLOCKER: the guard is missing.'
+rlr yes "approval: bare LGTM"        'LGTM'
+rlr yes "approval: lowercase"        'lgtm'
+
+# Word boundaries. `nit` lives inside unit/init/monitor/definitely, `blocker` inside
+# unblocked; a substring match would call ordinary prose a verdict.
+rlr no "boundary: unit test"      'I read the unit test and it seemed fine to me.'
+rlr no "boundary: initial/monitor" 'The initial monitor definitely needs work here.'
+rlr no "boundary: unblocked"      'This unblocked the pipeline nicely.'
+
+# Prompt echo. Every prompt contains TWO marker-bearing sentences, and the pair is
+# hard-wrapped five different ways across the five sites — review-local breaks inside
+# "If it looks / good" — so these are the real wrappings, not a tidy one-liner.
+rlr no "echo: relay prompt (wraps after Nit.)" \
+  'Report missing tests as Should-fix, unless the untested path is itself a Blocker.
+Be concise. Group findings by severity: Blocker / Should-fix / Nit.
+If it looks good, say so in one line.'
+rlr no "echo: review-local prompt (wraps inside looks/good)" \
+  'Report missing tests as Should-fix, unless the untested path is itself a
+Blocker. Be concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
+good, say so in one line.'
+rlr no "echo: opencode prompt (wraps before Blocker)" \
+  'Report missing tests as Should-fix, unless the untested path is itself a
+Blocker. Be concise. Group findings by severity:
+Blocker / Should-fix / Nit. If it looks good, say so in one line.'
+rlr no "echo: in CAPS" \
+  'REPORT MISSING TESTS AS SHOULD-FIX, UNLESS THE UNTESTED PATH IS ITSELF A BLOCKER. BE CONCISE. GROUP FINDINGS BY SEVERITY: BLOCKER / SHOULD-FIX / NIT. IF IT LOOKS GOOD, SAY SO IN ONE LINE.'
+
+# The stall check must not eat a real review. "let me read" is also what a SUCCESSFUL
+# codex run says on its way to a verdict — it runs without --output-last-message, so
+# its stdout is a raw transcript. Hence: only when there is no approval marker, and
+# only in the closing sentence.
+# The exemption for an approving review is checked on the CLOSING SENTENCE only.
+# Exempting the whole body accepted "Looks good. Let me read the remainder before
+# concluding." — a stall wearing an approval. Order is what separates them.
+rlr yes   "stall: read first, verdict last" 'After reading the rest of the diff, this looks good.'
+rlr stall "stall: verdict first, then still reading" 'Looks good. Let me read the remainder before concluding.'
+# The stall anchor is the closing sentence OF THE LAST NON-EMPTY LINE, and both halves
+# were measured rejecting real reviews before they were added.
+# Line: collapsing newlines merged narration into the review that followed it, which
+# is the shape of a raw codex transcript.
+rlr yes "anchor: raw transcript, review on later lines" 'Let me read the rest
+
+Should-fix
+- The guard is wrong'
+# Verdict of EITHER kind immunises the closing sentence, not only approval: a finding
+# may legitimately quote a stall phrase as its example.
+# DELIBERATE COST OF THE ORDER RULE, and a change of position: grok asked for this
+# to be accepted, and it was, until the order rule landed. It is not separable from
+# `Blocker` + `Reading the remainder before concluding.` — both are a verdict
+# followed by a stall phrase in one sentence, and no surface rule tells a quoted
+# phrase from a real announcement.
+#
+# So the choice is which way to err. Rejecting this costs a failed round on a review
+# that QUOTES a stall phrase — and the only body realistically doing that is a review
+# of this very feature, which is how grok hit it. Accepting it costs the bug this
+# whole change exists to close, silently. Fail closed.
+#
+# The rejected body is printed in full on stderr, so a human sees in one line that
+# the gate was wrong rather than the reviewer.
+rlr stall "cost: a finding that QUOTES a stall phrase is rejected" 'Nit: drop "let me read" from the comment.'
+rlr yes "anchor: severity in the closing sentence" 'Should-fix: check this before I can merge.'
+# "! " and "? " end sentences too, not only ". ".
+rlr stall "anchor: question mark ends a sentence" 'Blocker: none. Should I read the remainder before concluding? Let me read the rest'
+# Line wraps must not decide the verdict. Anchoring to the last physical LINE was
+# tried and broke in BOTH directions, measured: the first of these was accepted
+# because the closing line is "concluding.", and the second was rejected because
+# its heading sat one line up. Normalising before anchoring is what fixes both.
+rlr stall "wrap: a stall broken across a line" 'Blocker
+- None visible yet. Let me read the remainder before
+concluding.'
+rlr yes "wrap: a finding whose heading is on the line above" 'Blocker
+- Sanitize the path before I can approve this.'
+rlr yes "wrap: the same finding written inline" 'Blocker: Sanitize the path before I can approve this.'
+# Markdown emphasis is stripped before anything is matched. Without that the prompt
+# strip is byte-literal while the marker matcher is not, so a bolded echo survived
+# the strip and then satisfied the matcher.
+rlr no "echo: prompt echoed in markdown emphasis" 'Report missing tests as **Should-fix**, unless the untested path is itself a **Blocker**. Be concise. Group findings by severity: **Blocker** / **Should-fix** / **Nit**. If it looks good, say so in one line.'
+# ORDER, not presence. Both of the next two hold a marker and a stall phrase in the
+# same closing sentence once whitespace is collapsed; only their order differs, and
+# every anchoring rule tried before this one fixed one and broke the other in a loop.
+# "I was reading, and here is my verdict" is a review; "here is my verdict, and I am
+# still reading" is not.
+rlr stall "order: verdict first, then still reading (no punctuation)" 'Blocker
+Reading the remainder before concluding.'
+rlr stall "order: approval first, then still reading (no punctuation)" 'Looks good
+Let me read the remainder before concluding.'
+rlr yes "order: reading first, verdict last" 'Let me read the rest
+
+Should-fix
+- The guard is wrong'
+# Phrases that are ordinary review English were dropped, and that is what made the
+# two bodies above separable at all. Measured: of the eight original phrases,
+# `before i can` was the ONLY one firing on this valid finding, and it fired on NONE
+# of the four recovered failures.
+rlr yes "phrase: a finding that says 'before I can'" 'Blocker
+- Sanitize the path before I can approve this.'
+rlr yes "phrase: boundary, let me readjust" 'Blocker: the guard is wrong.
+
+Let me readjust the retry timer.'
+rlr yes "phrase: past tense, I read the remaining" 'Should-fix: add a case.
+
+I read the remaining tests as well.'
+rlr stall "stall: recovered B is reported AS a stall" 'Blocker
+- None visible in the readable portion of the diff. Reading the remainder before concluding.'
+rlr no    "no verdict is reported as no verdict" 'Reading the rest of the diff before reviewing.'
+rlr yes "stall: narration first, verdict last" \
+  'Let me read the diff first. Now checking the tests. Should-fix: the helper needs a guard.'
+
+# Known limit, asserted so it is deliberate rather than discovered: a negated approval
+# still contains the approval marker.
+rlr yes "known limit: negated approval passes" 'I do not think this looks good.'
+
+# A large body must be handled at all — no argv limit, no truncation, no pipeline
+# accident. This does NOT catch a `-q` regression: measured on GNU grep 3.11, `-q`
+# returns 0 up to 5MB because grep drains its input, so swapping it back is
+# behaviourally identical here. The helper avoids `-q` on portability grounds, not
+# because this fixture would fail without it — said plainly, because a test that
+# looks like it guards something it does not is worse than no test.
+_rlr_big="LGTM — everything checks out.
+$(head -c 200000 /dev/zero | tr '\0' 'x')"
+rlr yes "pipefail: 200 KB body with a marker at the start" "$_rlr_big"
+
+# Empty belongs to the callers' own empty branch, which has its own message and dumps
+# stderr. The helper still says no, so ordering is the callers' responsibility.
+rlr no "empty body" ''
+
 echo "-------------------------------------------"
 echo "panel config tests: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

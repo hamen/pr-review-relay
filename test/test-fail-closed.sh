@@ -104,7 +104,7 @@ case "\$self" in cursor-agent) key=cursor;; agy) key=antigravity;; *) key="\$sel
 case ",\${SLEEP_KEYS:-}," in *",\$key,"*) sleep 5;; esac        # outlast a short timeout → rc 124
 case ",\${FAIL_EMPTY:-}," in *",\$key,"*) exit 0;; esac      # empty output, rc 0 → "no review"
 case ",\${WS_ONLY:-}," in *",\$key,"*) printf '\t\n  \n';  exit 0;; esac  # whitespace-only "review"
-case ",\${FAIL_RC:-}," in *",\$key,"*) echo "partial"; exit 1;; esac  # output but rc!=0
+case ",\${FAIL_RC:-}," in *",\$key,"*) echo "Nit: partial output, then the crash."; exit 1;; esac  # output but rc!=0
 # Out of quota. Two variants because they take DIFFERENT code paths: on stderr the relay's
 # empty-output branch sees it, on stdout it does not — and the stdout one used to be posted as
 # a review.
@@ -112,6 +112,12 @@ case ",\${QUOTA_ERR:-}," in *",\$key,"*) echo "Error: Individual quota reached. 
 case ",\${QUOTA_PAD:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 08m00s." >&2; exit 1;; esac
 case ",\${QUOTA_TEXT_OK:-}," in *",\$key,"*) echo "Looks good. Note the branch where quota reached is handled."; exit 0;; esac
 case ",\${QUOTA_OUT:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s."; exit 1;; esac
+# Not a review: non-empty, rc 0, and no verdict. Until the gate landed this posted as
+# the reviewer's answer and the round exited 0. NONREVIEW_STALL is a body recovered
+# byte-exact from a real failure — it NAMES a severity and is still a stall, which is
+# why a marker-only gate is not enough.
+case ",\${NONREVIEW:-}," in *",\$key,"*) echo "Reading the rest of the diff before reviewing."; exit 0;; esac
+case ",\${NONREVIEW_STALL:-}," in *",\$key,"*) printf 'Blocker\n- None visible in the readable portion of the diff (lines 1-1182 of the attachment). Reading the remainder before concluding.\n'; exit 0;; esac
 # Record our argv when asked, so a test can assert the command line the relay builds.
 # The bug this guards against is a flag silently going missing or being renamed, which
 # no output-shape assertion would ever notice.
@@ -1335,6 +1341,60 @@ if [ -f "$RL" ]; then
   rl_assert "review-local: default-deny policy" has   '"\*":"deny"'     "$OC_ARGV.cfg"
   rl_assert "review-local: never allows bash"   hasnt '"bash":"allow"'  "$OC_ARGV.cfg"
   rl_assert "review-local: defines its own agent" has '"pr-review-relay-ro"' "$OC_ARGV.cfg"
+
+  # The same gate, the other caller. review-local posts nowhere, so its stdout banner
+  # IS the delivery: a rejected body must not go out under "===== Name review =====",
+  # or the launching agent reads a non-review as a review — the same harm, moved.
+  #
+  # $FAILDIR is mktemp -d with an EXIT trap and no env override, so it cannot be
+  # inspected after the run. The observable contract is the exit code and the message.
+  # Streams captured SEPARATELY. Merging them with 2>&1 cannot prove the documented
+  # rule — a rejected body goes to stderr and never to stdout, which is the channel
+  # the launching agent reads as the review.
+  _rlnr=$( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" NONREVIEW=claude \
+      bash "$RL" --base mainline --reviewers claude 2>"$WORK/rl_err.log" )
+  _rlnr_rc=$?
+  _rlnr_err=$(cat "$WORK/rl_err.log")
+  # Exit 3, not merely non-zero: 1 and 2 are usage errors and 4 is a loop cap, so
+  # "non-zero" would pass for three wrong reasons.
+  if [ "$_rlnr_rc" = 3 ]; then
+    echo "  ok   [3] review-local fails on a non-review"; PASS=$((PASS+1))
+  else
+    echo "  FAIL [got $_rlnr_rc, want 3] review-local exit code on a non-review"; FAIL=$((FAIL+1))
+  fi
+  if ! grep -q 'Reading the rest of the diff' <<< "$_rlnr"; then
+    echo "  ok   [-] review-local keeps the rejected body off stdout"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local put the rejected body on stdout"; FAIL=$((FAIL+1))
+  fi
+  if ! grep -q '========== Claude review ==========' <<< "$_rlnr"; then
+    echo "  ok   [-] review-local does not print a non-review under the review banner"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local printed a non-review as a review"; FAIL=$((FAIL+1))
+  fi
+  if grep -q 'not a review' <<< "$_rlnr_err"; then
+    echo "  ok   [-] review-local says why it rejected the body"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local rejected silently"; FAIL=$((FAIL+1))
+  fi
+  # stderr IS the delivery for this caller — it posts nowhere — so the body has to be
+  # visible there, or the gate deletes the evidence it rejected.
+  if grep -q 'Reading the rest of the diff' <<< "$_rlnr_err"; then
+    echo "  ok   [-] review-local shows the rejected body on stderr"; PASS=$((PASS+1))
+  else
+    echo "  FAIL review-local swallowed the rejected body"; FAIL=$((FAIL+1))
+  fi
+  # Recovered body B, end to end, on THIS caller. The relay side pins it; review-local
+  # did not, so a caller that wired the marked-stall path wrong kept the suite green.
+  _rlb=$( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" NONREVIEW_STALL=claude \
+      bash "$RL" --base mainline --reviewers claude 2>"$WORK/rl_err_b.log" )
+  _rlb_rc=$?
+  if [ "$_rlb_rc" = 3 ] && grep -q 'still reading' "$WORK/rl_err_b.log" \
+     && ! grep -q '========== Claude review ==========' <<< "$_rlb"; then
+    echo "  ok   [3] review-local rejects a stall that names Blocker"; PASS=$((PASS+1))
+  else
+    echo "  FAIL [got $_rlb_rc] review-local mishandled a marked stall"; FAIL=$((FAIL+1))
+  fi
   # From here on the runs must NOT dispatch opencode, so clear the recorded files:
   # asserting on them afterwards would be reading the successful run above.
   oc_reset
@@ -1471,8 +1531,12 @@ LREPO="$WORK/localrepo"; git init -q -b main "$LREPO"
     && git checkout -qb feature && echo change >> file.txt && git add file.txt && git commit -qm feat )
 LHEAD=$(git -C "$LREPO" rev-parse HEAD)
 ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
-# reviewer stub that echoes the prompt it received, so we can see what it was told to do
-printf '#!/usr/bin/env bash\nprintf "%%s" "$*"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
+# reviewer stub that echoes the prompt it received, so we can see what it was told to do.
+# The trailing verdict is required, not decoration: a bare prompt echo is precisely what
+# the non-review gate rejects (it strips the prompt's own instruction sentences before
+# looking for a marker), so without it this stub fails the round and every assertion
+# below reads 3 instead of 0.
+printf '#!/usr/bin/env bash\nprintf "%%s" "$*"\nprintf "\\nLGTM.\\n"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
 lc_run() { # sets $out/$rc; args: extra env assignments for the relay
   rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
   out=$( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
@@ -2838,6 +2902,91 @@ env PATH="$BINQ:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sh
 _side=$(latest_side)
 _tot=$(wc -c < "$_side" 2>/dev/null || echo 0)
 [ "$_tot" -le $((4096 + 400)) ]; ok_if $? "the probe byte is trimmed, body respects the stated cap" "total=$_tot"
+
+# A NON-REVIEW must fail the round and must not be posted. This is the assertion that
+# would have caught the original bug: on 2026-09-01 three of four opencode failures
+# were non-empty, exited 0, and were published as that seat's verdict — so a four-seat
+# panel silently became two while the relay printed success.
+#
+# Both halves matter, and the exit code alone is not enough: the harm was a garbage
+# COMMENT on the pull request, so "did not post" is asserted directly, on the empty
+# post log, the way --no-post is asserted below. (Grepping GH_POST_LOG for the body
+# would pass vacuously — the log records the argv and the body travels in --body-file.)
+s_reset; : > "$WORK/posted.log"
+# Separate streams: merging them cannot prove the body stays OFF stdout, which is
+# what the launching agent reads as the review.
+_nr_out=$(env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" NONREVIEW=claude \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>"$WORK/nr_err.log")
+_nr_rc=$?
+_nr_err=$(cat "$WORK/nr_err.log")
+[ "$_nr_rc" = 3 ]; ok_if $? "a non-review fails the round" "rc=$_nr_rc"
+[ ! -s "$WORK/posted.log" ]; ok_if $? "a non-review is not posted to the PR" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+# The delivery contract, asserted rather than implied. The launching agent reads the
+# relay's stdout, so a rejected body must not arrive there wearing a review header —
+# that would be the same harm the gate exists to stop, one channel over. And the
+# body has to be visible SOMEWHERE, or the gate deletes the evidence it rejected.
+printf '%s' "$_nr_out" | grep -q '========== Claude review =========='
+[ $? -ne 0 ]; ok_if $? "a non-review does not print under the review banner" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_err" | grep -q 'not a review'; ok_if $? "the relay says why it rejected the body" "err=$(printf '%s' "$_nr_err" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_out" | grep -q 'Reading the rest of the diff'
+[ $? -ne 0 ]; ok_if $? "the rejected body stays off stdout" "out=$(printf '%s' "$_nr_out" | tail -3 | tr '\n' '|')"
+printf '%s' "$_nr_err" | grep -q 'Reading the rest of the diff'; ok_if $? "the rejected body itself is shown on stderr" "err=$(printf '%s' "$_nr_err" | tail -3 | tr '\n' '|')"
+# The two rejection reasons are different problems with different fixes, so they must
+# not read the same. "no verdict" here; "a verdict, then a stall" on the body below.
+printf '%s' "$_nr_err" | grep -q 'names no severity'; ok_if $? "a body with no verdict says so" "err=$(printf '%s' "$_nr_err" | tail -3 | tr '\n' '|')"
+
+# The recovered body that names a severity. A gate built only on markers accepts this
+# one, which is the whole reason the stall check exists.
+s_reset; : > "$WORK/posted.log"
+_nrs_out=$(env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" NONREVIEW_STALL=claude \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude 2>"$WORK/nrs_err.log")
+_nrs_rc=$?
+_nrs_err=$(cat "$WORK/nrs_err.log")
+[ "$_nrs_rc" = 3 ]; ok_if $? "a stall that names Blocker still fails the round" "rc=$_nrs_rc"
+printf '%s' "$_nrs_err" | grep -q 'still reading'; ok_if $? "a stall is reported as a stall, not as a missing verdict" "err=$(printf '%s' "$_nrs_err" | tail -3 | tr '\n' '|')"
+[ ! -s "$WORK/posted.log" ]; ok_if $? "a stall that names Blocker is not posted" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+
+# Ordering, pinned. The bench short-circuits on `rc != 0 AND a quota match`, so a
+# benched seat never reaches the gate — QUOTA_OUT exits 1 with an unmarked line and
+# must still bench rather than being called a non-review. Its sibling QUOTA_TEXT_OK
+# exits 0, DOES reach the gate, and passes only because it says "Looks good".
+# If the gate is ever moved above the bench, the first of these goes red.
+s_reset; : > "$WORK/posted.log"
+env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" QUOTA_OUT=claude \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1
+_nrq_rc=$?
+# Two seats on purpose: benching the ONLY reviewer empties the panel, which is its own
+# exit 3, and would hide whether the bench or the gate produced it.
+[ "$_nrq_rc" = 0 ]; ok_if $? "quota is benched before the non-review gate can see it" "rc=$_nrq_rc"
+
+# The sibling. QUOTA_TEXT_OK exits 0, so the bench does NOT short-circuit it (the bench
+# needs rc!=0 AND a quota match) — it reaches the gate and passes only because it says
+# "Looks good". This is the half that proves the bench's conjunction, not merely its
+# position: if the bench ever matched on text alone, this seat would be benched instead
+# of reviewed.
+# The rc!=0 asymmetry, asserted rather than assumed. A crashed reviewer that still
+# named a verdict keeps its old behaviour: POSTED, marked unclean. Exit 3 alone cannot
+# show this — it is equally true of "rejected and not posted" — so the post log is the
+# assertion. Without it, a gate that also swallowed rc!=0 bodies would keep every
+# existing test green while quietly deleting partial reviews.
+s_reset; : > "$WORK/posted.log"
+env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" FAIL_RC=claude \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+_nrf_rc=$?
+[ "$_nrf_rc" = 3 ]; ok_if $? "a crashed reviewer with a verdict still fails the round" "rc=$_nrf_rc"
+[ -s "$WORK/posted.log" ]; ok_if $? "and it is still POSTED — the gate does not swallow rc!=0 bodies" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
+
+s_reset; : > "$WORK/posted.log"
+env PATH="$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$SCACHE" GH_SHA_COUNTER="$WORK/sha_counter" \
+  GH_FIXED_SHA="$SHA_A" GH_POST_LOG="$WORK/posted.log" QUOTA_TEXT_OK=claude \
+  bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1
+_nrqt_rc=$?
+[ "$_nrqt_rc" = 0 ]; ok_if $? "a review that merely mentions quota passes the gate" "rc=$_nrqt_rc"
+[ -s "$WORK/posted.log" ]; ok_if $? "and it is posted, not benched" "posted=$(wc -c < "$WORK/posted.log" 2>/dev/null)"
 
 # --no-post. The reviews are the delivery on stdout, and the pull request is not touched: used when
 # the PR belongs to someone else and a human has to read the review before anybody else does. The

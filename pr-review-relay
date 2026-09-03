@@ -52,9 +52,12 @@
 #      writes ahead of the real one on PATH — the agents inherit it.
 #      NOTE: this means everyone RAN — not that the PR is approved. You still must
 #      read the reviews and resolve every Blocker/Should-fix before merging.
-#   3  not a clean round: a reviewer returned empty / timed out / exited non-zero /
-#      failed to post, OR an explicitly-requested reviewer was missing, OR no
-#      reviewer ran, OR HEAD moved during the round (reviews now describe stale code).
+#   3  not a clean round: a reviewer returned empty / returned something that is not a
+#      review / timed out / exited non-zero / failed to post, OR an explicitly-requested
+#      reviewer was missing, OR no reviewer ran, OR HEAD moved during the round (reviews
+#      now describe stale code).
+#      "Not a review" means non-empty output that names no severity and does not say it
+#      looks good, or that says the reviewer is still reading. Such a body is NOT posted.
 #      ONE exception to "explicitly-requested reviewer was missing": an agent that is out
 #      of quota is BENCHED, not failed — dropped until the reset time it reported, and
 #      announced on every round. See "The bench" below for why, and $BENCH_FILE to undo it.
@@ -173,8 +176,11 @@ case "$LOG_MAX_BYTES" in ''|*[!0-9]*|0) echo "invalid PR_RELAY_LOG_MAX_BYTES: '$
 # in a panel that claims two independent ones, which is the same defect as Auto picking Claude,
 # just one row down.
 # An unknown id is safe as of cursor-agent 2026.07: it exits 1 and puts the error on stderr,
-# leaving stdout empty, so the fail-closed path below reports a failed reviewer. That rests on
-# stdout being empty — a non-zero exit WITH output is still posted (marked unclean).
+# leaving stdout empty, so the fail-closed path below reports a failed reviewer. That used to rest
+# on stdout being empty; it no longer does. A non-zero exit WITH output is still posted (marked
+# unclean) ONLY IF that output looks like a review — see review_looks_like_a_review in lib-panel.sh.
+# An error message that names no severity is now rejected rather than published as a verdict.
+# The same correction applies to the two notes further down that still describe the old promise.
 # Same value in review-local and pr-review-distill; the tests assert all three.
 CURSOR_REVIEW_MODEL="$(panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)"
 
@@ -202,13 +208,16 @@ AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_antigravity "")"
 #
 # The fallback is LOAD-BEARING, not a courtesy. Measured on claude 2.1.220: an unavailable model
 # (no entitlement, over quota, retired id) prints "There's an issue with the selected model …" on
-# STDOUT and exits 1, with stderr EMPTY. As the cursor note above spells out, a non-zero exit WITH
-# output is still posted (the round is only marked unclean) — so without a fallback that error text
-# lands on the PR under a "Claude review" header and the round is burnt. Cursor's unknown id is
+# STDOUT and exits 1, with stderr EMPTY. That error text no longer reaches the PR — the non-review
+# gate rejects it, because CLI error text names no severity — but the round is still burnt, which is
+# what the fallback exists to prevent. Before that gate it was also PUBLISHED under a
+# "Claude review" header. Cursor's unknown id is
 # safe because its error goes to stderr and stdout stays empty; claude's does the opposite.
 # The fallback turns a guaranteed-wasted round into a real review. This repo is public — most
 # installs are not on the account that chose `opus`.
-# RESIDUAL: if the fallback model fails the same way, the error text is still what gets posted.
+# RESIDUAL: if the fallback model fails the same way, the round is still burnt — but the error text
+# is no longer POSTED. CLI error prose names no severity, so the non-review gate rejects it and the
+# seat is reported as failed instead of publishing a fake review.
 CLAUDE_REVIEW_MODEL="$(panel_resolve CLAUDE_REVIEW_MODEL MODEL_claude opus)"
 CLAUDE_REVIEW_EFFORT="$(panel_resolve CLAUDE_REVIEW_EFFORT EFFORT_claude "")"
 CLAUDE_REVIEW_FALLBACK_MODEL="$(panel_resolve CLAUDE_REVIEW_FALLBACK_MODEL MODEL_claude_fallback sonnet)"
@@ -503,8 +512,15 @@ bench_parse_reset() {
 # Does this output say "out of quota"? Deliberately narrow: a timeout or a crash is NOT out of
 # quota — it is usually a big diff or a bad afternoon — and benching a merely slow agent would hide
 # a real regression instead of reporting it.
+# No `-q`, matching review_looks_like_a_review, and for the same reason: not an
+# observed failure, but a refusal to depend on grep draining its input. It matters
+# more here than the size of the pattern suggests — the caller passes
+# "$out$(cat "$errf")", the whole review plus stderr, up to PR_RELAY_LOG_MAX_BYTES,
+# so if a grep ever DID exit early, a large failing review that says "quota reached"
+# in its first line would return 141 and the seat would not be benched at all.
+# Measured with GNU grep 3.11: `-q` returns 0 up to 5MB. See lib-panel.sh.
 bench_looks_like_quota() {
-  printf '%s' "$1" | grep -qiE 'quota (reached|exceeded)|out of quota|usage limit reached|rate limit exceeded.*upgrade'
+  printf '%s' "$1" | grep -iE 'quota (reached|exceeded)|out of quota|usage limit reached|rate limit exceeded.*upgrade' >/dev/null
 }
 
 [ "$RESET" = 1 ] && relay_forget_key
@@ -1090,9 +1106,11 @@ review_with() {
   # Out of quota? Decide BEFORE anything is posted, and look at BOTH streams.
   #
   # Checking only the empty-output branch below would miss the case this exists for: an agent that
-  # prints its quota error on STDOUT has non-empty output, sails past the empty check, and the
-  # error text gets published as if it were a review — an unclean round whose PR comment says
-  # "Please upgrade your subscription".
+  # prints its quota error on STDOUT has non-empty output and sails past the empty check. Before the
+  # non-review gate that text was PUBLISHED as if it were a review — an unclean round whose PR
+  # comment said "Please upgrade your subscription". The gate would now reject it as unmarked, but
+  # this bench must still come first: a quota failure is a benched seat with a reset time, not a
+  # reviewer that answered badly.
   #
   # The child does not touch the bench file. It records the finding beside its own status, exactly
   # as it records pass/fail, and the parent merges after the wait. Two agents discovering quota in
@@ -1130,6 +1148,32 @@ review_with() {
       tail -n 15 "$errf" | sed 's/^/    │ /' >&2
     fi
     echo fail > "$STATUS_DIR/$skey"   # no output → round is not clean
+    rm -f "$errf"; return 0
+  fi
+  # A non-empty answer is not automatically a review. Until now the ONLY content
+  # check was the empty one above, so a stall or a fragment of garbage posted as the
+  # verdict and the round exited 0 — measured on 2026-09-01, three of four failures
+  # did exactly that, and a four-seat panel became two while printing success.
+  #
+  # Order matters and is asserted in the tests. The quota bench above short-circuits
+  # on `rc != 0 AND a quota match`, so a benched seat never reaches here; the empty
+  # check stays ahead of this one so an empty body still gets its own message and
+  # its stderr dump rather than being called a non-review.
+  #
+  # TRUNCATED is exempt on purpose. When the relay cut the text itself it appends a
+  # banner into $out, the round is already unclean, and the body is posted
+  # deliberately as evidence. What is left cannot be judged for completeness: a
+  # missing verdict marker may be the relay's doing, not the reviewer's.
+  review_looks_like_a_review "$out"; local _nr=$?
+  if [ "$TRUNCATED" != 1 ] && [ "$_nr" -ne 0 ]; then
+    if [ "$_nr" = 2 ]; then
+      echo "  ! $name: not a review — it names a verdict and then says it is still reading. NOT posted." >&2
+    else
+      echo "  ! $name: not a review — it names no severity (Blocker/Should-fix/Nit) and does not say it looks good. NOT posted." >&2
+    fi
+    echo "    $name returned:" >&2
+    printf '%s\n' "$out" | sed 's/^/    │ /' >&2
+    echo fail > "$STATUS_DIR/$skey"
     rm -f "$errf"; return 0
   fi
   local unclean=0
