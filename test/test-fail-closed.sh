@@ -1207,6 +1207,193 @@ rc=$?
 if [ "$rc" = 2 ]; then echo "  ok   [2] a '.' PATH entry inside the repo is refused too"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 2] '.' on PATH slipped through"; FAIL=$((FAIL+1)); fi
 
+# --- a `.git` DIRECTORY that is not a repository must not become the root ----------------------
+# The guard above is only as good as the root it is given. relay_worktree_root used to accept any
+# EXISTING `.git`, so a directory holding nothing but `info/exclude` — which is exactly what Claude
+# Code creates at the top of a projects directory, to keep `.claude/` out of every project's status
+# — made an entire tree of unrelated repositories look like one repository. Every PATH entry
+# symlinked into that tree was then refused, correctly by the guard and wrongly in effect, and the
+# workaround people reach for is to delete the entry from PATH: routing around a check that works.
+#
+# CANONICALIZE $WORK before comparing paths. relay_worktree_root prints `pwd -P` output, and on
+# macOS /tmp is a symlink to /private/tmp, so a raw "$WORK/..." expectation fails there for a
+# reason that has nothing to do with the code. The PATH cases above dodge this by asserting rc
+# alone; these assert the root itself, which is the point — an exit code cannot tell "inner repo"
+# from "no root at all" from "some other root".
+GITROOT_W="$(cd -P "$WORK" && pwd -P)"
+mkdir -p "$WORK/fakeroot/.git/info"                 # no HEAD: not a repository
+printf 'x\n' > "$WORK/fakeroot/.git/info/exclude"
+mkdir -p "$WORK/fakeroot/repo" "$WORK/fakeroot/bin"
+( cd "$WORK/fakeroot/repo" && relay_isolate_git "$WORK/fakeroot/repo" && git init -q . ) >/dev/null 2>&1
+
+# Sourced in a subshell and called directly: see the note above on why rc is not enough. `set -u`
+# because lib-opencode.sh documents that its callers run under it.
+git_root_from() ( cd "$1" 2>/dev/null || exit 1; set -u; . "$HERE/../lib-opencode.sh" 2>/dev/null; relay_worktree_root )
+
+got=$(git_root_from "$WORK/fakeroot/repo")
+if [ "$got" = "$GITROOT_W/fakeroot/repo" ]; then
+  echo "  ok   [-] a HEAD-less .git directory is not a root"; PASS=$((PASS+1))
+else
+  echo "  FAIL a HEAD-less .git directory still inflated the root (got '$got')"; FAIL=$((FAIL+1)); fi
+
+# `HEAD` must be a FILE. `-e` would accept a DIRECTORY (or a socket) named HEAD, and every other
+# case here would still pass — the negative fixture above has no HEAD at all, so it cannot tell
+# `-f` from `-e`. This one can: a .git directory whose HEAD is itself a directory is not a
+# repository, and must not be a root. (codex)
+mkdir -p "$WORK/badhead/.git/HEAD" "$WORK/badhead/sub"
+got=$(git_root_from "$WORK/badhead/sub")
+if [ -n "$got" ]; then
+  echo "  FAIL a .git whose HEAD is a directory was accepted as a root (got '$got')"; FAIL=$((FAIL+1))
+else
+  echo "  ok   [-] a .git whose HEAD is not a file is not a root"; PASS=$((PASS+1)); fi
+
+# The end-to-end shape of the same bug, and it only reproduces FROM INSIDE the fake tree. An
+# earlier version of this case ran from $WORK/dotpath, whose ancestor walk never crosses
+# $WORK/fakeroot: the root was $WORK/dotpath before and after the fix, so the entry was outside it
+# either way and the assertion passed on unfixed code. All three cross-reviewers caught it.
+#
+# Run from a real repository UNDER the HEAD-less parent, with the PATH entry a sibling of that
+# repository. Before the fix the root inflates to $WORK/fakeroot, the entry is inside it, and the
+# relay exits 2; after the fix the root is the repository itself and the run completes.
+mkdir -p "$WORK/fakeroot/inner"
+( cd "$WORK/fakeroot/inner" && relay_isolate_git "$WORK/fakeroot/inner" && git init -q . ) >/dev/null 2>&1
+cp "$BIN2/gh" "$WORK/fakeroot/bin/" 2>/dev/null || true
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/fakeroot/inner" && env PATH="$WORK/fakeroot/bin:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   [0] a PATH entry under a HEAD-less .git, outside the repo, is allowed"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 0] refused a PATH entry that is not in any repository"; FAIL=$((FAIL+1)); fi
+
+# ...and the mirror image, so this fix cannot be mistaken for weakening the guard: an entry INSIDE
+# the repo is still refused. Named explicitly — at $WORK/fakeroot/bin it would just be the case
+# above with the opposite assertion.
+mkdir -p "$WORK/fakeroot/repo/bin"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+( cd "$WORK/fakeroot/repo" && env PATH="$WORK/fakeroot/repo/bin:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+    GH_SHA_COUNTER="$WORK/sha_counter" \
+    bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
+rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   [2] a PATH entry inside the repo is still refused"; PASS=$((PASS+1))
+else echo "  FAIL [got $rc, want 2] the fix weakened the containment guard"; FAIL=$((FAIL+1)); fi
+
+# A real repository is still found, including a fresh `git init` with no commits — the case that
+# rules out `objects/` or a commit as the marker. Its own fixture, OUTSIDE fakeroot: asserting this
+# on fakeroot/repo would repeat the case above with the same command and the same expectation, so
+# the two could only ever pass or fail together.
+mkdir -p "$WORK/freshinit"
+( cd "$WORK/freshinit" && relay_isolate_git "$WORK/freshinit" && git init -q . ) >/dev/null 2>&1
+got=$(git_root_from "$WORK/freshinit")
+if [ "$got" = "$GITROOT_W/freshinit" ]; then
+  echo "  ok   [-] a commit-less repository is still a root"; PASS=$((PASS+1))
+else
+  echo "  FAIL a fresh git init was not recognised (got '$got')"; FAIL=$((FAIL+1)); fi
+
+# A linked worktree still resolves — `.git` is a FILE there, which is why the predicate accepts
+# every non-directory unchanged. THE FIXTURE MUST HAVE NO ANCESTOR .git DIRECTORY: this project's
+# own layout puts worktrees at <repo>/.claude/worktrees/<name>, inside a tree whose parent has a
+# real .git, so outermost-match would return that parent and the case would pass even if the FILE
+# branch were deleted.
+# The worktree is a SIBLING of its repository, not a child: putting it at <repo>/linked would give
+# it an ancestor .git DIRECTORY, outermost-match would return the repository, and the assertion
+# would pass with the FILE branch deleted.
+mkdir -p "$WORK/wtsrc"
+( cd "$WORK/wtsrc" && relay_isolate_git "$WORK/wtsrc" && git init -q . \
+  && git commit -q --allow-empty -m x && git worktree add -q "$WORK/wtlinked" -b wt ) >/dev/null 2>&1
+got=$(git_root_from "$WORK/wtlinked")
+if [ "$got" = "$GITROOT_W/wtlinked" ]; then
+  echo "  ok   [-] a linked worktree (.git is a FILE) is still a root"; PASS=$((PASS+1))
+else
+  echo "  FAIL a linked worktree stopped being a root (got '$got')"; FAIL=$((FAIL+1)); fi
+
+# ...and it stays a root even with the execute bit set on that FILE. This pins the `-d` line: drop
+# it and a non-executable .git file still passes (the `-x` test below is false for it, so it takes
+# the same early return), but an EXECUTABLE one falls through to the HEAD test and the worktree
+# stops being a root. Odd file mode, real consequence — the guard would switch off.
+chmod +x "$WORK/wtlinked/.git" 2>/dev/null || true
+got=$(git_root_from "$WORK/wtlinked")
+chmod 0644 "$WORK/wtlinked/.git" 2>/dev/null || true
+if [ "$got" = "$GITROOT_W/wtlinked" ]; then
+  echo "  ok   [-] an executable .git FILE is still a root"; PASS=$((PASS+1))
+else
+  echo "  FAIL the .git FILE branch depends on the execute bit (got '$got')"; FAIL=$((FAIL+1)); fi
+
+# The outermost-match rule still holds for REAL repositories: run from the inner one, the outer
+# wins. That rule is a deliberate conservative choice and this change must not relax it.
+mkdir -p "$WORK/outer/inner"
+( cd "$WORK/outer" && relay_isolate_git "$WORK/outer" && git init -q . ) >/dev/null 2>&1
+( cd "$WORK/outer/inner" && relay_isolate_git "$WORK/outer/inner" && git init -q . ) >/dev/null 2>&1
+got=$(git_root_from "$WORK/outer/inner")
+if [ "$got" = "$GITROOT_W/outer" ]; then
+  echo "  ok   [-] outermost-match still wins for nested real repositories"; PASS=$((PASS+1))
+else
+  echo "  FAIL outermost-match regressed (got '$got')"; FAIL=$((FAIL+1)); fi
+
+# A `.git` SYMLINK TO A DIRECTORY must go through the -d + HEAD path. `-d` follows symlinks, so
+# this works — but only while the predicate is a branch chain. An implementer "simplifying" it
+# into a -L rejection breaks this and nothing else would notice. Note the symlink must point at a
+# DIRECTORY: a symlink to a gitdir-pointer FILE exits at the non-directory branch instead, which
+# is a different path through the helper.
+mkdir -p "$WORK/symgit/realgit" "$WORK/symgit/sub"
+printf 'ref: refs/heads/main\n' > "$WORK/symgit/realgit/HEAD"
+ln -s realgit "$WORK/symgit/.git"
+got=$(git_root_from "$WORK/symgit/sub")
+if [ "$got" = "$GITROOT_W/symgit" ]; then
+  echo "  ok   [-] a .git symlinked to a directory with HEAD is a root"; PASS=$((PASS+1))
+else
+  echo "  FAIL a symlinked .git directory was rejected (got '$got')"; FAIL=$((FAIL+1)); fi
+
+# An UNSEARCHABLE .git directory is treated as a repository. Returning "not a root" here would be
+# the dangerous answer: with no root, relay_assert_path_outside_repo takes its `|| return 0` and
+# the PATH guard is OFF entirely. A wrong root costs a false refusal; a missing root removes the
+# check silently.
+#
+# The mode is restored IMMEDIATELY after the assertion, not at the end of the block: the suite's
+# `trap 'rm -rf "$WORK"' EXIT` cannot descend into a mode-000 directory as a non-root user, so the
+# fixture would leak a temp dir on every run — silently, because the trap's status is discarded.
+# The fixture is a sibling and never $WORK/.git, or every later case inherits it as a root.
+if [ "$(id -u)" != 0 ]; then
+  mkdir -p "$WORK/noperm/.git/info" "$WORK/noperm/sub"
+  printf 'x\n' > "$WORK/noperm/.git/info/exclude"          # contents BEFORE the chmod
+  chmod 000 "$WORK/noperm/.git"
+  got=$(git_root_from "$WORK/noperm/sub")
+  chmod 0755 "$WORK/noperm/.git"                            # restore before anything can exit
+  if [ "$got" = "$GITROOT_W/noperm" ]; then
+    echo "  ok   [-] an unsearchable .git directory is still treated as a root"; PASS=$((PASS+1))
+  else
+    echo "  FAIL an unsearchable .git turned the guard off (got '$got')"; FAIL=$((FAIL+1)); fi
+else
+  echo "  ok   [-] unsearchable .git case skipped (running as root)"; PASS=$((PASS+1))
+fi
+
+# The SECOND call site: the walk stops before "/", so the filesystem root is checked separately
+# and needs the same predicate — otherwise a HEAD-less /.git still becomes the root, which is this
+# bug at the largest blast radius there is. Creating /.git in CI is not on, so assert the predicate
+# directly; on any machine without a /.git this must be false.
+if [ ! -e /.git ]; then
+  if ( set -u; . "$HERE/../lib-opencode.sh" 2>/dev/null; relay_is_git_root "" ); then
+    echo "  FAIL relay_is_git_root claimed / is a root with no /.git present"; FAIL=$((FAIL+1))
+  else
+    echo "  ok   [-] the predicate says / is not a root when /.git is absent"; PASS=$((PASS+1)); fi
+  # ...and that relay_worktree_root REACHES it there. The assertion above only tests the helper:
+  # put the old `[ -e "/.git" ]` back on the root line and it still passes on a machine with no
+  # /.git. So override the helper to succeed ONLY for the empty argument — the root call site's
+  # argument — and require the walk to report "/". A root line that does not call the helper
+  # cannot produce that. (codex)
+  got=$( cd "$WORK" 2>/dev/null && set -u && . "$HERE/../lib-opencode.sh" 2>/dev/null
+         relay_is_git_root() { [ -z "$1" ]; }
+         relay_worktree_root )
+  if [ "$got" = "/" ]; then
+    echo "  ok   [-] the / call site goes through the predicate"; PASS=$((PASS+1))
+  else
+    echo "  FAIL the / call site does not use relay_is_git_root (got '$got')"; FAIL=$((FAIL+1)); fi
+else
+  echo "  ok   [-] / call site cases skipped (this machine has a /.git)"; PASS=$((PASS+1))
+  echo "  ok   [-] / call site predicate case skipped (this machine has a /.git)"; PASS=$((PASS+1))
+fi
+unset got GITROOT_W
+
 # A RELATIVE TMPDIR makes mktemp return relative paths, which then resolve against
 # the attachment dir once opencode_review cds into it.
 mkdir -p "$WORK/reltmp"

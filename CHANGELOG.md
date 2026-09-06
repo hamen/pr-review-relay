@@ -8,6 +8,40 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Fixed
 
+- **A `.git` directory that is not a repository could become "the repository being reviewed", which
+  refused every run.** `relay_worktree_root` accepted any *existing* `.git` and kept the outermost
+  match, so a directory holding nothing but `info/exclude` — **exactly what Claude Code creates at
+  the top of a projects directory**, to keep `.claude/` out of every project's status — made an
+  entire tree of unrelated repositories look like one repository. Any `PATH` entry symlinked into
+  that tree was then inside "the repo", and `relay_assert_path_outside_repo` refused to start:
+
+  ```
+  ✖ PATH entry '~/.claude/skills/<skill>/bin' is inside the repository being reviewed.
+  ```
+
+  The containment guard was right; the root it was given was wrong. This bites anyone whose
+  repositories live under a Claude Code projects directory and who has a skill bin on `PATH` — on
+  the machine this was found on, **the repository's own test suite could not pass**: 124 failures
+  and an abort, all downstream of the same refusal.
+
+  A `.git` **directory** must now also contain `HEAD`. Anything that is **not** a directory is
+  accepted exactly as before — a linked worktree and a submodule have a `.git` FILE, and that path
+  is unchanged. A `.git` directory that cannot be searched is still treated as a repository: with no
+  root at all the `PATH` guard turns itself off, so an uncertain answer has to be the conservative
+  one. Both call sites use the predicate, including the separate filesystem-root check, where the
+  same bug would have had the largest blast radius.
+
+  Still builtins-only. `relay_worktree_root` cannot ask `git`, because it runs before `PATH` has
+  been validated — resolving `git` to decide where the repo is would be the circularity the guard
+  exists to avoid.
+
+  `lib-opencode.sh` is shared, so **`review-local` and `pr-review-distill` get this fix too**, not
+  only `pr-review-relay`. Twelve assertions added, and five mutations checked against them: reverting
+  the predicate fails the reduced-root case *and* the end-to-end allow case; dropping the
+  not-a-directory branch, dropping the unsearchable branch, bypassing the helper at the
+  filesystem-root call site, and loosening the `HEAD` test from `-f` to `-e` each fail exactly one
+  assertion and nothing else.
+
 - **The `opencode` reviewer silently reviewed only the first ~1035 lines of a large pull request —
   and posted a note about it as though it were a verdict.** The diff went in as an OpenCode `-f`
   attachment, and OpenCode injects only part of a large one, expecting the agent to read the rest.
