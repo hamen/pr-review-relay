@@ -168,22 +168,63 @@ opencode_reject_if_in_repo() {
 # PATH this function exists to validate, so a repo-local `git` could report an empty
 # root and switch the guard off. Bootstrapping a PATH check with a PATH lookup is
 # circular; walking up for .git is not.
+# Does $1 hold a `.git` that means "this is a checkout root"? Builtins only, for the reason
+# spelled out above. $1 is the directory WITHOUT a trailing slash, and "" for the filesystem
+# root — so this builds "/.git" and never "//.git", whose leading "//" is implementation-defined
+# in POSIX. Under `set -u` the argument must be passed explicitly.
+#
+# NOT-A-DIRECTORY IS ACCEPTED UNCHANGED, and that is the whole of the compatibility story. In a
+# linked worktree (and a submodule) `.git` is a FILE, and this project mandates working in
+# worktrees, so rejecting a file here would switch the PATH guard off exactly where it is needed.
+# Fifos, sockets and devices land in the same branch: the `-e` test this replaces accepted them,
+# nothing has ever reported a problem with that, and narrowing more shapes than the one under
+# repair is how a security guard drifts.
+#
+# ONLY A DIRECTORY IS NARROWED, and only by requiring `HEAD`. A `.git` DIRECTORY that is not a
+# repository — no HEAD, no objects, no config — used to make its parent the root. Claude Code
+# creates exactly that at the top of a projects directory (`.git/info/exclude` and nothing else,
+# to keep `.claude/` out of every project's status), which made the outermost-match rule below
+# treat an entire tree of unrelated repositories as one repository, and `relay_assert_path_outside_repo`
+# then refused every PATH entry symlinked into that tree.
+#
+# `HEAD` is the marker because git writes it first and always: it is there after `git init`
+# before any commit exists, and it is there when `objects/` lives elsewhere. This is a safe
+# approximation of "is this a repository", NOT a reimplementation of git's own validation — a
+# directory can carry a HEAD and still be rejected by git. It is enough to exclude the shape
+# above, and the unsearchable branch below covers what it cannot judge.
+#
+# AN UNSEARCHABLE DIRECTORY IS TREATED AS A REPOSITORY. If `.git` is a directory we cannot
+# descend into — mode 0700 owned by someone else, a restrictive mount — the HEAD test is false
+# through no fault of the repository. Returning "not a root" there would be the dangerous answer:
+# with no root at all, relay_assert_path_outside_repo takes its `|| return 0` and the PATH guard
+# is OFF. A wrong root keeps the guard on and costs a false refusal; a missing root removes it
+# silently. The old `-e` needed no permission on `.git`, so this branch is what keeps that
+# property.
+#
+# Nothing here runs under `set -e` (this file's callers are `set -uo pipefail`), so the early
+# `return 0`s are safe as written and must not be rewritten into an if/else chain.
+relay_is_git_root() {
+  [ -e "$1/.git" ] || return 1
+  [ -d "$1/.git" ] || return 0
+  [ -x "$1/.git" ] || return 0
+  [ -f "$1/.git/HEAD" ]
+}
+
 relay_worktree_root() {
   local _d _found=""
   _d="$(pwd -P)" || return 1
   while [ "$_d" != "/" ] && [ -n "$_d" ]; do
-    # -e, NOT -d: in a linked worktree (and a submodule) .git is a FILE. Since this
-    # project mandates working in worktrees, a -d check would fail to find the root
-    # in the normal setup — silently switching the PATH guard off exactly where it
-    # is needed. Verified against this repo's own worktree.
     # Remember the OUTERMOST match instead of returning at the first. A branch can
     # add a `.git` FILE in a subdirectory; running the relay from there would then
     # make the guard treat that subdirectory as the root and stop protecting
     # everything above it. The outermost boundary is the conservative one.
-    [ -e "$_d/.git" ] && _found="$_d"
+    relay_is_git_root "$_d" && _found="$_d"
     _d="$(cd "$_d/.." 2>/dev/null && pwd -P)" || return 1
   done
-  [ -e "/.git" ] && _found="/"
+  # The loop stops BEFORE "/", so the filesystem root needs its own check — and it needs the
+  # same predicate, or a HEAD-less /.git would still become the root, which is this bug at the
+  # largest blast radius there is.
+  relay_is_git_root "" && _found="/"
   [ -n "$_found" ] && { printf '%s' "$_found"; return 0; }
   return 1
 }
