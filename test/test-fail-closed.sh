@@ -1236,6 +1236,17 @@ if [ "$got" = "$GITROOT_W/fakeroot/repo" ]; then
 else
   echo "  FAIL a HEAD-less .git directory still inflated the root (got '$got')"; FAIL=$((FAIL+1)); fi
 
+# `HEAD` must be a FILE. `-e` would accept a DIRECTORY (or a socket) named HEAD, and every other
+# case here would still pass — the negative fixture above has no HEAD at all, so it cannot tell
+# `-f` from `-e`. This one can: a .git directory whose HEAD is itself a directory is not a
+# repository, and must not be a root. (codex)
+mkdir -p "$WORK/badhead/.git/HEAD" "$WORK/badhead/sub"
+got=$(git_root_from "$WORK/badhead/sub")
+if [ -n "$got" ]; then
+  echo "  FAIL a .git whose HEAD is a directory was accepted as a root (got '$got')"; FAIL=$((FAIL+1))
+else
+  echo "  ok   [-] a .git whose HEAD is not a file is not a root"; PASS=$((PASS+1)); fi
+
 # The end-to-end shape of the same bug, and it only reproduces FROM INSIDE the fake tree. An
 # earlier version of this case ran from $WORK/dotpath, whose ancestor walk never crosses
 # $WORK/fakeroot: the root was $WORK/dotpath before and after the fix, so the entry was outside it

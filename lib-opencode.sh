@@ -168,8 +168,9 @@ opencode_reject_if_in_repo() {
 # PATH this function exists to validate, so a repo-local `git` could report an empty
 # root and switch the guard off. Bootstrapping a PATH check with a PATH lookup is
 # circular; walking up for .git is not.
-# Does $1 hold a `.git` that means "this is a checkout root"? Builtins only, for the reason
-# spelled out above. $1 is the directory WITHOUT a trailing slash, and "" for the filesystem
+# Does $1 hold a `.git` that means "this is a checkout root"? Builtins only, for the reason given
+# in the header above relay_worktree_root (which is the function that comment describes, and which
+# now sits below this one): this runs before PATH is validated, so it cannot ask `git`. $1 is the directory WITHOUT a trailing slash, and "" for the filesystem
 # root — so this builds "/.git" and never "//.git", whose leading "//" is implementation-defined
 # in POSIX. Under `set -u` the argument must be passed explicitly.
 #
