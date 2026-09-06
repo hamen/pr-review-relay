@@ -1236,11 +1236,19 @@ if [ "$got" = "$GITROOT_W/fakeroot/repo" ]; then
 else
   echo "  FAIL a HEAD-less .git directory still inflated the root (got '$got')"; FAIL=$((FAIL+1)); fi
 
-# The end-to-end shape of the same bug: a PATH entry under the fake parent but OUTSIDE the repo
-# being reviewed must NOT refuse. This is the case the report came from.
+# The end-to-end shape of the same bug, and it only reproduces FROM INSIDE the fake tree. An
+# earlier version of this case ran from $WORK/dotpath, whose ancestor walk never crosses
+# $WORK/fakeroot: the root was $WORK/dotpath before and after the fix, so the entry was outside it
+# either way and the assertion passed on unfixed code. All three cross-reviewers caught it.
+#
+# Run from a real repository UNDER the HEAD-less parent, with the PATH entry a sibling of that
+# repository. Before the fix the root inflates to $WORK/fakeroot, the entry is inside it, and the
+# relay exits 2; after the fix the root is the repository itself and the run completes.
+mkdir -p "$WORK/fakeroot/inner"
+( cd "$WORK/fakeroot/inner" && relay_isolate_git "$WORK/fakeroot/inner" && git init -q . ) >/dev/null 2>&1
 cp "$BIN2/gh" "$WORK/fakeroot/bin/" 2>/dev/null || true
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
-( cd "$WORK/dotpath" && env PATH="$WORK/fakeroot/bin:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+( cd "$WORK/fakeroot/inner" && env PATH="$WORK/fakeroot/bin:$BIN2:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
     GH_SHA_COUNTER="$WORK/sha_counter" \
     bash "$RELAY" --pr 1 --author antigravity --reviewers claude >/dev/null 2>&1 )
 rc=$?
@@ -1260,9 +1268,13 @@ if [ "$rc" = 2 ]; then echo "  ok   [2] a PATH entry inside the repo is still re
 else echo "  FAIL [got $rc, want 2] the fix weakened the containment guard"; FAIL=$((FAIL+1)); fi
 
 # A real repository is still found, including a fresh `git init` with no commits — the case that
-# rules out `objects/` or a commit as the marker.
-got=$(git_root_from "$WORK/fakeroot/repo")
-if [ "$got" = "$GITROOT_W/fakeroot/repo" ]; then
+# rules out `objects/` or a commit as the marker. Its own fixture, OUTSIDE fakeroot: asserting this
+# on fakeroot/repo would repeat the case above with the same command and the same expectation, so
+# the two could only ever pass or fail together.
+mkdir -p "$WORK/freshinit"
+( cd "$WORK/freshinit" && relay_isolate_git "$WORK/freshinit" && git init -q . ) >/dev/null 2>&1
+got=$(git_root_from "$WORK/freshinit")
+if [ "$got" = "$GITROOT_W/freshinit" ]; then
   echo "  ok   [-] a commit-less repository is still a root"; PASS=$((PASS+1))
 else
   echo "  FAIL a fresh git init was not recognised (got '$got')"; FAIL=$((FAIL+1)); fi
@@ -1352,9 +1364,22 @@ if [ ! -e /.git ]; then
   if ( set -u; . "$HERE/../lib-opencode.sh" 2>/dev/null; relay_is_git_root "" ); then
     echo "  FAIL relay_is_git_root claimed / is a root with no /.git present"; FAIL=$((FAIL+1))
   else
-    echo "  ok   [-] the / call site uses the same predicate"; PASS=$((PASS+1)); fi
+    echo "  ok   [-] the predicate says / is not a root when /.git is absent"; PASS=$((PASS+1)); fi
+  # ...and that relay_worktree_root REACHES it there. The assertion above only tests the helper:
+  # put the old `[ -e "/.git" ]` back on the root line and it still passes on a machine with no
+  # /.git. So override the helper to succeed ONLY for the empty argument — the root call site's
+  # argument — and require the walk to report "/". A root line that does not call the helper
+  # cannot produce that. (codex)
+  got=$( cd "$WORK" 2>/dev/null && set -u && . "$HERE/../lib-opencode.sh" 2>/dev/null
+         relay_is_git_root() { [ -z "$1" ]; }
+         relay_worktree_root )
+  if [ "$got" = "/" ]; then
+    echo "  ok   [-] the / call site goes through the predicate"; PASS=$((PASS+1))
+  else
+    echo "  FAIL the / call site does not use relay_is_git_root (got '$got')"; FAIL=$((FAIL+1)); fi
 else
-  echo "  ok   [-] / call site case skipped (this machine has a /.git)"; PASS=$((PASS+1))
+  echo "  ok   [-] / call site cases skipped (this machine has a /.git)"; PASS=$((PASS+1))
+  echo "  ok   [-] / call site predicate case skipped (this machine has a /.git)"; PASS=$((PASS+1))
 fi
 unset got GITROOT_W
 

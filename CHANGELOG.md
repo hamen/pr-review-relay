@@ -36,7 +36,7 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   exists to avoid.
 
   `lib-opencode.sh` is shared, so **`review-local` and `pr-review-distill` get this fix too**, not
-  only `pr-review-relay`. Nine cases added, three of them mutation-checked: reverting the predicate,
+  only `pr-review-relay`. Twelve assertions added, three of them mutation-checked: reverting the predicate,
   dropping the not-a-directory branch, and dropping the unsearchable branch each fail their own
   assertion and nothing else.
 
