@@ -17,6 +17,13 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ### Changed
 
+- **The reviewers run in parallel by default**, in `pr-review-relay` and `review-local`. They are
+  independent, so a sequential round cost the SUM of every seat's time: with a grok seat that takes
+  300-500 s on its own, a three-seat round went past 20 minutes where a parallel one costs the
+  slowest seat. Each review prints as its reviewer finishes. `--sequential` restores one at a time,
+  in panel order; `--parallel` is still accepted, and with both flags the last one wins. Callers that
+  already passed `--parallel` see no change; `ship-feature relay` passes its arguments through, so
+  its rounds are parallel too.
 - **The `grok` seat's built-in default model is `grok-4.6`** (was `grok-4.5`), matching ship-feature,
   whose plan-review `grok` seat reads the same `MODEL_grok` / `EFFORT_grok` keys since its PR #29.
   Only an unpinned seat is affected. `assets/config.example` and the README's short sample now show
