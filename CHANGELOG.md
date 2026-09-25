@@ -15,19 +15,19 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   calls use (`grok_resolve_model` / `grok_resolve_effort`, `opencode_resolve_model`), so the line
   cannot disagree with the argv. ship-feature's plan-review prints the same line since its PR #29.
 
-### Fixed
-
-- **`MODEL_glm` (and `MODEL_gemini`) no longer print "no reviewer seat named …" on every run.** Both
-  are ship-feature plan-review seats read from this same file; `PANEL_SEATS` still listed the seats'
-  old names (`kimi3`, `grok45high`) and not the current ones. The old names stay accepted for older
-  ship-feature installs.
-
 ### Changed
 
 - **The `grok` seat's built-in default model is `grok-4.6`** (was `grok-4.5`), matching ship-feature,
   whose plan-review `grok` seat reads the same `MODEL_grok` / `EFFORT_grok` keys since its PR #29.
   Only an unpinned seat is affected. `assets/config.example` and the README's short sample now show
   `PLAN_REVIEWERS=codex,grok,glm`.
+
+### Fixed
+
+- **`MODEL_glm` (and `MODEL_gemini`) no longer print "no reviewer seat named …" on every run.** Both
+  are ship-feature plan-review seats read from this same file; `PANEL_SEATS` still listed the seats'
+  old names (`kimi3`, `grok45high`) and not the current ones. The old names stay accepted for older
+  ship-feature installs.
 
 - **The `opencode` reviewer silently reviewed only the first ~1035 lines of a large pull request —
   and posted a note about it as though it were a verdict.** The diff went in as an OpenCode `-f`
