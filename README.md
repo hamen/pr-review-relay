@@ -245,7 +245,7 @@ Run it from inside the repo (it resolves the PR for the current branch):
 
 ```bash
 pr-review-relay --author claude                    # claude opened the PR → codex + cursor + antigravity review
-pr-review-relay --pr 47 --parallel                 # explicit PR, reviewers run concurrently
+pr-review-relay --pr 47 --sequential               # explicit PR, one reviewer at a time
 pr-review-relay --pr 47 --reviewers codex          # only one reviewer
 pr-review-relay --pr 47 --reviewers claude,agy     # pick specific reviewers
 pr-review-relay --context-file SPEC.md             # make every reviewer read & verify against SPEC.md
@@ -264,7 +264,8 @@ Flags:
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
 | `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
-| `--parallel` | Run the reviewers concurrently. |
+| `--sequential` | Run the reviewers one at a time, in panel order. The default is **parallel**: every reviewer runs at once and each review prints as that reviewer finishes. |
+| `--parallel` | The default; still accepted. With both flags, the last one wins. |
 | `--no-post` | Run every reviewer for real, print the reviews to stdout, and skip the relay's own posting. For a PR that is not yours, where a person has to read the review before anybody else sees it. Not posting is not itself a failure, but an empty, truncated or timed-out review still exits 3: the flag changes where a review goes, not whether it counts.<br><br>**Scope:** it stops *this script* from commenting. It does not sandbox the reviewers, and several of them run with tool access, so text inside a hostile PR could still tell one of them to publish something. If you need that guaranteed, put a `gh` that refuses writes ahead of the real one on `PATH`: the agents inherit it, so the refusal covers them too. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
 | `--max-rounds N` | Cap on **reviewed revisions** per PR — the counter advances when the head SHA changes, not on every invocation (default `3`, or `$PR_RELAY_MAX_ROUNDS`). See [Loop safety](#-loop-safety-no-runaway-iteration). |
@@ -303,7 +304,7 @@ already-reviewed branch before you push and open the PR.
 review-local --author claude                        # claude wrote this branch → codex + cursor + antigravity review
 review-local --author claude --base develop          # diff against a different base ref (default: main)
 review-local --author claude --reviewers codex,agy   # pick specific reviewers
-review-local --author claude --parallel              # run reviewers concurrently
+review-local --author claude --sequential            # one reviewer at a time
 ```
 
 Flags:
@@ -313,7 +314,8 @@ Flags:
 | `--author <name>` | The agent that wrote the branch. It auto-excludes itself from reviewing. |
 | `--base <ref>` | Ref to diff against. Default: `main`. |
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,grok,opencode` — four vendors, every seat on a flat-rate subscription. `cursor`, `antigravity`, and `qwen` are supported but opt-in — name them explicitly to include them. |
-| `--parallel` | Run the reviewers concurrently. |
+| `--sequential` | Run the reviewers one at a time, in panel order. The default is **parallel**. |
+| `--parallel` | The default; still accepted. With both flags, the last one wins. |
 
 Reviewers that read stdin (`claude` / `codex` / `cursor` / `qwen`) get the diff piped in, so a large branch
 scales the same way `pr-review-relay --diff` does; `agy` takes it as an argument (it doesn't read a
@@ -561,7 +563,7 @@ comes from `gh` — so a hang while resolving the PR still leaves no trace.
 
 The path is printed at **startup**, not just at the end — a run that is killed never reaches the
 closing banner, and that is exactly the run you want the log for. Each file has a single writer, so
-nothing interleaves under `--parallel`; the name is unique per invocation, so a retry never
+nothing interleaves when the reviewers run in parallel (the default); the name is unique per invocation, so a retry never
 overwrites the evidence of the attempt that died.
 
 This exists because relay runs do get killed mid-round, and every investigation so far has ended

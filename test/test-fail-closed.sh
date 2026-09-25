@@ -555,7 +555,9 @@ else
   echo "  ok   [-] traversal contained (no stray PWNED file)"; PASS=$((PASS+1))
 fi
 
-runx 0 "sequential run (no --parallel) → clean pass"    --reviewers claude,codex
+# The sequential path, named explicitly: since 2026-09-25 a run with no flag is PARALLEL, so this
+# case would otherwise pass under parallel while its title claimed the opposite.
+runx 0 "sequential run (--sequential) → clean pass"     --reviewers claude,codex --sequential
 
 # --- qwen: opt-in reviewer dispatch (generic stub) ---------------------------
 # qwen is opt-in like opencode: absent from the default set, dispatched only when
@@ -2250,7 +2252,9 @@ grep -q "^.* start pr=1 " "$_log" 2>/dev/null; ok_if $? "run log records the sta
 grep -q "pgid=" "$_log" 2>/dev/null; ok_if $? "run log records pid/pgid for kill forensics" "-"
 grep -q "state .* (written before dispatch)" "$_log" 2>/dev/null; ok_if $? "run log records the pre-dispatch state write" "-"
 grep -q "dispatch claude" "$_log" 2>/dev/null && grep -q "dispatch codex" "$_log" 2>/dev/null; ok_if $? "run log records one dispatch line per reviewer" "-"
+
 grep -q "verdict exit=0" "$_log" 2>/dev/null; ok_if $? "run log records the final verdict" "$(tail -1 "$_log" 2>/dev/null)"
+
 _side=$(latest_side)
 grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "the reviewer's body is in its own sidecar" "side=${_side:-<none>}"
 
@@ -2259,6 +2263,27 @@ grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "the reviewer's body i
 s_reset; s_run "$SHA_A" GH_POST_FAIL=1 >/dev/null
 _side=$(latest_side)
 grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "sidecar holds the review even when posting fails" "side=${_side:-<none>}"
+
+# Placed after the sidecar checks: _pmode runs the relay five times, and those checks read the
+# NEWEST sidecar, which must be the run they were written for.
+echo "parallel by default:"
+# The run log's start line records the mode that actually ran. No flag is PARALLEL since 2026-09-25;
+# --sequential opts out; --parallel is still accepted; of the two, the last one wins.
+_pmode() { # _pmode <args...> → the parallel= value from the run's start line
+  s_reset; s_run "$SHA_A" -- "$@" >/dev/null
+  sed -n 's/.* start .*parallel=\([01]\).*/\1/p' "$(latest_log)" 2>/dev/null | head -1
+}
+_m=$(_pmode);                          [ "$_m" = 1 ]; ok_if $? "no flag → parallel" "parallel=$_m"
+_m=$(_pmode --sequential);             [ "$_m" = 0 ]; ok_if $? "--sequential → one at a time" "parallel=$_m"
+_m=$(_pmode --parallel);               [ "$_m" = 1 ]; ok_if $? "--parallel is still accepted" "parallel=$_m"
+_m=$(_pmode --sequential --parallel);  [ "$_m" = 1 ]; ok_if $? "--sequential --parallel → last wins (parallel)" "parallel=$_m"
+_m=$(_pmode --parallel --sequential);  [ "$_m" = 0 ]; ok_if $? "--parallel --sequential → last wins (sequential)" "parallel=$_m"
+unset _m
+# No `grep -q`: it exits at the first match, the relay takes SIGPIPE, and under pipefail the
+# pipeline fails although the text is there.
+bash "$RELAY" --help 2>/dev/null | grep -- '--sequential' >/dev/null \
+  && bash "$RELAY" --help 2>/dev/null | grep -- '--parallel' >/dev/null
+ok_if $? "pr-review-relay --help names --sequential and --parallel" "-"
 
 # Every terminal path logs a verdict, including the failure ones — a log that only recorded
 # successes would be silent exactly when someone needs it.
@@ -2965,6 +2990,70 @@ for _prog in pr-review-relay review-local pr-review-distill; do
   ok_if $? "$_prog reads AGENT_TIMEOUT from the config file" "rc=$_prc out=$(printf '%s' "$_out" | head -1)"
 done
 unset _pcfg _prog _out _prc
+
+echo "review-local parallel by default:"
+# review-local has no run log, so its mode is proven by a HANDSHAKE, not by timing: each stub writes
+# started.<name> and then blocks (bounded) on a `go` file. If both markers exist before `go` is
+# created, the two reviewers were running at the same time. A sequential run cannot produce the
+# second marker while the first stub is still blocked. No wall-clock margin decides the result,
+# which matters on a machine running several agents at once with bin/ci as the only gate.
+# Its OWN fixture repo: the shared one is left in whatever state earlier cases need, and a branch
+# with no diff against its base exits before any reviewer is dispatched.
+HSREPO="$WORK/hsrepo"; mkdir -p "$HSREPO"
+( cd "$HSREPO" && git init -q . && git config user.email t@t && git config user.name t \
+  && echo base > f.txt && git add f.txt && git commit -qm base && git branch -M mainline \
+  && git checkout -qb feature && echo changed > f.txt && git commit -qam change ) >/dev/null 2>&1
+if [ -f "$RL" ] && [ -n "$(cd "$HSREPO" && git diff mainline --stat 2>/dev/null)" ]; then
+  HS="$WORK/handshake"; HSBIN="$WORK/hsbin"; mkdir -p "$HSBIN"
+  for _s in claude codex; do
+    cat > "$HSBIN/$_s" <<STUB
+#!/usr/bin/env bash
+cat >/dev/null
+: > "\$HS_DIR/started.$_s"
+echo "start $_s" >> "\$HS_DIR/events"
+for _i in \$(seq 1 200); do [ -e "\$HS_DIR/go" ] && break; sleep 0.1; done
+echo "end $_s" >> "\$HS_DIR/events"
+echo "LGTM"
+STUB
+    chmod +x "$HSBIN/$_s"
+  done
+  _hs() { # _hs <expect: both|one> <desc> [flags...]
+    local expect="$1" desc="$2" _i _n=0 _pid; shift 2
+    rm -rf "$HS"; mkdir -p "$HS"
+    ( cd "$HSREPO" && env PATH="$HSBIN:$BIN:$PATH" HS_DIR="$HS" \
+        bash "$RL" --base mainline --reviewers claude,codex "$@" >/dev/null 2>&1 ) &
+    _pid=$!
+    # Wait (bounded) until the first stub has started.
+    for _i in $(seq 1 150); do ls "$HS"/started.* >/dev/null 2>&1 && break; sleep 0.1; done
+    if [ "$expect" = both ]; then
+      for _i in $(seq 1 150); do [ -e "$HS/started.claude" ] && [ -e "$HS/started.codex" ] && break; sleep 0.1; done
+    else
+      # Proving ABSENCE needs a window: hold the first stub for 5 s and require that the second never
+      # starts meanwhile. A sequential second stub cannot start while the first blocks; a parallel
+      # one starts within milliseconds. The event order is checked after `go` as well.
+      for _i in $(seq 1 50); do [ "$(ls "$HS"/started.* 2>/dev/null | wc -l | tr -d ' ')" -gt 1 ] && break; sleep 0.1; done
+    fi
+    _n=$(ls "$HS"/started.* 2>/dev/null | wc -l | tr -d ' ')
+    : > "$HS/go"; wait "$_pid"
+    if [ "$expect" = both ]; then
+      [ "$_n" = 2 ]
+    else
+      # One at a time: each start is followed by its own end before the next start.
+      [ "$_n" = 1 ] && [ "$(awk '{print $1}' "$HS/events" 2>/dev/null | tr '\n' ' ')" = "start end start end " ]
+    fi
+    ok_if $? "$desc" "started before go: $_n; events: $(tr '\n' ',' < "$HS/events" 2>/dev/null)"
+  }
+  _hs both "review-local: no flag → reviewers run at the same time"
+  _hs one  "review-local: --sequential → one at a time"                 --sequential
+  _hs both "review-local: --parallel alone → at the same time"          --parallel
+  _hs both "review-local: --sequential --parallel → last wins (parallel)" --sequential --parallel
+  _hs one  "review-local: --parallel --sequential → last wins (sequential)" --parallel --sequential
+  unset -f _hs
+  bash "$RL" --help 2>/dev/null | grep -- '--sequential' >/dev/null && bash "$RL" --help 2>/dev/null | grep -- '--parallel' >/dev/null
+  ok_if $? "review-local --help names --sequential and --parallel" "-"
+else
+  echo "  FAIL review-local handshake: could not build its fixture repo"; FAIL=$((FAIL+1))
+fi
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"

@@ -33,9 +33,11 @@
 #
 # Usage:
 #   pr-review-relay [--author claude|codex|cursor|antigravity|opencode|qwen|grok] [--pr <number|url>] \
-#                   [--reviewers claude,codex,grok,opencode] [--parallel] \
+#                   [--reviewers claude,codex,grok,opencode] [--sequential] \
 #                   (opencode, qwen, and grok are also supported, opt-in: name them explicitly)
 #                   [--context-file <path>] [--diff] [--dry-run] [--no-post]
+#   (reviewers run in PARALLEL by default; --sequential runs them one at a time, in panel order;
+#    --parallel is still accepted; the last of the two wins)
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
 #
 # Fail-closed exit codes (so callers can trust the outcome, not just the banner):
@@ -133,7 +135,11 @@ GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 # for weeks after it was dropped. DEFAULT_REVIEWERS below is the last resort for a machine with no
 # config; it is assigned ONCE and every later comparison reads the variable, never the literal.
 DEFAULT_REVIEWERS="claude,codex,grok,opencode"
-AUTHOR=""; PR=""; PARALLEL=0; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0
+# PARALLEL by default since 2026-09-25. The reviewers are independent, so a sequential round costs
+# the SUM of every seat's time — with a grok seat that alone takes 300-500s, a three-seat round went
+# past 20 minutes where a parallel one costs the slowest seat. Agents already passed --parallel on
+# every call because a rule told them to; a default does that without the rule, and for humans too.
+AUTHOR=""; PR=""; PARALLEL=1; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0
 REVIEWERS="$(panel_resolve PR_RELAY_REVIEWERS REVIEWERS "$DEFAULT_REVIEWERS")"
 # 500, because the panel runs reasoning models at high effort; see the CHANGELOG entry for what 300
 # cost. This literal is the LAST resort — AGENT_TIMEOUT in ~/.config/pr-review-relay/config is the one
@@ -255,7 +261,8 @@ while [ $# -gt 0 ]; do
     --author)       AUTHOR="$2"; shift 2;;
     --pr)           PR="$2"; shift 2;;
     --reviewers)    REVIEWERS="$2"; REVIEWERS_EXPLICIT=1; shift 2;;
-    --parallel)     PARALLEL=1; shift;;
+    --parallel)     PARALLEL=1; shift;;   # the default; kept so existing callers keep working
+    --sequential)   PARALLEL=0; shift;;
     --context-file) CONTEXT_FILE="$2"; shift 2;;
     --diff)         MODE="diff"; shift;;
     --link)         MODE="link"; shift;;
