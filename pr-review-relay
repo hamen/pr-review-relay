@@ -1253,7 +1253,7 @@ for r in "${LIST[@]}"; do
     continue
   fi
   would_run=$((would_run + 1))
-  if [ "$DRY" = 1 ]; then echo "  · would run: $r ($local_tool)"; continue; fi
+  if [ "$DRY" = 1 ]; then echo "  · would run: $r ($local_tool)$(panel_seat_pins "$r")"; continue; fi
   RUNNABLE="$RUNNABLE $r"     # pass 2 dispatches these, once the state is durable
 done
 
@@ -1292,7 +1292,7 @@ fi
 # --- Pass 2: dispatch --------------------------------------------------------
 for r in $RUNNABLE; do
   rkey="$(status_key "$r")"
-  echo "  → $r reviewing…"
+  echo "  → $r reviewing…$(panel_seat_pins "$r")"
   relay_log "dispatch $r"
   # Pre-seed "pending": if the reviewer is hard-killed before it can record its
   # own outcome, this file survives and the tally counts it as a failure (not a

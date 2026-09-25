@@ -274,7 +274,7 @@ for r in "${LIST[@]}"; do
     if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! $local_tool not installed but explicitly requested" >&2; MISSING=1; else echo "  ! $local_tool not installed (skip $r)"; fi
     continue
   fi
-  echo "  → $r reviewing…"
+  echo "  → $r reviewing…$(panel_seat_pins "$r")"
   RAN=$((RAN + 1))
   if [ "$PARALLEL" = 1 ]; then review_with "$r" & else review_with "$r"; fi
 done

@@ -21,11 +21,18 @@
 # that runs from cron. Parsing uses shell built-ins only — no tr, no sed, no cut — because the
 # relay does not validate PATH until later, and a config parser that shells out before that check
 # would be exactly the hole the check exists to close.
-# Every seat a MODEL_/EFFORT_ suffix may name. The relay's own panel, plus the plan-review seats
-# that ship-feature drives from this same file (grok45high is grok at high effort, kimi3 is the
-# opencode runner on another model). claude_fallback is not a seat: it is claude's second choice
-# when the first model is unavailable.
-PANEL_SEATS="claude claude_fallback codex cursor antigravity grok opencode qwen kimi3 grok45high"
+# Every seat a MODEL_/EFFORT_ suffix may name. The relay's own panel, plus the seats that only
+# ship-feature's plan-review drives from this same file:
+#   glm     the opencode runner pinned read-only (plan-review seat since ship-feature PR #28)
+#   gemini  the `gemini` CLI behind plan-review's `antigravity` seat (MODEL_gemini, not
+#           MODEL_antigravity, which is the relay's `agy` seat)
+# Missing from this list, both printed "no reviewer seat named …" on every run on a machine that
+# pinned them — a warning that is always wrong teaches everyone to ignore the warning.
+#   kimi3, grok45high  OLD plan-review seat names (renamed to glm and grok in ship-feature PR #28
+#           and #29). Kept so an older ship-feature that still reads them gets no warning here;
+#           a current one reports them itself, from plan-review.
+# claude_fallback is not a seat: it is claude's second choice when the first model is unavailable.
+PANEL_SEATS="claude claude_fallback codex cursor antigravity grok opencode qwen glm gemini kimi3 grok45high"
 
 # PANEL_CFG_* is this loader's OUTPUT, never an input. Without this reset an exported
 # PANEL_CFG_REVIEWERS=cursor acts as a fifth, undocumented precedence layer that outranks the
@@ -178,4 +185,37 @@ panel_resolve() {
   eval "v=\${$cfg_name:-}"
   if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
   printf '%s' "$fallback"
+}
+
+# " (model=…, effort=…)" for a seat's dispatch line, from the SAME values its call site passes.
+# Until this existed the only way to see what a seat ran was a `bash -x` trace. Empty for a seat
+# with no pin at all (qwen) and for any name not listed below — never an error.
+#
+# Reads the globals pr-review-relay and review-local set at load time (CLAUDE_REVIEW_MODEL,
+# CODEX_REVIEW_EFFORT, …), and calls grok_resolve_* / opencode_resolve_model from lib-grok.sh /
+# lib-opencode.sh. Both scripts source this file BEFORE those two, which is fine because this runs
+# at DISPATCH time, never at load time. A caller that sources this file alone (pr-review-distill)
+# gets nothing for grok/opencode instead of "command not found" — the `command -v` guards.
+# `${VAR:-}` throughout: both callers run under `set -u`.
+panel_seat_pins() { # <seat>
+  local _psp_m=
+  case "$1" in
+    claude)
+      printf ' (model=%s, fallback=%s, effort=%s)' "${CLAUDE_REVIEW_MODEL:-cli default}" \
+        "${CLAUDE_REVIEW_FALLBACK_MODEL:-none}" "${CLAUDE_REVIEW_EFFORT:-cli default}" ;;
+    codex)
+      printf ' (model=%s, effort=%s)' "${CODEX_REVIEW_MODEL:-cli default}" "${CODEX_REVIEW_EFFORT:-cli default}" ;;
+    cursor)
+      printf ' (model=%s)' "${CURSOR_REVIEW_MODEL:-cli default}" ;;
+    antigravity|agy)
+      printf ' (model=%s)' "${AGY_REVIEW_MODEL:-cli default}" ;;
+    grok)
+      command -v grok_resolve_model >/dev/null 2>&1 || return 0
+      printf ' (model=%s, effort=%s)' "$(grok_resolve_model)" "$(grok_resolve_effort)" ;;
+    opencode)
+      command -v opencode_resolve_model >/dev/null 2>&1 || return 0
+      _psp_m="$(opencode_resolve_model)"
+      printf ' (model=%s)' "${_psp_m:-cli default}" ;;
+  esac
+  return 0
 }

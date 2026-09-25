@@ -21,9 +21,20 @@
 # child network is blocked, so we never tell Grok to run `gh` — the complete diff
 # is always in the prompt-file.
 #
-# Default model: grok-4.5. Default PR-review effort: medium (plan-review uses a
-# different name/effort in ship-feature). Override with GROK_REVIEW_MODEL /
-# GROK_REVIEW_EFFORT env if needed later; not advertised yet.
+# Default model: grok-4.6. Default effort: medium. Pinned by MODEL_grok / EFFORT_grok in
+# ~/.config/pr-review-relay/config, or GROK_REVIEW_MODEL / GROK_REVIEW_EFFORT in the environment.
+# Since ship-feature PR #29 (2026-09-25) ship-feature's plan-review `grok` seat reads the SAME
+# keys with the same defaults: one seat, one pin, in both tools.
+
+# --- Model and effort --------------------------------------------------------
+# One resolver each, used by grok_review AND by the dispatch line (panel_seat_pins), so the line
+# always shows what the seat actually runs instead of a second copy of the defaults.
+#
+# The default does not follow whatever xAI ships latest: a default that moves on its own changes
+# what the panel says without anyone deciding it. It moved once on purpose, grok-4.5 -> grok-4.6
+# on 2026-09-25, so that an unpinned `grok` runs the same model here and in ship-feature.
+grok_resolve_model()  { panel_resolve GROK_REVIEW_MODEL MODEL_grok grok-4.6; }
+grok_resolve_effort() { panel_resolve GROK_REVIEW_EFFORT EFFORT_grok medium; }
 
 # --- Reviewer selection ------------------------------------------------------
 # Reads $REVIEWERS and $AUTHOR from the caller. Same trim rules as opencode_is_selected.
@@ -57,11 +68,9 @@ grok_review() {
     return 1
   }
 
-  # Through panel_resolve, so the config file can pin this seat like any other. The default
-  # stays grok-4.5 here rather than following whatever xAI ships latest: a default that moves on
-  # its own changes what the panel says without anyone deciding it.
-  model="$(panel_resolve GROK_REVIEW_MODEL MODEL_grok grok-4.5)"
-  effort="$(panel_resolve GROK_REVIEW_EFFORT EFFORT_grok medium)"
+  # Through the resolvers above, so the config file can pin this seat like any other.
+  model="$(grok_resolve_model)"
+  effort="$(grok_resolve_effort)"
 
   # Resolve binaries BEFORE cd so a relative PATH entry cannot resolve differently
   # (or vanish) inside iso_cwd — same class of guard as opencode_review.

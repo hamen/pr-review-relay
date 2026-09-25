@@ -105,6 +105,50 @@ printf '%s' "$out" | grep -q "no reviewer seat named 'opencde'" && ok "a MODEL_ 
 out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
   bash -c 'printf "MODEL_kimi3=x\nMODEL_grok45high=y\n" > "$2"; . "$0"; panel_config_load 2>&1 >/dev/null' "$LIB" x "$CFG")
 [ -z "$out" ] && ok "plan-review seats are not reported as unknown" || bad "plan seat warned about — got: $out"
+# glm and gemini are ship-feature's CURRENT plan seats. Before they were listed here, every relay run
+# on a machine that pinned them printed "no reviewer seat named 'glm'" — always wrong, so ignored.
+out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+  bash -c 'printf "MODEL_glm=x\nMODEL_gemini=y\nEFFORT_glm=z\n" > "$2"; . "$0"; panel_config_load 2>&1 >/dev/null' "$LIB" x "$CFG")
+[ -z "$out" ] && ok "glm and gemini keys are not reported as unknown" || bad "glm/gemini warned about — got: $out"
+
+# --- panel_seat_pins: what each seat's dispatch line shows -----------------------
+# Sourced in the order both entry points use (panel, opencode, grok), because the grok and
+# opencode arms call those libs' resolvers. Globals the scripts set at load time are passed in.
+GLIB="$HERE/../lib-grok.sh"; OLIB="$HERE/../lib-opencode.sh"
+pins() { # $1 = config body, $2 = seat, rest = VAR=value assignments for the call
+  local body="$1" seat="$2"; shift 2
+  printf '%s' "$body" > "$CFG"
+  env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" "$@" \
+    bash -c 'set -u; . "$0"; . "$1"; . "$2"; panel_config_load 2>/dev/null; panel_seat_pins "$3"' "$LIB" "$OLIB" "$GLIB" "$seat"
+}
+got=$(pins '' grok)
+[ "$got" = " (model=grok-4.6, effort=medium)" ] && ok "unpinned grok shows the grok-4.6 / medium defaults" || bad "unpinned grok pins: '$got'"
+got=$(pins $'MODEL_grok=grok-4.7\nEFFORT_grok=low\n' grok)
+[ "$got" = " (model=grok-4.7, effort=low)" ] && ok "MODEL_grok / EFFORT_grok reach the grok line" || bad "file grok pins: '$got'"
+got=$(pins $'MODEL_grok=grok-4.7\n' grok GROK_REVIEW_MODEL=env-grok)
+[ "$got" = " (model=env-grok, effort=medium)" ] && ok "GROK_REVIEW_MODEL beats MODEL_grok on the line too" || bad "env grok pin: '$got'"
+got=$(pins $'MODEL_opencode=zai/glm-5.3\n' opencode)
+[ "$got" = " (model=zai/glm-5.3)" ] && ok "MODEL_opencode reaches the opencode line" || bad "opencode pin: '$got'"
+got=$(pins '' opencode)
+[ "$got" = " (model=cli default)" ] && ok "unpinned opencode says cli default" || bad "unpinned opencode: '$got'"
+got=$(pins '' codex CODEX_REVIEW_MODEL=gpt-x)
+[ "$got" = " (model=gpt-x, effort=cli default)" ] && ok "codex shows its model and an unpinned effort" || bad "codex pins: '$got'"
+got=$(pins '' claude CLAUDE_REVIEW_MODEL=opus CLAUDE_REVIEW_FALLBACK_MODEL=sonnet CLAUDE_REVIEW_EFFORT=high)
+[ "$got" = " (model=opus, fallback=sonnet, effort=high)" ] && ok "claude shows model, fallback and effort" || bad "claude pins: '$got'"
+# Every global unset, under set -u: must not abort (both callers run set -u).
+got=$(pins '' claude); rc=$?
+[ "$rc" = 0 ] && [ "$got" = " (model=cli default, fallback=none, effort=cli default)" ] \
+  && ok "claude with no globals set does not abort under set -u" || bad "claude unset globals: rc=$rc '$got'"
+# A seat with no pin, and a name nobody knows: empty, exit 0 — never an error.
+got=$(pins '' qwen); rc=$?
+[ "$rc" = 0 ] && [ -z "$got" ] && ok "qwen (no pin) prints nothing" || bad "qwen: rc=$rc '$got'"
+got=$(pins '' no-such-seat); rc=$?
+[ "$rc" = 0 ] && [ -z "$got" ] && ok "an unknown seat prints nothing and succeeds" || bad "unknown seat: rc=$rc '$got'"
+# A caller that sources lib-panel.sh ALONE (pr-review-distill does) gets nothing for grok rather
+# than "command not found".
+got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG=/dev/null \
+  bash -c 'set -u; . "$0"; panel_seat_pins grok' "$LIB" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ -z "$got" ] && ok "grok pins without lib-grok.sh print nothing, no error" || bad "grok without its lib: rc=$rc '$got'"
 
 # Parsing is fail-noisy, never fail-silent: a config that disappears without a word is the very
 # defect this file exists to remove.
