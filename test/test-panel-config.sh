@@ -135,6 +135,25 @@ got=$(pins '' codex CODEX_REVIEW_MODEL=gpt-x)
 [ "$got" = " (model=gpt-x, effort=cli default)" ] && ok "codex shows its model and an unpinned effort" || bad "codex pins: '$got'"
 got=$(pins '' claude CLAUDE_REVIEW_MODEL=opus CLAUDE_REVIEW_FALLBACK_MODEL=sonnet CLAUDE_REVIEW_EFFORT=high)
 [ "$got" = " (model=opus, fallback=sonnet, effort=high)" ] && ok "claude shows model, fallback and effort" || bad "claude pins: '$got'"
+# cursor and antigravity read the load-time globals the scripts set from panel_resolve. The globals
+# are resolved here the way the scripts resolve them, so MODEL_agy — an alias the PARSER maps onto
+# MODEL_antigravity — is proven to reach the line, not just a value passed in by hand.
+seatglob() { # $1 = config body, $2 = seat; resolves CURSOR/AGY like pr-review-relay:179-190
+  printf '%s' "$1" > "$CFG"
+  env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+    bash -c 'set -u; . "$0"; panel_config_load 2>/dev/null
+      CURSOR_REVIEW_MODEL="$(panel_resolve CURSOR_REVIEW_MODEL MODEL_cursor composer-2.5)"
+      AGY_REVIEW_MODEL="$(panel_resolve AGY_REVIEW_MODEL MODEL_antigravity "")"
+      panel_seat_pins "$1"' "$LIB" "$2"
+}
+got=$(seatglob '' cursor)
+[ "$got" = " (model=composer-2.5)" ] && ok "unpinned cursor shows composer-2.5" || bad "cursor default: '$got'"
+got=$(seatglob $'MODEL_cursor=composer-9\n' cursor)
+[ "$got" = " (model=composer-9)" ] && ok "MODEL_cursor reaches the cursor line" || bad "cursor pin: '$got'"
+got=$(seatglob '' antigravity)
+[ "$got" = " (model=cli default)" ] && ok "unpinned antigravity says cli default" || bad "antigravity default: '$got'"
+got=$(seatglob $'MODEL_agy=gemini-x\n' antigravity)
+[ "$got" = " (model=gemini-x)" ] && ok "MODEL_agy (alias) reaches the antigravity line" || bad "MODEL_agy alias: '$got'"
 # Every global unset, under set -u: must not abort (both callers run set -u).
 got=$(pins '' claude); rc=$?
 [ "$rc" = 0 ] && [ "$got" = " (model=cli default, fallback=none, effort=cli default)" ] \
