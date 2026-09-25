@@ -456,14 +456,18 @@ relay_assert_tmpdir_outside_repo() {
   esac
 }
 
+# The opencode seat's model, or empty when unpinned (opencode then uses its own default). One
+# resolver, used by opencode_review AND by the dispatch line (panel_seat_pins).
+# The seat is named `opencode` on the command line but its variable is PR_RELAY_OPENCODE_MODEL;
+# the config key follows the SEAT name, so nobody has to know that history to configure it.
+opencode_resolve_model() { panel_resolve PR_RELAY_OPENCODE_MODEL MODEL_opencode ""; }
+
 opencode_review() {
   local attach_dir="$1" diff="$2" context_block="$3" subject="$4" errf="$5" agent_timeout="$6"
   local diff_file oc_prompt _abs_path _rest _pe
   local -a model=()
-  # Through panel_resolve so ~/.config/pr-review-relay/config can pin this seat like any other.
-  # The seat is named `opencode` on the command line but its variable is PR_RELAY_OPENCODE_MODEL;
-  # the config key follows the SEAT name, so nobody has to know that history to configure it.
-  local _m; _m="$(panel_resolve PR_RELAY_OPENCODE_MODEL MODEL_opencode "")"
+  # Through opencode_resolve_model so ~/.config/pr-review-relay/config can pin this seat like any other.
+  local _m; _m="$(opencode_resolve_model)"
   [ -n "$_m" ] && model=(-m "$_m")
 
   # UNIQUE per invocation. A fixed name races: both callers dedupe their reviewer

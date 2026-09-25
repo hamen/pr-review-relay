@@ -1306,9 +1306,13 @@ if [ -f "$RL" ]; then
     echo changed > f.txt; git add f.txt; git commit -qm change
   ) >/dev/null 2>&1
   oc_reset
-  ( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" \
-      bash "$RL" --base mainline --reviewers opencode >/dev/null 2>&1 )
+  rlout=$( cd "$RLREPO" && env PATH="$BIN:$PATH" OC_ARGV_FILE="$OC_ARGV" PR_RELAY_OPENCODE_MODEL=oc-pin-1 \
+      bash "$RL" --base mainline --reviewers opencode 2>/dev/null )
   rc=$?
+  # review-local prints the same dispatch line as the relay, from the same helper.
+  if grep -qF -- '→ opencode reviewing… (model=oc-pin-1)' <<< "$rlout"; then
+    echo "  ok   [-] review-local's dispatch line shows the resolved model"; PASS=$((PASS+1))
+  else echo "  FAIL review-local dispatch line lacks the pin: $(grep 'reviewing' <<< "$rlout")"; FAIL=$((FAIL+1)); fi
   if [ "$rc" = 0 ] && [ -s "$OC_ARGV" ]; then
     echo "  ok   [0] review-local dispatches opencode"; PASS=$((PASS+1))
   else
@@ -1659,7 +1663,7 @@ out=$( env PATH="$BIN:$PATH" HOME="$WORK/home" \
 rc=$?
 if [ "$rc" = 0 ]; then echo "  ok   [0] grok reviewer runs and posts"; PASS=$((PASS+1))
 else echo "  FAIL [got $rc, want 0] grok reviewer: $out"; FAIL=$((FAIL+1)); fi
-if grep -q -- '--prompt-file' "$ARGV_LOG" && grep -q -- '-m grok-4.5' "$ARGV_LOG" \
+if grep -q -- '--prompt-file' "$ARGV_LOG" && grep -q -- '-m grok-4.6' "$ARGV_LOG" \
    && grep -q -- '--reasoning-effort medium' "$ARGV_LOG" \
    && grep -q -- '--permission-mode plan' "$ARGV_LOG" \
    && grep -q -- '--sandbox read-only' "$ARGV_LOG" \
@@ -1668,6 +1672,19 @@ if grep -q -- '--prompt-file' "$ARGV_LOG" && grep -q -- '-m grok-4.5' "$ARGV_LOG
    && grep -q -- '--cwd' "$ARGV_LOG"; then
   echo "  ok   [-] grok argv pins model/medium/plan/sandbox/deny/verbatim/cwd/prompt-file"; PASS=$((PASS+1))
 else echo "  FAIL grok argv missing required flags: $(cat "$ARGV_LOG" 2>/dev/null)"; FAIL=$((FAIL+1)); fi
+# The dispatch line shows what the seat resolved to — the same values the argv above carries.
+if grep -qF -- '→ grok reviewing… (model=grok-4.6, effort=medium)' <<< "$out"; then
+  echo "  ok   [-] grok's dispatch line shows its resolved model and effort"; PASS=$((PASS+1))
+else echo "  FAIL grok dispatch line lacks its pins: $(grep 'reviewing' <<< "$out")"; FAIL=$((FAIL+1)); fi
+# …and so does --dry-run, which never reaches the dispatch line: it is how a pin is checked
+# without running a review.
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+dout=$( env PATH="$BIN:$PATH" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" \
+  TMPDIR="$WORK/tmp" GH_SHA_COUNTER="$WORK/sha_counter" GROK_REVIEW_MODEL=grok-9.9 GROK_REVIEW_EFFORT=low \
+  bash "$RELAY" --pr 1 --author claude --reviewers grok --dry-run 2>&1 )
+if grep -qF -- 'would run: grok (grok) (model=grok-9.9, effort=low)' <<< "$dout"; then
+  echo "  ok   [-] --dry-run's would-run line shows the resolved pins"; PASS=$((PASS+1))
+else echo "  FAIL --dry-run line lacks the pins: $(grep 'would run' <<< "$dout")"; FAIL=$((FAIL+1)); fi
 if grep -qF -- '+change' "$PROMPT_FILE_LOG" && grep -qF -- '--- DIFF ---' "$PROMPT_FILE_LOG"; then
   echo "  ok   [-] grok prompt-file contains the full PR diff"; PASS=$((PASS+1))
 else echo "  FAIL grok prompt-file missing diff content (pl=$(wc -c < "$PROMPT_FILE_LOG" 2>/dev/null)B)"; FAIL=$((FAIL+1)); fi

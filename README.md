@@ -122,7 +122,7 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
     point it at a paid Qwen Cloud / DashScope OpenAI-compatible endpoint via `~/.qwen/.env`
     (`QWEN_DEFAULT_AUTH_TYPE`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). Opt-in: name it
     explicitly in `--reviewers`.
-  - ⚡ [`grok`](https://grok.com) (Grok Build CLI) — uses `grok --prompt-file … -m grok-4.5 --reasoning-effort medium --permission-mode plan --sandbox read-only --deny '*'` from an isolated cwd (full diff always embedded; stdin is ignored). Opt-in: name it explicitly in `--reviewers`.
+  - ⚡ [`grok`](https://grok.com) (Grok Build CLI) — uses `grok --prompt-file … -m grok-4.6 --reasoning-effort medium --permission-mode plan --sandbox read-only --deny '*'` from an isolated cwd (full diff always embedded; stdin is ignored). Model and effort come from `MODEL_grok` / `EFFORT_grok` (defaults `grok-4.6` / `medium`) — the same keys ship-feature's plan-review `grok` seat reads.
 
 You only need the agents you actually want as reviewers.
 
@@ -169,13 +169,15 @@ $EDITOR ~/.config/pr-review-relay/config
 
 ```
 REVIEWERS=claude,codex,grok,opencode
-PLAN_REVIEWERS=claude,codex,grok45high,kimi3
+PLAN_REVIEWERS=codex,grok,glm
 AGENT_TIMEOUT=500
 MODEL_claude=opus
 MODEL_codex=gpt-5.6-sol
 MODEL_grok=grok-4.6
 MODEL_opencode=openrouter/z-ai/glm-5.2
 ```
+
+Each seat's dispatch line shows what it resolved to — `→ grok reviewing… (model=grok-4.7, effort=medium)` — and so does `--dry-run`'s `would run:` line, so a pin can be checked without running a review.
 
 A `MODEL_<seat>` key uses the **seat** name you pass to `--reviewers`, so you never need to know that opencode's variable is `PR_RELAY_OPENCODE_MODEL` and antigravity's is `AGY_REVIEW_MODEL`. (`MODEL_agy` still works as an alias of `MODEL_antigravity`.) A suffix that names no seat is kept — ship-feature reads this same file and knows seats this repo does not — but it is reported on stderr, so a typo cannot pass for a setting that quietly had no effect.
 
