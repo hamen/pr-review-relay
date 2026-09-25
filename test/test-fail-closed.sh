@@ -2255,6 +2255,17 @@ grep -q "dispatch claude" "$_log" 2>/dev/null && grep -q "dispatch codex" "$_log
 
 grep -q "verdict exit=0" "$_log" 2>/dev/null; ok_if $? "run log records the final verdict" "$(tail -1 "$_log" 2>/dev/null)"
 
+_side=$(latest_side)
+grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "the reviewer's body is in its own sidecar" "side=${_side:-<none>}"
+
+# The kill case this whole feature exists for: the review is on disk BEFORE the post is attempted,
+# so a failure (or a kill) between the two still leaves the text.
+s_reset; s_run "$SHA_A" GH_POST_FAIL=1 >/dev/null
+_side=$(latest_side)
+grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "sidecar holds the review even when posting fails" "side=${_side:-<none>}"
+
+# Placed after the sidecar checks: _pmode runs the relay five times, and those checks read the
+# NEWEST sidecar, which must be the run they were written for.
 echo "parallel by default:"
 # The run log's start line records the mode that actually ran. No flag is PARALLEL since 2026-09-25;
 # --sequential opts out; --parallel is still accepted; of the two, the last one wins.
@@ -2270,15 +2281,9 @@ _m=$(_pmode --parallel --sequential);  [ "$_m" = 0 ]; ok_if $? "--parallel --seq
 unset _m
 # No `grep -q`: it exits at the first match, the relay takes SIGPIPE, and under pipefail the
 # pipeline fails although the text is there.
-bash "$RELAY" --help 2>/dev/null | grep -- '--sequential' >/dev/null; ok_if $? "pr-review-relay --help names --sequential" "-"
-_side=$(latest_side)
-grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "the reviewer's body is in its own sidecar" "side=${_side:-<none>}"
-
-# The kill case this whole feature exists for: the review is on disk BEFORE the post is attempted,
-# so a failure (or a kill) between the two still leaves the text.
-s_reset; s_run "$SHA_A" GH_POST_FAIL=1 >/dev/null
-_side=$(latest_side)
-grep -q "LGTM from claude" "$_side" 2>/dev/null; ok_if $? "sidecar holds the review even when posting fails" "side=${_side:-<none>}"
+bash "$RELAY" --help 2>/dev/null | grep -- '--sequential' >/dev/null \
+  && bash "$RELAY" --help 2>/dev/null | grep -- '--parallel' >/dev/null
+ok_if $? "pr-review-relay --help names --sequential and --parallel" "-"
 
 # Every terminal path logs a verdict, including the failure ones — a log that only recorded
 # successes would be silent exactly when someone needs it.
@@ -3005,7 +3010,9 @@ if [ -f "$RL" ] && [ -n "$(cd "$HSREPO" && git diff mainline --stat 2>/dev/null)
 #!/usr/bin/env bash
 cat >/dev/null
 : > "\$HS_DIR/started.$_s"
+echo "start $_s" >> "\$HS_DIR/events"
 for _i in \$(seq 1 200); do [ -e "\$HS_DIR/go" ] && break; sleep 0.1; done
+echo "end $_s" >> "\$HS_DIR/events"
 echo "LGTM"
 STUB
     chmod +x "$HSBIN/$_s"
@@ -3021,15 +3028,24 @@ STUB
     if [ "$expect" = both ]; then
       for _i in $(seq 1 150); do [ -e "$HS/started.claude" ] && [ -e "$HS/started.codex" ] && break; sleep 0.1; done
     else
-      sleep 2   # only ever proves ABSENCE: a sequential second stub cannot start while the first blocks
+      # Proving ABSENCE needs a window: hold the first stub for 5 s and require that the second never
+      # starts meanwhile. A sequential second stub cannot start while the first blocks; a parallel
+      # one starts within milliseconds. The event order is checked after `go` as well.
+      for _i in $(seq 1 50); do [ "$(ls "$HS"/started.* 2>/dev/null | wc -l | tr -d ' ')" -gt 1 ] && break; sleep 0.1; done
     fi
     _n=$(ls "$HS"/started.* 2>/dev/null | wc -l | tr -d ' ')
     : > "$HS/go"; wait "$_pid"
-    if [ "$expect" = both ]; then [ "$_n" = 2 ]; else [ "$_n" = 1 ]; fi
-    ok_if $? "$desc" "started before go: $_n"
+    if [ "$expect" = both ]; then
+      [ "$_n" = 2 ]
+    else
+      # One at a time: each start is followed by its own end before the next start.
+      [ "$_n" = 1 ] && [ "$(awk '{print $1}' "$HS/events" 2>/dev/null | tr '\n' ' ')" = "start end start end " ]
+    fi
+    ok_if $? "$desc" "started before go: $_n; events: $(tr '\n' ',' < "$HS/events" 2>/dev/null)"
   }
   _hs both "review-local: no flag → reviewers run at the same time"
   _hs one  "review-local: --sequential → one at a time"                 --sequential
+  _hs both "review-local: --parallel alone → at the same time"          --parallel
   _hs both "review-local: --sequential --parallel → last wins (parallel)" --sequential --parallel
   _hs one  "review-local: --parallel --sequential → last wins (sequential)" --parallel --sequential
   unset -f _hs
