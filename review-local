@@ -13,8 +13,10 @@
 #
 # Usage:
 #   review-local [--author claude|codex|cursor|antigravity|opencode|qwen|grok] [--base <ref>] \
-#                [--reviewers claude,codex,grok,opencode] [--parallel]
+#                [--reviewers claude,codex,grok,opencode] [--sequential]
 #                (opencode, qwen, and grok are also supported, opt-in: name them explicitly)
+#   (reviewers run in PARALLEL by default; --sequential runs them one at a time, in panel order;
+#    --parallel is still accepted; the last of the two wins)
 #   (run from inside the repo, on the branch you want reviewed)
 set -uo pipefail
 
@@ -68,7 +70,8 @@ GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 . "$GROK_LIB"
 
 DEFAULT_REVIEWERS="claude,codex,grok,opencode"
-AUTHOR=""; BASE="main"; PARALLEL=0; REVIEWERS_EXPLICIT=0
+# PARALLEL by default, as in pr-review-relay — see the note there.
+AUTHOR=""; BASE="main"; PARALLEL=1; REVIEWERS_EXPLICIT=0
 REVIEWERS="$(panel_resolve PR_RELAY_REVIEWERS REVIEWERS "$DEFAULT_REVIEWERS")"
 # 500, and it MUST match pr-review-relay's literal. Same env name, same config key, same seats, same
 # models — a machine with no config that got 500 from one and 300 from the other would be the very
@@ -127,8 +130,11 @@ while [ $# -gt 0 ]; do
     --author)    need_value "$@"; AUTHOR="$2"; shift 2;;
     --base)      need_value "$@"; BASE="$2"; shift 2;;
     --reviewers) need_value "$@"; REVIEWERS="$2"; REVIEWERS_EXPLICIT=1; shift 2;;
-    --parallel)  PARALLEL=1; shift;;
-    -h|--help)   relay_print_header "$0" 15; exit 0;;
+    --parallel)  PARALLEL=1; shift;;   # the default; kept so existing callers keep working
+    --sequential) PARALLEL=0; shift;;
+    # 20, not the old 15: the usage block grew by the lines about --sequential, and a --help that
+    # stops before the flag line is how a new flag goes unseen. The test asserts both flags print.
+    -h|--help)   relay_print_header "$0" 20; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
