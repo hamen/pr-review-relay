@@ -6,6 +6,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-09-26
+
 ### Added
 
 - **Each seat's dispatch line shows the model and effort it resolved to** —
@@ -625,6 +627,7 @@ First tagged release.
 - **`--context-file`**: prepend a doc / spec / API reference so every reviewer verifies the PR against it.
 - **Bounded loop**: a per-PR round cap keeps read→fix→re-run from spiraling; re-runs are idempotent.
 
+[1.7.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.7.0
 [1.6.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.6.0
 [1.5.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.5.0
 [1.4.0]: https://github.com/hamen/pr-review-relay/releases/tag/v1.4.0

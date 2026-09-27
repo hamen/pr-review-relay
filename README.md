@@ -40,6 +40,21 @@ No SaaS, no per-seat review bot, no extra subscription — just the CLIs on your
 
 ## 🆕 What's new
 
+**v1.7.0** — **the reviewers run in parallel by default, and every seat says what it runs.** The
+reviewers are independent, so a sequential round cost the sum of every seat's time; with a grok seat
+that takes 300-500 s on its own, a three-seat round went past 20 minutes where a parallel one costs
+the slowest seat. `pr-review-relay` and `review-local` now run them at once and print each review as
+it finishes; `--sequential` restores one at a time. Each seat's dispatch line — and `--dry-run`'s
+`would run:` line — shows the model and effort it resolved to, e.g.
+`→ grok reviewing… (model=grok-4.7, effort=medium)`, from the same resolvers the review call uses,
+so a pin can be checked without running a review.
+
+Also: `MODEL_glm` and `MODEL_gemini` (ship-feature's plan seats) no longer print "no reviewer seat
+named …" on every run; the unpinned `grok` default is `grok-4.6`, matching ship-feature v0.6.0, which
+reads the same `MODEL_grok` / `EFFORT_grok` keys; and `opencode` now gets the whole diff on stdin, so
+it stops reviewing only the first ~1035 lines of a large pull request. Upgrade together with
+ship-feature v0.6.0.
+
 **v1.6.0** — *the fixes below landed on `main` in #34; this is the release that names them.* **The
 relay could write on the wrong repository, and said the right one while doing it.**
 Inside a fork, `gh repo view` answers with the PARENT and ignores `GH_REPO`; that is where `$REPO`
