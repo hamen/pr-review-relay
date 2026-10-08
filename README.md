@@ -171,7 +171,7 @@ chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN
 
 **`lib-panel.sh`** is sourced by `pr-review-relay`, `review-local` and `pr-review-distill`, and they refuse to start without it. It is the one place that answers "who reviews, with which model" — install it alongside the others or those three stop at startup.
 
-**`lib-argv.sh`** is sourced by `pr-review-relay`, `review-local` and `lib-opencode.sh`, and they refuse to start without it (`lib-opencode.sh` is only a library: install `lib-argv.sh` next to it). It holds the argv size guard below.
+**`lib-argv.sh`** is sourced by `pr-review-relay` and `review-local`, and they refuse to start without it. `opencode_review` (in `lib-opencode.sh`) uses its functions and refuses to start the seat if they are not loaded. Install it next to the others. It holds the argv size guard below.
 
 ### How each seat receives its prompt
 

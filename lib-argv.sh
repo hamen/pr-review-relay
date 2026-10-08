@@ -37,6 +37,7 @@ argv_bytes() { printf '%s' "$1" | LC_ALL=C wc -c | tr -d ' '; }
 
 # True when an argv element of $1 bytes (plus its NUL) is within the limit.
 argv_fits() {
+  case "${1:-}" in ''|*[!0-9]*) return 1;; esac   # fail closed: an empty or non-numeric size never "fits"
   local lim; lim="$(argv_limit)" || return 1
   [ $(( $1 + 1 )) -le "$lim" ]
 }

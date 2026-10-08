@@ -21,8 +21,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
     a named reason on stderr, nothing posted, the round exits 3, the other seats still post. A qwen or
     antigravity prompt of 122880–131071 bytes, which used to run, is now refused.
   - `PR_RELAY_ARGV_MAX_BYTES` overrides the limit for tests only; an unusable value is exit 2.
-  - `lib-argv.sh` is a new file that `pr-review-relay`, `review-local` and `lib-opencode.sh` source:
-    install it next to them.
+  - `lib-argv.sh` is a new file that `pr-review-relay` and `review-local` source (`opencode_review`
+    uses its functions and refuses to start the seat when they are not loaded): install it next to them.
   - The `LINK_DIFF_FALLBACK_MAX_BYTES=60000` workaround is no longer needed.
   - Not covered: `review-local`'s antigravity arm still passes prompt plus diff as one argv string.
 

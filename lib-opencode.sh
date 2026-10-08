@@ -508,6 +508,12 @@ opencode_review() {
   # kernel's per-string cap the exec fails with E2BIG (exit 126, no reason). Refuse with a named
   # reason on stderr, empty stdout, and a NON-ZERO rc: rc 0 with an empty body would be reported
   # by the caller as "ran fine but returned an empty review".
+  # Fail CLOSED when lib-argv.sh is not loaded: a missing function would make `argv_fits` a
+  # command-not-found and the guard would be skipped, which is the E2BIG failure again.
+  if ! declare -F argv_bytes >/dev/null 2>&1 || ! declare -F argv_fits >/dev/null 2>&1; then
+    echo "opencode: lib-argv.sh is not loaded, so the argv size guard is missing — refusing to start the seat" >&2
+    return 1
+  fi
   local _oc_n; _oc_n="$(argv_bytes "$oc_prompt")"
   if ! argv_fits "$_oc_n"; then
     argv_refuse opencode "$_oc_n" "shorten the --context-file or use another seat"

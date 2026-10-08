@@ -3097,7 +3097,7 @@ av_run() { # av_run [env assignments...] -- <relay args...>   → $AV_RC, $AV/{a
   rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
   env PATH="$BIN:$PATH" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
     GH_SHA_COUNTER="$WORK/sha_counter" ARGV_LOG="$AV/argv" ARGV_MAX_LOG="$AV/max" STDIN_LOG="$AV/stdin" GH_BODY_DIR="$AV" \
-    ${envs[@]+"${envs[@]}"} bash "$RELAY" --pr 1 ${args[@]+"${args[@]}"} > "$AV/out" 2> "$AV/err"
+    ${envs[@]+"${envs[@]}"} bash "$RELAY" --pr 1 ${args[@]+"${args[@]}"} > "$AV/out" 2> "$AV/err" < /dev/null
   AV_RC=$?
 }
 av_ok() { # <desc> <status of the condition just tested>
@@ -3106,6 +3106,14 @@ av_ok() { # <desc> <status of the condition just tested>
 av_max() { awk -v s="$1" '$1 == s { print $2 }' "$AV/max" | tail -1; }   # longest argv element of a seat
 av_count() { grep -c -- "$1" "$2" 2>/dev/null || true; }
 
+# Completeness, not just markers: every filler line of the context and every line of the diff must
+# reach the seat's stdin, once. (A prompt that lost most of a 98 KB diff would still carry its tail marker.)
+av_full() { # <label> <ctx file> <expected diff lines>
+  local cl dl
+  cl=$(grep -c '^context filler line' "$2" 2>/dev/null || true); [ -n "$cl" ] || cl=0
+  [ "$(grep -c '^context filler line' "$AV/stdin")" = "$cl" ] && [ "$cl" -gt 0 ] \
+    && [ "$(grep -c -E '^\+d{79}$' "$AV/stdin")" = "$3" ]; av_ok "$1 stdin carries all $cl context lines and all $3 diff lines, once" $?
+}
 av_ctx "$AV/ctx34k" 34305
 av_ctx "$AV/ctx140k" 140000
 av_run GH_DIFF_BYTES=98277 -- --author antigravity --reviewers codex --context-file "$AV/ctx34k"
@@ -3113,17 +3121,25 @@ _m=$(av_max codex)
 [ "$AV_RC" = 0 ] && [ -n "$_m" ] && [ "$_m" -lt 100000 ]; av_ok "T1 PR #121 sizes, codex: round clean, largest argv element ${_m:-?} B (< 100000)" $?
 [ "$(av_count CTX-MARKER-END "$AV/stdin")" = 1 ] && [ "$(av_count DIFF-TAIL-MARKER "$AV/stdin")" = 1 ]; av_ok "T1 codex stdin holds the context and the inlined diff exactly once" $?
 grep -q 'LGTM from codex' "$AV/bodies"; av_ok "T1 codex's review was posted" $?
+av_full "T1 codex" "$AV/ctx34k" 1214
 
 av_run GH_DIFF_BYTES=98277 -- --author codex --reviewers claude --context-file "$AV/ctx34k"
 _m=$(av_max claude)
 [ "$AV_RC" = 0 ] && [ -n "$_m" ] && [ "$_m" -lt 100000 ]; av_ok "T2 PR #121 sizes, claude: round clean, largest argv element ${_m:-?} B (< 100000)" $?
 [ "$(av_count CTX-MARKER-END "$AV/stdin")" = 1 ] && [ "$(av_count DIFF-TAIL-MARKER "$AV/stdin")" = 1 ]; av_ok "T2 claude stdin holds the context and the diff exactly once" $?
+av_full "T2 claude" "$AV/ctx34k" 1214
+grep -q 'LGTM from claude' "$AV/bodies"; av_ok "T2 claude's review was posted" $?
 
 # --diff mode: today's stdin is the diff alone and the prompt rides in argv, so piping $feed unchanged
 # would drop the prompt. Order matters too: prompt first, then a blank line, then the diff.
 av_run GH_DIFF_BYTES=98277 -- --author antigravity --reviewers codex --diff
 _p=$(grep -n 'Blocker / Should-fix / Nit' "$AV/stdin" | head -1 | cut -d: -f1); _d=$(grep -n 'DIFF-TAIL-MARKER' "$AV/stdin" | head -1 | cut -d: -f1)
 [ "$AV_RC" = 0 ] && [ -n "$_p" ] && [ -n "$_d" ] && [ "$_p" -lt "$_d" ] && [ "$(av_count DIFF-TAIL-MARKER "$AV/stdin")" = 1 ]; av_ok "T3 --diff: codex stdin is the prompt, then the diff, once (prompt line ${_p:-?}, diff end ${_d:-?})" $?
+_m=$(av_max codex); [ -n "$_m" ] && [ "$_m" -lt 1000 ]; av_ok "T3 --diff: no argv element of codex carries the prompt or the diff (${_m:-?} B)" $?
+[ "$(grep -c -E '^\+d{79}$' "$AV/stdin")" = 1214 ]; av_ok "T3 --diff: codex stdin carries all 1214 diff lines, once" $?
+# the separator between the prompt and the diff is a blank line, directly before the diff header
+_h=$(grep -n '^diff --git a/big b/big$' "$AV/stdin" | head -1 | cut -d: -f1)
+[ -n "$_h" ] && [ "$_h" -gt 1 ] && [ -z "$(sed -n "$((_h-1))p" "$AV/stdin")" ]; av_ok "T3 --diff: a blank line separates the prompt from the diff" $?
 av_run GH_DIFF_BYTES=98277 -- --author antigravity --reviewers claude --diff
 _p=$(grep -n 'Blocker / Should-fix / Nit' "$AV/stdin" | head -1 | cut -d: -f1); _d=$(grep -n 'DIFF-TAIL-MARKER' "$AV/stdin" | head -1 | cut -d: -f1)
 [ "$AV_RC" = 0 ] && [ -n "$_p" ] && [ -n "$_d" ] && [ "$_p" -lt "$_d" ]; av_ok "T3 --diff: claude stdin is the prompt, then the diff" $?
@@ -3166,11 +3182,24 @@ grep -q 'opencode: prompt is [0-9]* B, over the argv limit' "$AV/err"; av_ok "T6
 ! grep -q 'over the argv limit' "$AV/bodies" && grep -q 'LGTM from codex' "$AV/bodies"; av_ok "T6 the reason was not posted as opencode's review" $?
 ! grep -q 'ran fine but returned an empty review' "$AV/err"; av_ok "T6 not reported as an empty review (non-zero rc, not 0)" $?
 
+# opencode_review without lib-argv.sh loaded must fail CLOSED (rc 1, named), never run unguarded; and
+# argv_fits never says "fits" for an empty or non-numeric size.
+_u=$( . "$HERE/../lib-opencode.sh"; opencode_review "$WORK" "d" "c" "s" "$WORK/errf-x" 5 2>&1 >/dev/null; echo "rc=$?" )
+grep -q 'lib-argv.sh is not loaded' <<< "$_u" && grep -q 'rc=1' <<< "$_u"; av_ok "T6 opencode_review with no lib-argv.sh loaded is refused (fail closed, rc 1)" $?
+_u=$( . "$HERE/../lib-argv.sh"; { argv_fits "" || argv_fits abc || argv_fits -1; } && echo fits || echo refused )
+[ "$_u" = refused ]; av_ok "T5 argv_fits never fits an empty or non-numeric size" $?
+# review-local: an unusable override stops it at startup, like the relay.
+( cd "$RLREPO2" && env PATH="$BIN:$PATH" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  PR_RELAY_ARGV_MAX_BYTES=bogus bash "$RL" --author codex --reviewers claude --base HEAD~1 > "$AV/rl.out" 2> "$AV/rl.err" < /dev/null ); _rc=$?
+[ "$_rc" = 2 ] && grep -q 'invalid PR_RELAY_ARGV_MAX_BYTES' "$AV/rl.err"; av_ok "review-local stops at startup (exit 2) on an unusable PR_RELAY_ARGV_MAX_BYTES (got $_rc)" $?
+
 # T7: antigravity in both modes. Link mode: the context is the oversize part. Diff mode: the diff is.
 av_run -- --author claude --reviewers antigravity,codex --context-file "$AV/ctx140k"
 [ "$AV_RC" = 3 ] && [ -z "$(av_max agy)" ] && grep -q 'antigravity: prompt is [0-9]* B, over the argv limit.*shorten the --context-file' "$AV/err"; av_ok "T7 antigravity, link mode: refused, never started, hint names the context file" $?
+! grep -q 'over the argv limit' "$AV/bodies" && grep -q 'LGTM from codex' "$AV/bodies"; av_ok "T7 link mode: nothing from antigravity posted; codex's review was" $?
 av_run GH_DIFF_BYTES=130000 -- --author claude --reviewers antigravity,codex --diff
 [ "$AV_RC" = 3 ] && [ -z "$(av_max agy)" ] && grep -q 'antigravity: prompt is [0-9]* B, over the argv limit.*use a smaller diff' "$AV/err"; av_ok "T7 antigravity, --diff mode: refused, never started, hint names the diff" $?
+! grep -q 'over the argv limit' "$AV/bodies" && grep -q 'LGTM from codex' "$AV/bodies"; av_ok "T7 --diff mode: nothing from antigravity posted; codex's review was" $?
 av_run GH_DIFF_BYTES=20000 -- --author claude --reviewers antigravity --diff
 _m=$(av_max agy); [ "$AV_RC" = 0 ] && [ -n "$_m" ] && [ "$_m" -gt 20000 ]; av_ok "T7 antigravity, --diff mode, 20 KB diff: still runs, element ${_m:-?} B" $?
 
