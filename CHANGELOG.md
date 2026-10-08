@@ -6,6 +6,26 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Fixed
+
+- **A prompt over the kernel's argv limit no longer voids the round with exit 126.** `PROMPT` is the
+  context file plus the base prompt plus (in link mode) the inlined diff, and it went to `codex exec`,
+  `claude -p`, `qwen -p` and `agy -p` as ONE argv string. Linux refuses to exec a string over 131072
+  bytes (`MAX_ARG_STRLEN`), so a 98 KB diff with a 34 KB context (blackjack_trainer PR #121) gave
+  `stdbuf: Argument list too long`, exit 126, and a codex "no review". `LINK_DIFF_FALLBACK_MAX_BYTES`
+  could not help: it looks at the diff alone. Now:
+  - `codex` and `claude` read the prompt from **stdin** (link mode: the prompt; `--diff` mode: the
+    prompt, a blank line, the diff). No argv size depends on the diff, the context or the base.
+  - The seats that still take one argv string (`qwen`, `antigravity`, `opencode`) are refused BEFORE
+    they start when it is over 122880 bytes (NUL counted), by `argv_fits` in the new `lib-argv.sh`:
+    a named reason on stderr, nothing posted, the round exits 3, the other seats still post. A qwen or
+    antigravity prompt of 122880–131071 bytes, which used to run, is now refused.
+  - `PR_RELAY_ARGV_MAX_BYTES` overrides the limit for tests only; an unusable value is exit 2.
+  - `lib-argv.sh` is a new file that `pr-review-relay` and `review-local` source (`opencode_review`
+    uses its functions and refuses to start the seat when they are not loaded): install it next to them.
+  - The `LINK_DIFF_FALLBACK_MAX_BYTES=60000` workaround is no longer needed.
+  - Not covered: `review-local`'s antigravity arm still passes prompt plus diff as one argv string.
+
 ## [1.7.0] — 2026-09-26
 
 ### Added

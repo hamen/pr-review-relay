@@ -65,6 +65,10 @@ panel_config_load
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
 . "$OPENCODE_LIB"
+ARGV_LIB="$SCRIPT_DIR/lib-argv.sh"
+[ -r "$ARGV_LIB" ] || { echo "missing $ARGV_LIB (keep it next to this script)" >&2; exit 1; }
+. "$ARGV_LIB"
+argv_limit_check || exit 2
 GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 [ -r "$GROK_LIB" ] || { echo "missing $GROK_LIB (keep it next to this script)" >&2; exit 1; }
 . "$GROK_LIB"

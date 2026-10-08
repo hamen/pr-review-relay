@@ -78,6 +78,13 @@ case "$1 $2" in
   # the two-line diff below is far too small to reproduce that: a test that only
   # feeds it proves the plumbing, not the bug.
   "pr diff")   if [ -n "${GH_DIFF_HANG:-}" ]; then : > "${GH_HANG_MARK:?}"; sleep 600; fi; [ -n "${GH_EMPTY_DIFF:-}" ] && exit 0
+               # GH_DIFF_BYTES: a diff of about that many bytes (80-byte lines), ending in a marker.
+               if [ -n "${GH_DIFF_BYTES:-}" ]; then
+                 echo "diff --git a/big b/big"
+                 awk -v n="$GH_DIFF_BYTES" 'BEGIN { l = "+" sprintf("%79s", ""); gsub(/ /, "d", l); t = 0; while (t < n) { print l; t += 81 } }'
+                 echo "+DIFF-TAIL-MARKER"
+                 exit 0
+               fi
                if [ -n "${GH_BIG_DIFF_LINES:-}" ]; then
                  echo "diff --git a/big b/big"
                  i=1; while [ "$i" -le "$GH_BIG_DIFF_LINES" ]; do echo "+line $i"; i=$((i+1)); done
@@ -85,7 +92,12 @@ case "$1 $2" in
                  exit 0
                fi
                echo "diff --git a/x b/x"; echo "+change" ;;
-  "pr comment") [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted host=${GH_HOST:-default} $*" >> "$GH_POST_LOG"; exit 0 ;;
+  "pr comment")
+    # GH_BODY_DIR keeps every posted body, so a test can assert what was (not) published.
+    if [ -n "${GH_BODY_DIR:-}" ]; then
+      _prev=""; for _a in "$@"; do [ "$_prev" = "--body-file" ] && cat -- "$_a" >> "$GH_BODY_DIR/bodies"; _prev="$_a"; done
+    fi
+    [ -n "${GH_POST_FAIL:-}" ] && exit 1; [ -n "${GH_POST_LOG:-}" ] && echo "posted host=${GH_HOST:-default} $*" >> "$GH_POST_LOG"; exit 0 ;;
   "api "*|"api")
     [ -n "${GH_API_LOG:-}" ] && echo "api host=${GH_HOST:-default} $*" >> "$GH_API_LOG"
     echo "" ;;
@@ -116,6 +128,13 @@ case ",\${QUOTA_OUT:-}," in *",\$key,"*) echo "Error: Individual quota reached. 
 # The bug this guards against is a flag silently going missing or being renamed, which
 # no output-shape assertion would ever notice.
 [ -n "\${ARGV_LOG:-}" ] && printf '%s %s\n' "\$self" "\$*" >> "\$ARGV_LOG"
+# ARGV_MAX_LOG: the longest single argv element, in BYTES. STDIN_LOG: everything on stdin. Together
+# they show where the prompt went; the kernel limit is on ONE argv string, so the max is what matters.
+if [ -n "\${ARGV_MAX_LOG:-}" ]; then
+  _m=0; for _a in "\$@"; do _l=\$(printf '%s' "\$_a" | LC_ALL=C wc -c | tr -d ' '); [ "\$_l" -gt "\$_m" ] && _m=\$_l; done
+  printf '%s %s\n' "\$self" "\$_m" >> "\$ARGV_MAX_LOG"
+fi
+if [ -n "\${STDIN_LOG:-}" ]; then { printf '=== %s stdin ===\n' "\$self"; cat; printf '\n'; } >> "\$STDIN_LOG"; fi
 # Grok receives the plan/diff only via --prompt-file (stdin is ignored). When asked,
 # dump the prompt-file contents so tests can assert the full diff reached the agent.
 if [ -n "\${PROMPT_FILE_LOG:-}" ]; then
@@ -1478,7 +1497,7 @@ LREPO="$WORK/localrepo"; git init -q -b main "$LREPO"
 LHEAD=$(git -C "$LREPO" rev-parse HEAD)
 ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
 # reviewer stub that echoes the prompt it received, so we can see what it was told to do
-printf '#!/usr/bin/env bash\nprintf "%%s" "$*"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
+printf '#!/usr/bin/env bash\nprintf "%%s" "$*"; cat\n' > "$BIN/claude"; chmod +x "$BIN/claude"
 lc_run() { # sets $out/$rc; args: extra env assignments for the relay
   rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
   out=$( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
@@ -1952,7 +1971,7 @@ else
 fi
 # A RELATIVE symlink target must resolve against the LINK's directory, not the cwd.
 REALD="$WORK/real"; mkdir -p "$REALD"
-cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../lib-panel.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
+cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../lib-panel.sh" "$HERE/../lib-argv.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
 LINKD="$WORK/linkbin"; mkdir -p "$LINKD"
 ( cd "$LINKD" && ln -s "../real/pr-review-relay" pr-review-relay )
 if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then
@@ -2000,6 +2019,9 @@ make_agent claude
 # is HARD — asserting the default IS the point of the change, so these run with
 # CLAUDE_REVIEW_MODEL cleared, and an exported value in a dev/CI env cannot fake a pass.
 CL_ARGV="$WORK/claude-argv.log"
+# The relay's claude seat takes its prompt on STDIN (not argv — an argv string over 128 KiB cannot
+# be exec'd), so the prompt-contract assertions below read this capture; argv assertions stay for flags.
+CL_STDIN="$WORK/claude-stdin.log"
 cl_argv_has() { grep -q -- "$1" "$CL_ARGV" 2>/dev/null; }
 cl_assert() { # <label> <flag> <want: has|hasnot>
   if [ "$3" = has ]; then
@@ -2012,10 +2034,10 @@ cl_assert() { # <label> <flag> <want: has|hasnot>
 }
 _cl_relay() { # <mode> [env assignments...]
   local mode="$1"; shift
-  : > "$CL_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  : > "$CL_ARGV"; : > "$CL_STDIN"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
   env PATH="$BIN:$PATH" HOME="$WORK/home" \
     XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
-    GH_SHA_COUNTER="$WORK/sha_counter" ARGV_LOG="$CL_ARGV" "$@" \
+    GH_SHA_COUNTER="$WORK/sha_counter" ARGV_LOG="$CL_ARGV" STDIN_LOG="$CL_STDIN" "$@" \
     bash "$RELAY" --pr 1 --author codex --reviewers claude "--$mode" >/dev/null 2>&1
 }
 
@@ -2082,9 +2104,10 @@ pr_criteria() { # <label> <file>
 }
 for cl_mode in link diff; do
   _cl_relay "$cl_mode"
-  pr_criteria "relay/$cl_mode prompt" "$CL_ARGV"
-  pr_assert "relay/$cl_mode prompt asks for conventions" "$CL_ARGV" 'AGENTS.md, CLAUDE.md' has
-  pr_assert "relay/$cl_mode prompt keeps do-not-modify"  "$CL_ARGV" 'modify anything'      has
+  pr_criteria "relay/$cl_mode prompt" "$CL_STDIN"
+  pr_assert "relay/$cl_mode prompt asks for conventions" "$CL_STDIN" 'AGENTS.md, CLAUDE.md' has
+  pr_assert "relay/$cl_mode prompt keeps do-not-modify"  "$CL_STDIN" 'modify anything'      has
+  pr_assert "relay/$cl_mode prompt is NOT in argv"       "$CL_ARGV"  'regressions'          hasnot
 done
 : > "$CL_ARGV"
 ( cd "$RLREPO2" && env PATH="$BIN:$PATH" HOME="$WORK/home" \
@@ -2102,13 +2125,13 @@ pr_assert "review-local prompt never claims an attachment" "$CL_ARGV" 'attached'
 # checkout as the PR head. Codex flagged that --link and --diff alone leave it uncovered, which is
 # how a prompt variant gets edited in source and never exercised. Reuses the local-context repo
 # built above; unlike lc_run, ARGV_LOG is set so the argv-logging stub records the prompt.
-: > "$CL_ARGV"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+: > "$CL_ARGV"; : > "$CL_STDIN"; rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
 ( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" \
-  GH_SHA_COUNTER="$WORK/sha_counter" GH_LOCAL_HEAD="$LHEAD" ARGV_LOG="$CL_ARGV" \
+  GH_SHA_COUNTER="$WORK/sha_counter" GH_LOCAL_HEAD="$LHEAD" ARGV_LOG="$CL_ARGV" STDIN_LOG="$CL_STDIN" \
   bash "$RELAY" --pr 1 --author codex --reviewers claude >/dev/null 2>&1 )
-pr_assert "the local-context prompt is the one under test" "$CL_ARGV" 'CHECKED OUT in the current directory' has
-pr_criteria "relay/local-context prompt" "$CL_ARGV"
-pr_assert "relay/local-context prompt asks for conventions" "$CL_ARGV" 'AGENTS.md, CLAUDE.md' has
+pr_assert "the local-context prompt is the one under test" "$CL_STDIN" 'CHECKED OUT in the current directory' has
+pr_criteria "relay/local-context prompt" "$CL_STDIN"
+pr_assert "relay/local-context prompt asks for conventions" "$CL_STDIN" 'AGENTS.md, CLAUDE.md' has
 
 # opencode: prompt arrives as argv (`-- "$oc_prompt"`), but only the strict stub records it —
 # the generic agent stub is never reached, because the relay resolves the opencode binary
@@ -3054,6 +3077,131 @@ STUB
 else
   echo "  FAIL review-local handshake: could not build its fixture repo"; FAIL=$((FAIL+1))
 fi
+
+# =============================================================================
+# The argv limit. Linux refuses to exec a process when ONE argument string is over 131072 bytes
+# (MAX_ARG_STRLEN, NUL included): the shell reports exit 126 and the seat never starts. A real round
+# (blackjack_trainer PR #121: 98 KB diff + 34 KB context) lost its codex review that way.
+# claude and codex now take the prompt on stdin; the seats that cannot (qwen, antigravity, opencode)
+# are refused BEFORE they start, with a named reason, no posted comment, and a failed round.
+# =============================================================================
+echo "argv limit:"
+AV="$WORK/argv-limit"; rm -rf "$AV"; mkdir -p "$AV"
+av_ctx() { # <file> <bytes> — filler lines, then a marker as the last line
+  awk -v n="$2" 'BEGIN { l = "context filler line, not code, about eighty characters wide, padding padding pad\n"; t = 0; while (t < n) { printf "%s", l; t += length(l) } print "CTX-MARKER-END" }' > "$1"
+}
+av_run() { # av_run [env assignments...] -- <relay args...>   → $AV_RC, $AV/{argv,max,stdin,bodies,out,err}
+  local -a envs=() args=()
+  while [ $# -gt 0 ]; do case "$1" in --) shift; args=("$@"); break;; *) envs+=("$1"); shift;; esac; done
+  rm -f "$AV/argv" "$AV/max" "$AV/stdin" "$AV/bodies" "$AV/out" "$AV/err"; : > "$AV/argv"; : > "$AV/max"; : > "$AV/stdin"; : > "$AV/bodies"
+  rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+  env PATH="$BIN:$PATH" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+    GH_SHA_COUNTER="$WORK/sha_counter" ARGV_LOG="$AV/argv" ARGV_MAX_LOG="$AV/max" STDIN_LOG="$AV/stdin" GH_BODY_DIR="$AV" \
+    ${envs[@]+"${envs[@]}"} bash "$RELAY" --pr 1 ${args[@]+"${args[@]}"} > "$AV/out" 2> "$AV/err" < /dev/null
+  AV_RC=$?
+}
+av_ok() { # <desc> <status of the condition just tested>
+  if [ "$2" = 0 ]; then echo "  ok   [-] $1"; PASS=$((PASS+1)); else echo "  FAIL $1"; FAIL=$((FAIL+1)); fi
+}
+av_max() { awk -v s="$1" '$1 == s { print $2 }' "$AV/max" | tail -1; }   # longest argv element of a seat
+av_count() { grep -c -- "$1" "$2" 2>/dev/null || true; }
+
+# Completeness, not just markers: every filler line of the context and every line of the diff must
+# reach the seat's stdin, once. (A prompt that lost most of a 98 KB diff would still carry its tail marker.)
+av_full() { # <label> <ctx file> <expected diff lines>
+  local cl dl
+  cl=$(grep -c '^context filler line' "$2" 2>/dev/null || true); [ -n "$cl" ] || cl=0
+  [ "$(grep -c '^context filler line' "$AV/stdin")" = "$cl" ] && [ "$cl" -gt 0 ] \
+    && [ "$(grep -c -E '^\+d{79}$' "$AV/stdin")" = "$3" ]; av_ok "$1 stdin carries all $cl context lines and all $3 diff lines, once" $?
+}
+av_ctx "$AV/ctx34k" 34305
+av_ctx "$AV/ctx140k" 140000
+av_run GH_DIFF_BYTES=98277 -- --author antigravity --reviewers codex --context-file "$AV/ctx34k"
+_m=$(av_max codex)
+[ "$AV_RC" = 0 ] && [ -n "$_m" ] && [ "$_m" -lt 100000 ]; av_ok "T1 PR #121 sizes, codex: round clean, largest argv element ${_m:-?} B (< 100000)" $?
+[ "$(av_count CTX-MARKER-END "$AV/stdin")" = 1 ] && [ "$(av_count DIFF-TAIL-MARKER "$AV/stdin")" = 1 ]; av_ok "T1 codex stdin holds the context and the inlined diff exactly once" $?
+grep -q 'LGTM from codex' "$AV/bodies"; av_ok "T1 codex's review was posted" $?
+av_full "T1 codex" "$AV/ctx34k" 1214
+
+av_run GH_DIFF_BYTES=98277 -- --author codex --reviewers claude --context-file "$AV/ctx34k"
+_m=$(av_max claude)
+[ "$AV_RC" = 0 ] && [ -n "$_m" ] && [ "$_m" -lt 100000 ]; av_ok "T2 PR #121 sizes, claude: round clean, largest argv element ${_m:-?} B (< 100000)" $?
+[ "$(av_count CTX-MARKER-END "$AV/stdin")" = 1 ] && [ "$(av_count DIFF-TAIL-MARKER "$AV/stdin")" = 1 ]; av_ok "T2 claude stdin holds the context and the diff exactly once" $?
+av_full "T2 claude" "$AV/ctx34k" 1214
+grep -q 'LGTM from claude' "$AV/bodies"; av_ok "T2 claude's review was posted" $?
+
+# --diff mode: today's stdin is the diff alone and the prompt rides in argv, so piping $feed unchanged
+# would drop the prompt. Order matters too: prompt first, then a blank line, then the diff.
+av_run GH_DIFF_BYTES=98277 -- --author antigravity --reviewers codex --diff
+_p=$(grep -n 'Blocker / Should-fix / Nit' "$AV/stdin" | head -1 | cut -d: -f1); _d=$(grep -n 'DIFF-TAIL-MARKER' "$AV/stdin" | head -1 | cut -d: -f1)
+[ "$AV_RC" = 0 ] && [ -n "$_p" ] && [ -n "$_d" ] && [ "$_p" -lt "$_d" ] && [ "$(av_count DIFF-TAIL-MARKER "$AV/stdin")" = 1 ]; av_ok "T3 --diff: codex stdin is the prompt, then the diff, once (prompt line ${_p:-?}, diff end ${_d:-?})" $?
+_m=$(av_max codex); [ -n "$_m" ] && [ "$_m" -lt 1000 ]; av_ok "T3 --diff: no argv element of codex carries the prompt or the diff (${_m:-?} B)" $?
+[ "$(grep -c -E '^\+d{79}$' "$AV/stdin")" = 1214 ]; av_ok "T3 --diff: codex stdin carries all 1214 diff lines, once" $?
+# the separator between the prompt and the diff is a blank line, directly before the diff header
+_h=$(grep -n '^diff --git a/big b/big$' "$AV/stdin" | head -1 | cut -d: -f1)
+[ -n "$_h" ] && [ "$_h" -gt 1 ] && [ -z "$(sed -n "$((_h-1))p" "$AV/stdin")" ]; av_ok "T3 --diff: a blank line separates the prompt from the diff" $?
+av_run GH_DIFF_BYTES=98277 -- --author antigravity --reviewers claude --diff
+_p=$(grep -n 'Blocker / Should-fix / Nit' "$AV/stdin" | head -1 | cut -d: -f1); _d=$(grep -n 'DIFF-TAIL-MARKER' "$AV/stdin" | head -1 | cut -d: -f1)
+[ "$AV_RC" = 0 ] && [ -n "$_p" ] && [ -n "$_d" ] && [ "$_p" -lt "$_d" ]; av_ok "T3 --diff: claude stdin is the prompt, then the diff" $?
+_m=$(av_max claude); [ -n "$_m" ] && [ "$_m" -lt 1000 ]; av_ok "T3 --diff: no argv element of claude carries the prompt or the diff (${_m:-?} B)" $?
+
+# T4: a context alone over the limit. qwen takes the prompt as one argv string: refused, named, no 126,
+# no comment from it, and the round fails (3) while the healthy seat still posts.
+for _mode in "" "--sequential"; do
+  av_run -- --author antigravity --reviewers qwen,codex $_mode --context-file "$AV/ctx140k"
+  _l="T4${_mode:+ $_mode}"
+  [ "$AV_RC" = 3 ]; av_ok "$_l: oversize qwen → round exit 3 (got $AV_RC)" $?
+  grep -q 'qwen: prompt is [0-9]* B, over the argv limit (122880 B, counting the terminating NUL) — shorten the --context-file' "$AV/err"; av_ok "$_l: the named reason is on stderr" $?
+  [ -z "$(av_max qwen)" ]; av_ok "$_l: qwen never started" $?
+  ! grep -q -E 'exit(ed with)?( code)? 126' "$AV/err" "$AV/out"; av_ok "$_l: no exit 126 anywhere" $?
+  ! grep -q 'over the argv limit' "$AV/bodies" && grep -q 'LGTM from codex' "$AV/bodies"; av_ok "$_l: nothing from qwen was posted; codex's review was" $?
+done
+
+# T5: the byte counter and the boundary.
+_u=$( . "$HERE/../lib-argv.sh"; e=$(awk 'BEGIN { for (i = 0; i < 70000; i++) printf "é" }'); n=$(argv_bytes "$e")
+      if [ "$n" = 140000 ] && ! argv_fits "$n"; then echo ok; else echo "bytes=$n"; fi )
+[ "$_u" = ok ]; av_ok "T5 70000 × é is 140000 bytes (not 70000 characters) and does not fit" $?
+_u=$( . "$HERE/../lib-argv.sh"; argv_fits 122879 && ! argv_fits 122880 && echo ok )
+[ "$_u" = ok ]; av_ok "T5 default limit: 122879 B fits, 122880 B does not (the NUL counts)" $?
+_u=$( . "$HERE/../lib-argv.sh"; export PR_RELAY_ARGV_MAX_BYTES=131072; argv_fits 131071 && ! argv_fits 131072 && echo ok )
+[ "$_u" = ok ]; av_ok "T5 override at the kernel's 131072: 131071 B fits, 131072 B does not" $?
+for _bad in 131073 abc 0 -5 1.5; do
+  _u=$( . "$HERE/../lib-argv.sh"; export PR_RELAY_ARGV_MAX_BYTES="$_bad"; argv_limit >/dev/null 2>&1 || echo rejected )
+  [ "$_u" = rejected ]; av_ok "T5 PR_RELAY_ARGV_MAX_BYTES='$_bad' is rejected" $?
+done
+av_run PR_RELAY_ARGV_MAX_BYTES=999999 -- --author antigravity --reviewers codex
+[ "$AV_RC" = 2 ] && grep -q 'invalid PR_RELAY_ARGV_MAX_BYTES' "$AV/err"; av_ok "T5 the relay stops at startup (exit 2) on an unusable override (got $AV_RC)" $?
+
+# T6: opencode builds its prompt inside opencode_review; the guard lives there.
+BIN_OCA="$WORK/bin-oca"; make_strict_opencode "$BIN_OCA"
+OC_AV="$WORK/oc-argv-limit.log"; oc_reset "$OC_AV"
+av_run OC_ARGV_FILE="$OC_AV" PR_RELAY_OPENCODE_BIN="$BIN_OCA/opencode" -- --author antigravity --reviewers opencode,codex --context-file "$AV/ctx140k"
+[ "$AV_RC" = 3 ]; av_ok "T6 oversize opencode → round exit 3 (got $AV_RC)" $?
+[ ! -e "$OC_AV" ]; av_ok "T6 opencode never started" $?
+grep -q 'opencode: prompt is [0-9]* B, over the argv limit' "$AV/err"; av_ok "T6 the named reason is on stderr" $?
+! grep -q 'over the argv limit' "$AV/bodies" && grep -q 'LGTM from codex' "$AV/bodies"; av_ok "T6 the reason was not posted as opencode's review" $?
+! grep -q 'ran fine but returned an empty review' "$AV/err"; av_ok "T6 not reported as an empty review (non-zero rc, not 0)" $?
+
+# opencode_review without lib-argv.sh loaded must fail CLOSED (rc 1, named), never run unguarded; and
+# argv_fits never says "fits" for an empty or non-numeric size.
+_u=$( . "$HERE/../lib-opencode.sh"; opencode_review "$WORK" "d" "c" "s" "$WORK/errf-x" 5 2>&1 >/dev/null; echo "rc=$?" )
+grep -q 'lib-argv.sh is not loaded' <<< "$_u" && grep -q 'rc=1' <<< "$_u"; av_ok "T6 opencode_review with no lib-argv.sh loaded is refused (fail closed, rc 1)" $?
+_u=$( . "$HERE/../lib-argv.sh"; { argv_fits "" || argv_fits abc || argv_fits -1; } && echo fits || echo refused )
+[ "$_u" = refused ]; av_ok "T5 argv_fits never fits an empty or non-numeric size" $?
+# review-local: an unusable override stops it at startup, like the relay.
+( cd "$RLREPO2" && env PATH="$BIN:$PATH" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" TMPDIR="$WORK/tmp" \
+  PR_RELAY_ARGV_MAX_BYTES=bogus bash "$RL" --author codex --reviewers claude --base HEAD~1 > "$AV/rl.out" 2> "$AV/rl.err" < /dev/null ); _rc=$?
+[ "$_rc" = 2 ] && grep -q 'invalid PR_RELAY_ARGV_MAX_BYTES' "$AV/rl.err"; av_ok "review-local stops at startup (exit 2) on an unusable PR_RELAY_ARGV_MAX_BYTES (got $_rc)" $?
+
+# T7: antigravity in both modes. Link mode: the context is the oversize part. Diff mode: the diff is.
+av_run -- --author claude --reviewers antigravity,codex --context-file "$AV/ctx140k"
+[ "$AV_RC" = 3 ] && [ -z "$(av_max agy)" ] && grep -q 'antigravity: prompt is [0-9]* B, over the argv limit.*shorten the --context-file' "$AV/err"; av_ok "T7 antigravity, link mode: refused, never started, hint names the context file" $?
+! grep -q 'over the argv limit' "$AV/bodies" && grep -q 'LGTM from codex' "$AV/bodies"; av_ok "T7 link mode: nothing from antigravity posted; codex's review was" $?
+av_run GH_DIFF_BYTES=130000 -- --author claude --reviewers antigravity,codex --diff
+[ "$AV_RC" = 3 ] && [ -z "$(av_max agy)" ] && grep -q 'antigravity: prompt is [0-9]* B, over the argv limit.*use a smaller diff' "$AV/err"; av_ok "T7 antigravity, --diff mode: refused, never started, hint names the diff" $?
+! grep -q 'over the argv limit' "$AV/bodies" && grep -q 'LGTM from codex' "$AV/bodies"; av_ok "T7 --diff mode: nothing from antigravity posted; codex's review was" $?
+av_run GH_DIFF_BYTES=20000 -- --author claude --reviewers antigravity --diff
+_m=$(av_max agy); [ "$AV_RC" = 0 ] && [ -n "$_m" ] && [ "$_m" -gt 20000 ]; av_ok "T7 antigravity, --diff mode, 20 KB diff: still runs, element ${_m:-?} B" $?
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
