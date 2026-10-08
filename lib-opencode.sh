@@ -504,6 +504,16 @@ opencode_review() {
 
   oc_prompt="$(printf '%sYou are reviewing %s.\n\nThe complete diff is APPENDED BELOW, after this prompt. That diff, plus any context\ngiven above, is everything you have: there is no shell and no checkout, so commands\nwill be refused, and there is no attachment and no file to open. Do not go looking\nfor the diff anywhere else — it is already in front of you.\n\nLook for correctness bugs, security issues, broken edge cases, regressions, missing or\ninadequate tests for the behaviour the change touches, and clear design or\nmaintainability problems. Give a file and line reference for every finding where one\napplies. Report missing tests as Should-fix, unless the untested path is itself a\nBlocker. Be concise. Group findings by severity:\nBlocker / Should-fix / Nit. If it looks good, say so in one line.' "$context_block" "$subject")"
 
+  # ARGV GUARD (lib-argv.sh, sourced by both callers). oc_prompt is ONE argv string below; over the
+  # kernel's per-string cap the exec fails with E2BIG (exit 126, no reason). Refuse with a named
+  # reason on stderr, empty stdout, and a NON-ZERO rc: rc 0 with an empty body would be reported
+  # by the caller as "ran fine but returned an empty review".
+  local _oc_n; _oc_n="$(argv_bytes "$oc_prompt")"
+  if ! argv_fits "$_oc_n"; then
+    argv_refuse opencode "$_oc_n" "shorten the --context-file or use another seat"
+    return 75
+  fi
+
   # PATH is validated from the repository, but a RELATIVE entry means something
   # different once we cd — it could resolve to a wholly different `timeout`. Pin it
   # to absolute entries, dropping any that don't resolve, so what was checked is

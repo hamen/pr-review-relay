@@ -159,6 +159,7 @@ curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comm
 curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
 curl -fsSL "$REPO/lib-grok.sh" -o "$BIN/lib-grok.sh"
 curl -fsSL "$REPO/lib-panel.sh" -o "$BIN/lib-panel.sh"
+curl -fsSL "$REPO/lib-argv.sh" -o "$BIN/lib-argv.sh"
 chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-distill" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
 # lib-*.sh are sourced, not executed — they need no +x
 # make sure ~/.local/bin is on your PATH
@@ -169,6 +170,23 @@ chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN
 `pr-review-relay` and `review-local` both source **`lib-opencode.sh`** and **`lib-grok.sh`** from their own directory — shared OpenCode and Grok reviewer policies so the two scripts cannot drift on security-relevant settings. Both refuse to start if either lib is missing.
 
 **`lib-panel.sh`** is sourced by `pr-review-relay`, `review-local` and `pr-review-distill`, and they refuse to start without it. It is the one place that answers "who reviews, with which model" — install it alongside the others or those three stop at startup.
+
+**`lib-argv.sh`** is sourced by `pr-review-relay`, `review-local` and `lib-opencode.sh`, and they refuse to start without it (`lib-opencode.sh` is only a library: install `lib-argv.sh` next to it). It holds the argv size guard below.
+
+### How each seat receives its prompt
+
+Linux refuses to start a process when ONE argument string is over 131072 bytes (`MAX_ARG_STRLEN`, the terminating NUL included): the shell reports exit 126 and the seat never runs. A diff plus a `--context-file` can pass that size, and `LINK_DIFF_FALLBACK_MAX_BYTES` does not help, because it looks at the diff alone.
+
+| Seat | Prompt travels by | Can it hit the limit? |
+|---|---|---|
+| `codex`, `claude` | **stdin** (the prompt; in `--diff` mode the prompt, a blank line, then the diff) | No |
+| `cursor` | stdin | No |
+| `grok` | `--prompt-file` | No |
+| `qwen`, `antigravity` (`-p`), `opencode` (`-- "$oc_prompt"`) | one argv string | Guarded |
+
+A guarded seat whose argv string (plus its NUL) is over `122880` bytes does **not start**. It prints the reason on stderr — `qwen: prompt is 140123 B, over the argv limit (122880 B, counting the terminating NUL) — shorten the --context-file or use another seat` (for antigravity in `--diff` mode the hint names the diff) — posts nothing, and fails the round (exit 3); the other seats still run and post. The default is 8 KiB under the kernel's number on purpose, so a qwen or antigravity prompt of 122880–131071 bytes, which used to run, is now refused. `PR_RELAY_ARGV_MAX_BYTES` overrides the limit **for tests only**; a value that is not a number, is 0, or is above 131072 stops the relay at startup (exit 2).
+
+With this in place, `LINK_DIFF_FALLBACK_MAX_BYTES=60000` is no longer needed as a workaround for codex exit 126.
 
 ### Configure the panel — `~/.config/pr-review-relay/config`
 
@@ -277,7 +295,7 @@ Flags:
 | `--pr <number\|url>` | Target PR. Defaults to the PR for the current branch. |
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,grok,opencode` — four vendors, every seat on a flat-rate subscription. `cursor`, `antigravity`, and `qwen` are supported but opt-in — name them explicitly to include them. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
-| `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. |
+| `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. This threshold does **not** protect against the kernel's argv limit — see [How each seat receives its prompt](#how-each-seat-receives-its-prompt). |
 | `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
 | `--sequential` | Run the reviewers one at a time, in panel order. The default is **parallel**: every reviewer runs at once and each review prints as that reviewer finishes. |
 | `--parallel` | The default; still accepted. With both flags, the last one wins. |
@@ -633,7 +651,8 @@ ever holds short event lines. If you want them gone sooner, `--reset` on the PR,
    always comes from `gh pr diff` (authoritative, fork-safe) and is embedded as a **fallback** so a
    reviewer whose sandbox can't run `gh` still returns a review — but the fallback is **omitted for large
    diffs** (over `LINK_DIFF_FALLBACK_MAX_BYTES`, default 100000) so an oversized inline diff can't exceed
-   an agent's prompt limit. With **`--diff`** only the raw diff is sent. A **`--context-file`** is
+   an agent's prompt limit (the kernel's argv limit is a separate matter, handled per seat — see
+   [How each seat receives its prompt](#how-each-seat-receives-its-prompt)). With **`--diff`** only the raw diff is sent. A **`--context-file`** is
    prepended so every reviewer verifies against it.
 3. Posts each review as a **collapsed** PR comment via `gh pr comment` (forum-style `<details>`),
    tagged per agent (🟣 Claude / 🟢 Codex /

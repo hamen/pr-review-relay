@@ -116,6 +116,9 @@ panel_config_load
 OPENCODE_LIB="$SCRIPT_DIR/lib-opencode.sh"
 [ -r "$OPENCODE_LIB" ] || { echo "missing $OPENCODE_LIB (keep it next to this script)" >&2; exit 1; }
 . "$OPENCODE_LIB"
+ARGV_LIB="$SCRIPT_DIR/lib-argv.sh"
+[ -r "$ARGV_LIB" ] || { echo "missing $ARGV_LIB (keep it next to this script)" >&2; exit 1; }
+. "$ARGV_LIB"
 GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 [ -r "$GROK_LIB" ] || { echo "missing $GROK_LIB (keep it next to this script)" >&2; exit 1; }
 . "$GROK_LIB"
@@ -949,6 +952,7 @@ PROMPT="${CONTEXT_BLOCK}${BASE}"
 LINK_DIFF_FALLBACK_MAX_BYTES="${LINK_DIFF_FALLBACK_MAX_BYTES:-100000}"
 # Validated: a non-numeric value would blow up in the arithmetic below.
 case "$LINK_DIFF_FALLBACK_MAX_BYTES" in ''|*[!0-9]*) relay_log "verdict exit=2 invalid LINK_DIFF_FALLBACK_MAX_BYTES"; echo "invalid LINK_DIFF_FALLBACK_MAX_BYTES: '$LINK_DIFF_FALLBACK_MAX_BYTES' (want bytes)" >&2; exit 2;; esac
+argv_limit_check || { relay_log "verdict exit=2 invalid PR_RELAY_ARGV_MAX_BYTES"; exit 2; }
 if [ "$MODE" = link ]; then
   _diff_bytes=$(printf '%s' "$DIFF" | wc -c | tr -d ' ')
   if [ "$_diff_bytes" -le "$LINK_DIFF_FALLBACK_MAX_BYTES" ]; then
@@ -972,6 +976,11 @@ fi
 # invocation in review_with(). It has to happen before that loop: resolving lazily
 # inside tool_for() would be dead code, because the loop skips on `command -v` first.
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; qwen) echo qwen;; grok) echo grok;; *) echo "";; esac; }
+
+# What claude and codex read on stdin. Link mode: the prompt alone (the diff is already inside it when
+# it is inlined, so appending it again would send it twice). Diff mode: the prompt, a blank line, the
+# diff — the shape cursor gets.
+_seat_stdin() { if [ "$MODE" = diff ]; then printf '%s\n\n%s' "$PROMPT" "$DIFF"; else printf '%s' "$PROMPT"; fi; }
 
 review_with() {
   # TRUNCATED is local: sequential mode reuses this function, and a leaked 1 from a previous
@@ -1014,6 +1023,27 @@ review_with() {
     echo "  ! $name: sidecar path '$side' is a symlink — refusing to write" >&2
     echo fail > "$STATUS_DIR/$skey"; rm -f "$errf"; return 0
   fi
+  # ARGV GUARD (lib-argv.sh). Seats that still take the prompt as ONE argv string (qwen, antigravity;
+  # opencode checks inside opencode_review) must not start when it is over the kernel's per-string
+  # cap: exec would fail with E2BIG and the round would report an unexplained exit 126. Refuse with a
+  # named reason instead — on stderr only, with empty stdout (stdout would be POSTED), and with
+  # `return`, never `exit` (in --sequential this runs in the current shell and exit would stop the
+  # later seats). The element measured is the exact string the seat is given.
+  local _argv_check=0 _argv_el="" _argv_hint="shorten the --context-file or use another seat"
+  case "$name" in
+    qwen)        _argv_check=1; _argv_el="$PROMPT";;
+    antigravity) _argv_check=1
+                 if [ "$MODE" = diff ]; then _argv_el="$(printf '%s\n\n%s' "$PROMPT" "$DIFF")"; _argv_hint="use a smaller diff or another seat"
+                 else _argv_el="$PROMPT"; fi;;
+  esac
+  if [ "$_argv_check" = 1 ]; then
+    local _argv_n; _argv_n="$(argv_bytes "$_argv_el")"
+    if ! argv_fits "$_argv_n"; then
+      argv_refuse "$name" "$_argv_n" "$_argv_hint"
+      relay_log "seat=$name refused: argv element $_argv_n B over the limit"
+      echo fail > "$STATUS_DIR/$skey"; rm -f "$errf"; return 0
+    fi
+  fi
   printf '=== %s review — started %s ===\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$side"
   # A `>` redirect takes the caller's umask, so on a umask-022 machine the sidecar would be 644
   # while the mktemp'd files beside it are 600. The mode-700 directory already keeps other users
@@ -1039,8 +1069,10 @@ review_with() {
   # This is strictly better than the old behaviour, which lost the lot.
   local -a SB=(); command -v stdbuf >/dev/null 2>&1 && SB=(stdbuf -oL)
   case "$name" in
-    claude)       printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} "$PROMPT" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
-    codex)        printf '%s' "$feed" | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} "$PROMPT" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    # claude and codex take the prompt on STDIN, never in argv: no argv size depends on the diff, the
+    # context or the base. The producer stays pipeline element 0, so rc is PIPESTATUS[1] as before.
+    claude)       _seat_stdin | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" claude -p ${CLAUDE_MODEL_ARGS[@]+"${CLAUDE_MODEL_ARGS[@]}"} 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
+    codex)        _seat_stdin | ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
     qwen)         printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 ${SB[@]+"${SB[@]}"} timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"; rc=${PIPESTATUS[1]};;
     cursor)
       if [ "$MODE" = diff ]; then
@@ -1051,7 +1083,7 @@ review_with() {
     antigravity)
       # No stdin producer here, so the agent is pipeline element 0, not 1.
       if [ "$MODE" = diff ]; then
-        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
+        ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$_argv_el" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       else
         ${SB[@]+"${SB[@]}"} timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} -p "$PROMPT" 2> >(tail -c "$LOG_MAX_BYTES" > "$errf") | head -c "$LOG_CAP_PROBE" >> "$side"
       fi; rc=${PIPESTATUS[0]};;

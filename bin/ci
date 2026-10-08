@@ -53,6 +53,7 @@ for f in \
   lib-opencode.sh \
   lib-grok.sh \
   lib-panel.sh \
+  lib-argv.sh \
   bin/ci \
   .githooks/pre-push \
   test/lib-hermetic.sh \
