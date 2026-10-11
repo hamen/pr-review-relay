@@ -1,4 +1,44 @@
 relay-exit=0
+##### out
+  run log: <WORK>/cache/pr-review-relay/owner_repo#1.run.<RAND>
+▶ Relay review for PR #1 (http://example.test/owner/repo/pull/1) — author: antigravity — mode: link — sha: 0123456
+  diff: 1 lines, 26 bytes (reviewers fetch via gh)
+  ! local context off: not inside a git work tree
+  review round: 1/3 — new SHA, invocation 1/6
+  → claude reviewing… (model=opus, fallback=sonnet, effort=cli default)
+
+========== Claude review ==========
+Looks good.
+VERDICT: clean
+===============================
+  ✓ claude review posted (collapsed)
+  → codex reviewing… (model=cli default, effort=cli default)
+
+========== Codex review ==========
+Looks good.
+VERDICT: clean
+===============================
+  ✓ codex review posted (collapsed)
+  → grok reviewing… (model=grok-4.6, effort=medium)
+
+========== Grok review ==========
+Looks good.
+VERDICT: clean
+===============================
+  ✓ grok review posted (collapsed)
+  → opencode reviewing… (model=cli default)
+
+========== Opencode review ==========
+Looks good.
+VERDICT: clean
+===============================
+  ✓ opencode review posted (collapsed)
+✔ Relay done — 4/4 reviewer(s) posted, reviewed sha 0123456.
+  This confirms every reviewer RAN, not that the PR is approved: read the reviews and
+  resolve every Blocker/Should-fix before merging.
+  run log: <WORK>/cache/pr-review-relay/owner_repo#1.run.<RAND>
+##### err
+  note: --reviewers matches the default, so a missing default CLI is now a hard failure (exit 3), not a skip. Omit --reviewers to tolerate missing agents.
 ##### stdin
 === claude stdin ===
 You are reviewing an OPEN pull request: PR #1 in owner/repo (http://example.test/owner/repo/pull/1).

@@ -21,7 +21,8 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   of them run and none benched, a readable head SHA unchanged across the round, and every seat
   `clean`. It is written from the exit handler, so a round that hit a cap or failed leaves
   `all_clean=false` instead of a stale file; a clean round whose file cannot be written exits 1,
-  never 0. The reviewer prompts only change when the flag is given: without it the prompts, the
+  never 0. A run that a signal ends records `exit=killed`, never a `0` it did not choose. No external
+  command runs before the PATH guard on the way to clearing the old file. The reviewer prompts only change when the flag is given: without it the prompts, the
   output and the exit codes are exactly as before. The verdict is the model's own claim about its
   own review; the file records it, it does not verify it.
 - `test/test-verdict.sh`, wired into `bin/ci`: the file in every round shape, 12 parse cases, and

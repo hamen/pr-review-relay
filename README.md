@@ -678,7 +678,7 @@ are Nits and never block. The relay reads the raw review body and writes `KEY=va
 | key | meaning |
 |---|---|
 | `repo`, `pr`, `head_sha` | what was reviewed; `head_sha` is the head at the start of the round |
-| `round`, `exit` | the relay's round number (it advances when the head SHA changes, not when one SHA is re-run) and the exit status it left with |
+| `round`, `exit` | the relay's round number (it advances when the head SHA changes, not when one SHA is re-run) and the exit status it left with, or `killed` when a signal ended it before it chose a status |
 | `author` | the `--author` value |
 | `configured` | the seats in the configuration (`REVIEWERS`), author removed, sorted |
 | `requested` | the seats this run was asked for, sorted (deduplicated, author removed) |

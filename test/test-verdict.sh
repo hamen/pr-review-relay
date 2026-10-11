@@ -206,7 +206,7 @@ vrun -- --reviewers claude,codex --max-rounds 0
 vrun -- --reviewers claude,codex --no-post
 [ "$RC" = 0 ] && [ "$(val all_clean)" = false ]; chk $? "--no-post: nothing is on the PR → all_clean=false"
 vrun -- --reviewers claude,codex --dry-run
-[ "$RC" = 0 ] && [ "$(val all_clean)" = false ]; chk $? "--dry-run → all_clean=false"
+[ "$RC" = 0 ] && [ "$(val all_clean)" = false ] && [ "$(val exit)" = 0 ]; chk $? "--dry-run → all_clean=false, exit=0 recorded (a deliberate exit 0)"
 # a configured seat whose CLI is missing is a tolerated skip in a default run, and the round is still not full
 rm -f "$BIN/cursor-agent"
 if ! PATH="$BIN:$PATH" command -v cursor-agent >/dev/null 2>&1; then
@@ -249,9 +249,9 @@ unit() { # <rc> <setup commands run in the world before verdict_write> ; prints 
     set -u
     . "$LIB"
     D="$(mktemp -d)"; STATUS_DIR="$D/s"; VERDICT_DIR="$D/v"; mkdir -p "$STATUS_DIR" "$VERDICT_DIR"
-    VERDICT_FILE="$D/out.verdict"; AUTHOR=antigravity; CONFIG_REVIEWERS="claude,codex,antigravity"
+    VERDICT_FILE="$D/out.verdict"; VERDICT_PARENT="$D"; AUTHOR=antigravity; CONFIG_REVIEWERS="claude,codex,antigravity"
     REQ_LIST=" claude codex"; BENCHED_LIST=""; REPO=o/r; PR=1; NEXT_ROUND=1; DRY=0; NO_POST=0
-    HEAD_SHA="$SHA40"; NEW_SHA="$SHA40"
+    HEAD_SHA="$SHA40"; NEW_SHA="$SHA40"; RELAY_EXIT_OK=1
     for s in claude codex; do k="$(status_key "$s")"; echo ok > "$STATUS_DIR/$k"; echo clean > "$VERDICT_DIR/$k"; done
     rc=0
     eval "$1"
@@ -262,6 +262,7 @@ unit() { # <rc> <setup commands run in the world before verdict_write> ; prints 
 }
 [ "$(unit 'true')" = true ]; chk $? "unit: the baseline world is all_clean=true"
 [ "$(unit 'rc=3')" = false ]; chk $? "unit: exit 3 alone → false"
+[ "$(unit 'RELAY_EXIT_OK=0')" = false ]; chk $? "unit: status 0 without a deliberate exit 0 (a signal) alone → false"
 [ "$(unit 'rc=4')" = false ]; chk $? "unit: exit 4 alone → false"
 [ "$(unit 'DRY=1')" = false ]; chk $? "unit: dry run alone → false"
 [ "$(unit 'NO_POST=1')" = false ]; chk $? "unit: --no-post alone → false"
@@ -329,28 +330,39 @@ vrun SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1 -- --reviewers claude,codex
 [ "$RC0" = "$RC" ] && [ "$RC" = 3 ]; chk $? "a failing round exits 3 with and without the flag"
 
 # --- GOLDEN: without the flag every prompt a seat receives is byte-identical to the one before this change --
-# capture_prompts <relay script> <out file>: a four-seat round with no flag; everything each seat was
-# handed (claude/codex on stdin, grok in its prompt file, opencode in argv), temp paths normalised.
+# capture_prompts <relay script> <out file>: a four-seat round with no flag; the exit code, the relay's
+# stdout and stderr, and everything each seat was handed (claude/codex on stdin, grok in its prompt
+# file, opencode in argv), with temp paths and the run log's random suffix normalised. It runs from a
+# directory that is not a git checkout, because the relay names the checkout and its HEAD in its
+# output, and with every per-seat environment override cleared, so the developer's shell cannot
+# change a model or an effort under it.
 # Sequential, so the seats' order is fixed and nothing needs sorting (sorting would hide a reordering).
 # test/golden/prompts-without-verdict-flag.txt was produced by running THIS function against the
 # relay as it stood at origin/main 7f1f17d, before the flag existed. When a prompt is changed on
 # purpose, regenerate it with UPDATE_GOLDEN=1 bash test/test-verdict.sh and review the diff.
 capture_prompts() {
   local relay="$1" out="$2" d="$WORK/cap"
-  rm -rf "$d" "$WORK/cache"; mkdir -p "$d" "$WORK/cache"
+  rm -rf "$d" "$WORK/cache"; mkdir -p "$d" "$WORK/cache" "$WORK/nonrepo"
   printf 'REVIEWERS=claude,codex,grok,opencode\n' > "$WORK/cfg"
-  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" PR_RELAY_CONFIG="$WORK/cfg" \
+  ( cd "$WORK/nonrepo" && env -u AGY_REVIEW_MODEL -u AGY_MODEL_ARGS -u CLAUDE_REVIEW_EFFORT -u CLAUDE_REVIEW_FALLBACK_MODEL \
+      -u CLAUDE_REVIEW_MODEL -u CLAUDE_MODEL_ARGS -u CODEX_REVIEW_EFFORT -u CODEX_REVIEW_MODEL -u CODEX_MODEL_ARGS \
+      -u CURSOR_REVIEW_MODEL -u GROK_REVIEW_EFFORT -u GROK_REVIEW_MODEL -u OPENCODE_BIN -u PR_RELAY_AGENT_TIMEOUT \
+      -u PR_RELAY_ARGV_MAX_BYTES -u PR_RELAY_LOG_MAX_BYTES -u PR_RELAY_MAX_ROUNDS -u PR_RELAY_MAX_SAME_SHA \
+      -u PR_RELAY_OPENCODE_ALLOW_IN_REPO -u PR_RELAY_OPENCODE_BIN -u PR_RELAY_OPENCODE_MODEL -u PR_RELAY_REVIEWERS \
+      -u PR_RELAY_VERDICT_RULES \
+      PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" PR_RELAY_CONFIG="$WORK/cfg" \
       STDIN_LOG="$d/stdin" PROMPT_FILE_LOG="$d/pf" ARGV_LOG="$d/argv" \
-    bash "$relay" --pr 1 --author antigravity --reviewers claude,codex,grok,opencode --sequential >"$d/out" 2>"$d/err"
+    bash "$relay" --pr 1 --author antigravity --reviewers claude,codex,grok,opencode --sequential >"$d/out" 2>"$d/err" )
   echo "relay-exit=$?" > "$out"
-  for f in stdin pf argv; do
-    { printf '##### %s\n' "$f"; sed -E "s#$WORK#<WORK>#g; s#/(tmp|var/folders)[^ ]*/(tmp\.|tmp)[A-Za-z0-9._]*#<TMP>#g; s#/tmp/[A-Za-z0-9._/-]*#<TMP>#g; s#(grok-prompt|iso-grok)\.[A-Za-z0-9]+#\1.<RAND>#g" "$d/$f" 2>/dev/null; } >> "$out"
+  for f in out err stdin pf argv; do
+    { printf '##### %s\n' "$f"; sed -E "s#$WORK#<WORK>#g; s#/(tmp|var/folders)[^ ]*/(tmp\.|tmp)[A-Za-z0-9._]*#<TMP>#g; s#/tmp/[A-Za-z0-9._/-]*#<TMP>#g; s#(grok-prompt|iso-grok|\.run)\.[A-Za-z0-9]+#\1.<RAND>#g" "$d/$f" 2>/dev/null; } >> "$out"
   done
 }
 GOLD="$HERE/golden/prompts-without-verdict-flag.txt"
 capture_prompts "${GOLDEN_RELAY:-$RELAY}" "$WORK/golden.now"
 if [ -n "${UPDATE_GOLDEN:-}" ]; then mkdir -p "$HERE/golden"; cp "$WORK/golden.now" "$GOLD"; echo "  (golden regenerated: $GOLD)"; fi
-[ -s "$GOLD" ] && cmp -s "$GOLD" "$WORK/golden.now"; chk $? "WITHOUT the flag: the exit code and every prompt every seat receives are byte-identical to the golden capture"
+[ -s "$GOLD" ] && cmp -s "$GOLD" "$WORK/golden.now"; chk $? "WITHOUT the flag: the exit code, stdout, stderr and every prompt every seat receives are byte-identical to the golden capture"
+grep -q '^##### out$' "$GOLD" && grep -q '^##### err$' "$GOLD" && grep -q 'Relay done' "$GOLD"; chk $? "the golden capture really holds the relay's stdout and stderr sections"
 if [ -s "$GOLD" ] && ! cmp -s "$GOLD" "$WORK/golden.now"; then diff "$GOLD" "$WORK/golden.now" | head -20; fi
 
 # --- reviewers spelled differently / delivered differently (closing-round review, opencode) ----------
@@ -365,6 +377,55 @@ PANEL=cursor,antigravity AUTHOR_ARG=claude vrun STDIN_LOG="$SL" ARGV_LOG="$AL" -
 [ "$(val all_clean)" = true ]; chk $? "cursor and antigravity seats: verdicts captured, all_clean=true"
 grep -q 'VERDICT: clean' "$SL"; chk $? "cursor prompt (stdin) carries the verdict rules"
 grep -q 'VERDICT: clean' "$AL"; chk $? "antigravity prompt (argv) carries the verdict rules"
+
+# --- no external command runs before the PATH guard (round-4 review, codex) ------------------------
+# The guard refuses a PATH entry inside the checkout so that nothing the branch under review ships can
+# run as a command. --verdict-file is parsed before that guard; it once called `dirname` and `rm` there.
+# Plant both in a PATH entry inside a checkout: the run must refuse (exit 2) and neither may ever run.
+PG="$WORK/pathguard"; mkdir -p "$PG"
+( cd "$PG" && git init -q . ) >/dev/null 2>&1
+for c in dirname rm; do printf '#!/usr/bin/env bash\n: > "%s/planted-%s-ran"\nexit 0\n' "$WORK" "$c" > "$PG/$c"; chmod +x "$PG/$c"; done
+rm -f "$WORK/planted-dirname-ran" "$WORK/planted-rm-ran"
+printf 'all_clean=true\n' > "$VF"
+( cd "$PG" && env PATH="$PG:$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" PR_RELAY_CONFIG="$WORK/cfg" \
+    bash "$RELAY" --pr 1 --author antigravity --verdict-file "$VF" >/dev/null 2>"$WORK/pg.err" ); RC=$?
+[ -e "$PG/.git" ] && [ "$RC" = 2 ] && grep -q 'inside the repository' "$WORK/pg.err"; chk $? "a PATH entry inside the checkout with --verdict-file → the guard refuses the run (exit 2)"
+[ ! -e "$WORK/planted-dirname-ran" ] && [ ! -e "$WORK/planted-rm-ran" ]; chk $? "a planted dirname and rm in that PATH entry never ran"
+rm -f "$VF"
+
+# --- a relay killed mid-round leaves no all_clean=true behind (round-4 review, opencode) -------------
+# SIGKILL skips every handler: the file must simply not be there (the old one went when the flag was
+# read). SIGTERM runs the exit handler: whatever it writes must say all_clean=false. Both are sent while
+# the stub sits inside `gh pr diff`, after the handler is installed. Own process group, bounded wait.
+if ( set -m ) 2>/dev/null; then
+  for sig in KILL TERM; do
+    printf 'all_clean=true\n' > "$VF"; rm -f "$WORK/hangmark" "$WORK/sha_counter"
+    rm -rf "$WORK/cache" "$WORK/ktmp"; mkdir -p "$WORK/cache" "$WORK/ktmp"
+    printf 'REVIEWERS=claude,codex\n' > "$WORK/cfg"
+    ( set -m
+      env PATH="$BIN:$PATH" TMPDIR="$WORK/ktmp" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" \
+          PR_RELAY_CONFIG="$WORK/cfg" GH_DIFF_HANG=1 GH_HANG_MARK="$WORK/hangmark" \
+        bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --verdict-file "$VF" >/dev/null 2>&1 &
+      _kid=$!
+      _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
+      _w=0; while [ "$_w" -lt 200 ] && [ ! -e "$WORK/hangmark" ]; do sleep 0.1; _w=$((_w+1)); done
+      if [ "$sig" = TERM ]; then
+        kill -TERM "$_kid" 2>/dev/null; _w=0
+        while [ "$_w" -lt 100 ] && kill -0 "$_kid" 2>/dev/null; do sleep 0.1; _w=$((_w+1)); done
+      fi
+      kill -9 -"$_pgid" 2>/dev/null || kill -9 "$_kid" 2>/dev/null
+      wait "$_kid" 2>/dev/null || true
+    )
+    [ -e "$WORK/hangmark" ]; chk $? "SIG$sig: the relay was inside \`gh pr diff\` when it was killed"
+    if [ "$sig" = KILL ]; then
+      [ ! -e "$VF" ]; chk $? "SIGKILL mid-round → no file at the path (the previous round's file is gone)"
+    else
+      [ ! -e "$VF" ] || { [ "$(val all_clean)" = false ] && [ "$(val exit)" = killed ] && [ "$(count all_clean)" = 1 ]; }; chk $? "SIGTERM mid-round → no file, or a file that says all_clean=false and exit=killed (got: $(val all_clean)$( [ -e "$VF" ] && echo " exit=$(val exit)"))"
+    fi
+  done
+else
+  echo "  skip (no job control in this shell: cannot kill a process group)"
+fi
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

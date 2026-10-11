@@ -268,7 +268,7 @@ AGY_GRACE=10
 # same arithmetic is how review-local's rc-124 message went stale one commit after the relay's
 # was fixed — the reviewers caught it, twice.
 AGY_OUTER_TIMEOUT=$((10#$AGENT_TIMEOUT + AGY_GRACE))
-CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0; NO_POST=0; VERDICT_FILE=""
+CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0; NO_POST=0; VERDICT_FILE=""; VERDICT_PARENT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --author)       AUTHOR="$2"; shift 2;;
@@ -286,9 +286,16 @@ while [ $# -gt 0 ]; do
     --verdict-file) [ $# -ge 2 ] || { echo "--verdict-file needs a path" >&2; exit 2; }; VERDICT_FILE="$2"; shift 2
                     # Checked and cleared AT ONCE, before any later argument can fail, so a run that
                     # dies early never leaves the previous round's file behind to be read as this one's.
+                    # Builtins only up to the PATH guard: the guard below the loop exists so that NO
+                    # external command runs from a PATH entry inside the checkout, and `rm` is one. So
+                    # the parent directory comes from parameter expansion, not `dirname`, and the guard
+                    # runs here, ahead of the `rm`, only when the flag is given. A refused PATH exits 2
+                    # with the old file untouched; no round ran, so there is nothing to record.
                     [ -n "$VERDICT_FILE" ] || { echo "--verdict-file needs a path" >&2; exit 2; }
                     [ -d "$VERDICT_FILE" ] && { echo "--verdict-file '$VERDICT_FILE' is a directory" >&2; exit 2; }
-                    [ -d "$(dirname "$VERDICT_FILE")" ] || { echo "--verdict-file: directory of '$VERDICT_FILE' does not exist" >&2; exit 2; }
+                    case "$VERDICT_FILE" in */*) VERDICT_PARENT="${VERDICT_FILE%/*}"; [ -n "$VERDICT_PARENT" ] || VERDICT_PARENT=/;; *) VERDICT_PARENT=.;; esac
+                    [ -d "$VERDICT_PARENT" ] || { echo "--verdict-file: directory of '$VERDICT_FILE' does not exist" >&2; exit 2; }
+                    relay_assert_path_outside_repo
                     rm -f "$VERDICT_FILE" || { echo "--verdict-file: cannot clear '$VERDICT_FILE'" >&2; exit 2; };;
     -h|--help)      relay_print_header "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -677,6 +684,11 @@ status_key() { printf 'k_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
 # benched, the head SHA readable and unchanged across the round, and every seat `clean`.
 VERDICT_DIR=""
 REQ_LIST=""; BENCHED_LIST=""
+# Set on the two lines that deliberately `exit 0`. A signal also reaches the exit handler, and there
+# `$?` is the status of the last command that ran — usually 0 — not the signal, so a TERM'd relay
+# would otherwise record `exit=0`, and a kill after the final SHA check could even record a clean
+# round it never finished. Without this marker a 0 is recorded as `exit=killed`.
+RELAY_EXIT_OK=0
 if [ -n "$VERDICT_FILE" ]; then
   VERDICT_DIR="$(mktemp -d)" || { rm -rf "$STATUS_DIR"; echo "cannot create temp dir for verdicts" >&2; exit 1; }
 fi
@@ -698,7 +710,8 @@ verdict_parse() {
   else echo unknown; fi
 }
 verdict_write() { # $1 = the exit status the relay is about to leave with
-  local rc="$1" req cfg ran_l="" bench_l="" seat k o v allc=1 tmp end_sha seats_out=""
+  local rc="$1" req cfg ran_l="" bench_l="" seat k o v allc=1 tmp end_sha seats_out="" vexit
+  vexit="$rc"; [ "$rc" = 0 ] && [ "${RELAY_EXIT_OK:-0}" != 1 ] && vexit=killed
   req="$(verdict_set "$REQ_LIST")"
   cfg="$(verdict_set "$CONFIG_REVIEWERS" "${AUTHOR:-}")"
   bench_l="$BENCHED_LIST"
@@ -717,14 +730,14 @@ verdict_write() { # $1 = the exit status the relay is about to leave with
   ran_l="$(verdict_set "$ran_l")"; bench_l="$(verdict_set "$bench_l")"
   end_sha="${NEW_SHA:-}"
   local all=false
-  if [ "$rc" = 0 ] && [ "${DRY:-0}" = 0 ] && [ "${NO_POST:-0}" = 0 ] && [ -n "$req" ] && [ "$req" = "$cfg" ] \
+  if [ "$vexit" = 0 ] && [ "${DRY:-0}" = 0 ] && [ "${NO_POST:-0}" = 0 ] && [ -n "$req" ] && [ "$req" = "$cfg" ] \
      && [ "$ran_l" = "$req" ] && [ -z "$bench_l" ] && [ "$allc" = 1 ] \
      && printf '%s' "${HEAD_SHA:-}" | grep -Eq '^[0-9a-f]{40}$' && [ "$end_sha" = "${HEAD_SHA:-}" ]; then
     all=true
   fi
-  tmp="$(mktemp "$(dirname "$VERDICT_FILE")/.verdict.XXXXXXXX")" || { echo "✖ cannot write the verdict file" >&2; return 1; }
+  tmp="$(mktemp "$VERDICT_PARENT/.verdict.XXXXXXXX")" || { echo "✖ cannot write the verdict file" >&2; return 1; }
   {
-    printf 'repo=%s\npr=%s\nhead_sha=%s\nround=%s\nexit=%s\nauthor=%s\n' "${REPO:-}" "${PR:-}" "${HEAD_SHA:-}" "${NEXT_ROUND:-0}" "$rc" "${AUTHOR:-}"
+    printf 'repo=%s\npr=%s\nhead_sha=%s\nround=%s\nexit=%s\nauthor=%s\n' "${REPO:-}" "${PR:-}" "${HEAD_SHA:-}" "${NEXT_ROUND:-0}" "$vexit" "${AUTHOR:-}"
     printf 'configured=%s\nrequested=%s\nran=%s\nbenched=%s\n' "$cfg" "$req" "$ran_l" "$bench_l"
     printf '%s' "$seats_out"
     printf 'all_clean=%s\nrun_id=%s\nts=%s\n' "$all" "$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1527,7 +1540,7 @@ if [ "$DRY" = 1 ]; then
   if [ "$failed" -gt 0 ]; then relay_log "verdict exit=3 dry-run invalid config —$failed_names"; echo "✖ Dry run: invalid --reviewers config —$failed_names." >&2; exit 3; fi
   if [ "$would_run" = 0 ]; then relay_log "verdict exit=3 dry-run no runnable reviewers"; echo "✖ Dry run: no runnable reviewers (none installed / all excluded)." >&2; exit 3; fi
   relay_log "verdict exit=0 dry-run ok would_run=$would_run"
-  echo "✔ Dry run complete (config valid; $would_run reviewer(s) would run)."; exit 0
+  echo "✔ Dry run complete (config valid; $would_run reviewer(s) would run)."; RELAY_EXIT_OK=1; exit 0
 fi
 
 # (The round state was persisted BEFORE dispatch — see the write block above. It deliberately no
@@ -1592,4 +1605,5 @@ fi
 echo "  This confirms every reviewer RAN, not that the PR is approved: read the reviews and"
 echo "  resolve every Blocker/Should-fix before merging."
 echo "  run log: $RUN_BASE"
+RELAY_EXIT_OK=1
 exit 0
