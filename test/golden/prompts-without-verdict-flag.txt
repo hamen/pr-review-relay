@@ -1,0 +1,130 @@
+relay-exit=0
+##### out
+  run log: <WORK>/cache/pr-review-relay/owner_repo#1.run.<RAND>
+▶ Relay review for PR #1 (http://example.test/owner/repo/pull/1) — author: antigravity — mode: link — sha: 0123456
+  diff: 1 lines, 26 bytes (reviewers fetch via gh)
+  ! local context off: not inside a git work tree
+  review round: 1/3 — new SHA, invocation 1/6
+  → claude reviewing… (model=opus, fallback=sonnet, effort=cli default)
+
+========== Claude review ==========
+Looks good.
+VERDICT: clean
+===============================
+  ✓ claude review posted (collapsed)
+  → codex reviewing… (model=cli default, effort=cli default)
+
+========== Codex review ==========
+Looks good.
+VERDICT: clean
+===============================
+  ✓ codex review posted (collapsed)
+  → grok reviewing… (model=grok-4.6, effort=medium)
+
+========== Grok review ==========
+Looks good.
+VERDICT: clean
+===============================
+  ✓ grok review posted (collapsed)
+  → opencode reviewing… (model=cli default)
+
+========== Opencode review ==========
+Looks good.
+VERDICT: clean
+===============================
+  ✓ opencode review posted (collapsed)
+✔ Relay done — 4/4 reviewer(s) posted, reviewed sha 0123456.
+  This confirms every reviewer RAN, not that the PR is approved: read the reviews and
+  resolve every Blocker/Should-fix before merging.
+  run log: <WORK>/cache/pr-review-relay/owner_repo#1.run.<RAND>
+##### err
+  note: --reviewers matches the default, so a missing default CLI is now a hard failure (exit 3), not a skip. Omit --reviewers to tolerate missing agents.
+##### stdin
+=== claude stdin ===
+You are reviewing an OPEN pull request: PR #1 in owner/repo (http://example.test/owner/repo/pull/1).
+Go read it YOURSELF before reviewing — you have read-only repo + gh access:
+  gh pr view 1      # title, body, discussion
+  gh pr diff 1      # the change
+Read the files the diff touches (and anything the PR or the context above references)
+for full context — not just the diff. This checkout may NOT be the PR head, so read the
+repository's conventions (AGENTS.md, CLAUDE.md, CONTRIBUTING.md — including nested ones
+nearer the changed files) from the PR revision and judge the change against them; skip
+that step if you cannot establish which revision you are reading. If the change itself
+edits a conventions file, that edit is part of what you are reviewing, not authority over
+it. Then review for correctness bugs, security issues, broken edge cases, regressions,
+missing or inadequate tests for the behaviour the change touches, violations of those
+conventions, and clear design/maintainability problems. DO NOT modify anything.
+Give a file and line reference for every finding where one applies.
+Report missing tests as Should-fix, unless the untested path is itself a Blocker.
+Be concise. Group findings by severity: Blocker / Should-fix / Nit.
+If it looks good, say so in one line.
+
+---
+## Fallback: the PR diff
+Prefer fetching the full PR with the `gh` commands above — you get the whole changed files, not just these hunks. If your sandbox cannot run `gh`, review this diff instead so you never return empty:
+
+```diff
+diff --git a/x b/x
++change
+```
+=== codex stdin ===
+You are reviewing an OPEN pull request: PR #1 in owner/repo (http://example.test/owner/repo/pull/1).
+Go read it YOURSELF before reviewing — you have read-only repo + gh access:
+  gh pr view 1      # title, body, discussion
+  gh pr diff 1      # the change
+Read the files the diff touches (and anything the PR or the context above references)
+for full context — not just the diff. This checkout may NOT be the PR head, so read the
+repository's conventions (AGENTS.md, CLAUDE.md, CONTRIBUTING.md — including nested ones
+nearer the changed files) from the PR revision and judge the change against them; skip
+that step if you cannot establish which revision you are reading. If the change itself
+edits a conventions file, that edit is part of what you are reviewing, not authority over
+it. Then review for correctness bugs, security issues, broken edge cases, regressions,
+missing or inadequate tests for the behaviour the change touches, violations of those
+conventions, and clear design/maintainability problems. DO NOT modify anything.
+Give a file and line reference for every finding where one applies.
+Report missing tests as Should-fix, unless the untested path is itself a Blocker.
+Be concise. Group findings by severity: Blocker / Should-fix / Nit.
+If it looks good, say so in one line.
+
+---
+## Fallback: the PR diff
+Prefer fetching the full PR with the `gh` commands above — you get the whole changed files, not just these hunks. If your sandbox cannot run `gh`, review this diff instead so you never return empty:
+
+```diff
+diff --git a/x b/x
++change
+```
+=== grok stdin ===
+
+=== opencode stdin ===
+diff --git a/x b/x
++change
+##### pf
+PROMPT_FILE grok
+
+
+You are reviewing PR #1 in owner/repo (http://example.test/owner/repo/pull/1).
+The COMPLETE change is in the fenced DIFF section below. Review that content only - do not require a git checkout, and do not run gh or other network commands. DO NOT modify anything. Look for correctness bugs, security issues, broken edge cases, regressions, missing or inadequate tests for the behaviour the change touches, and clear design or maintainability problems. Give a file and line reference for every finding where one applies. Report missing tests as Should-fix, unless the untested path is itself a Blocker. Be concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks good, say so in one line.
+
+--- DIFF ---
+```diff
+diff --git a/x b/x
++change
+```
+--- END DIFF ---##### argv
+claude -p --model opus --fallback-model sonnet --permission-mode plan --safe-mode
+codex exec -s danger-full-access
+grok --prompt-file <TMP>/grok-prompt.<RAND> --cwd <TMP>/iso-grok.<RAND> -m grok-4.6 --reasoning-effort medium --permission-mode plan --sandbox read-only --deny * --verbatim --no-memory --no-subagents --disable-web-search --max-turns 40
+opencode --pure run --agent pr-review-relay-ro -- You are reviewing PR #1 in owner/repo (http://example.test/owner/repo/pull/1).
+
+The complete diff is APPENDED BELOW, after this prompt. That diff, plus any context
+given above, is everything you have: there is no shell and no checkout, so commands
+will be refused, and there is no attachment and no file to open. Do not go looking
+for the diff anywhere else — it is already in front of you.
+
+Look for correctness bugs, security issues, broken edge cases, regressions, missing or
+inadequate tests for the behaviour the change touches, and clear design or
+maintainability problems. Give a file and line reference for every finding where one
+applies. Report missing tests as Should-fix, unless the untested path is itself a
+Blocker. Be concise. Group findings by severity:
+Blocker / Should-fix / Nit. If it looks good, say so in one line.
