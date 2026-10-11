@@ -6,6 +6,27 @@ All notable changes to **pr-review-relay** are documented here. This project fol
 
 ## [Unreleased]
 
+### Added
+
+- **`--verdict-file <path>`: a machine-readable record of the round.** Until now the relay said only
+  whether every seat *ran* (exit 0 / 3 / 4); whether a review was *clean* was prose that a caller had
+  to read. With the flag each reviewer is asked to end its review with exactly one line,
+  `VERDICT: clean` or `VERDICT: findings blockers=<N> should_fix=<M>`, and the relay writes a
+  `KEY=value` file (mode 0600, atomic rename): `repo pr head_sha round exit author configured
+  requested ran benched seat.<name> all_clean run_id ts`. The parse is strict and fails closed: the
+  LAST non-empty line must be exactly the verdict line and no other line may start with `VERDICT:`;
+  anything else is `unknown`, which is not clean. `all_clean=true` needs all of: exit 0, a real
+  posted round (not `--dry-run`, not `--no-post`), the seats asked for equal to the CONFIGURED seats
+  with the author removed from both (whether they arrived through `--reviewers` or not), every one
+  of them run and none benched, a readable head SHA unchanged across the round, and every seat
+  `clean`. It is written from the exit handler, so a round that hit a cap or failed leaves
+  `all_clean=false` instead of a stale file; a clean round whose file cannot be written exits 1,
+  never 0. The reviewer prompts only change when the flag is given: without it the prompts, the
+  output and the exit codes are exactly as before. The verdict is the model's own claim about its
+  own review; the file records it, it does not verify it.
+- `test/test-verdict.sh`, wired into `bin/ci`: the file in every round shape, 12 parse cases, and
+  the writer lifted from the script and fed a world with exactly one thing wrong at a time.
+
 ### Fixed
 
 - **A prompt over the kernel's argv limit no longer voids the round with exit 126.** `PROMPT` is the

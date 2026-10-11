@@ -660,6 +660,52 @@ ever holds short event lines. If you want them gone sooner, `--reset` on the PR,
 4. **Idempotent:** before posting, it deletes any previous review from the *same* agent on that PR,
    so re-runs replace rather than duplicate — one current review per agent.
 
+## 🧾 The verdict file (`--verdict-file`)
+
+Exit 0 says every seat *ran*. It does not say the reviews were clean. A caller that has to decide
+that without reading prose (for example an automated merge gate) passes `--verdict-file <path>`:
+
+```
+pr-review-relay --pr 12 --author claude --verdict-file /path/to/round-1.verdict
+```
+
+Each reviewer is then asked to end its review with exactly one line: `VERDICT: clean` (zero
+Blockers and zero Should-fix) or `VERDICT: findings blockers=<N> should_fix=<M>`. A Should-fix is
+only a material problem of correctness, safety, deployability or verification; style and wording
+are Nits and never block. The relay reads the raw review body and writes `KEY=value` lines
+(mode 0600, atomic rename):
+
+| key | meaning |
+|---|---|
+| `repo`, `pr`, `head_sha` | what was reviewed; `head_sha` is the head at the start of the round |
+| `round`, `exit` | the relay's per-SHA round number and the exit status it left with |
+| `author` | the `--author` value |
+| `configured` | the seats in the configuration (`REVIEWERS`), author removed, sorted |
+| `requested` | the seats this run was asked for, sorted (deduplicated, author removed) |
+| `ran` | requested seats that were dispatched and not benched |
+| `benched` | seats left out because they are out of quota |
+| `seat.<name>` | `clean`, `findings` or `unknown` |
+| `all_clean` | `true` only if every condition below holds, otherwise `false` |
+| `run_id`, `ts` | random id and UTC time of this run |
+
+`all_clean=true` needs all of: exit 0; not `--dry-run` and not `--no-post`; `requested ==
+configured` as sets (so a hand-typed shorter list is not a full panel, and a wrapper that passes the
+whole configured list is); `ran == requested`; nothing benched; a readable 40-hex head SHA that did
+not move; every seat `clean`. The seat verdict parse is strict: the last non-empty line must be
+exactly the verdict line and no other line may start with `VERDICT:`. A missing, malformed or
+duplicated line is `unknown`, which is not clean.
+
+The file is written when the relay exits, whichever way, so a round that failed or hit a cap
+leaves `all_clean=false` instead of a stale file from the round before. An existing file at the
+path is removed as soon as the flag is read. If the file is asked for and cannot be written on an
+otherwise clean round, the relay exits 1 rather than 0. Without the flag nothing is written and
+the prompts, output and exit codes are unchanged.
+
+Two limits worth knowing. The verdict is the model's own claim about its own review: a seat can
+print `VERDICT: clean` over a review that is wrong, and the relay records that, it does not catch
+it. And "configured" is a file on the machine running the relay: whoever can edit it can narrow the
+panel.
+
 ## 🚦 Exit codes (fail-closed)
 
 `✔ Relay done.` alone doesn't mean "everyone reviewed" — so the relay signals the outcome through its

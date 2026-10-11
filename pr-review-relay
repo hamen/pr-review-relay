@@ -39,6 +39,11 @@
 #   (reviewers run in PARALLEL by default; --sequential runs them one at a time, in panel order;
 #    --parallel is still accepted; the last of the two wins)
 #   (no --pr → uses the PR for the current branch; run from inside the repo)
+#   --verdict-file <path>  also write a machine-readable record of the round (KEY=value lines:
+#                          repo pr head_sha round exit author configured requested ran benched
+#                          seat.<name> all_clean run_id ts) and ask every reviewer to end with a
+#                          VERDICT line. `all_clean=true` only for a full, clean, posted round on an
+#                          unmoved head. Without the flag nothing changes. See "The verdict file".
 #
 # Fail-closed exit codes (so callers can trust the outcome, not just the banner):
 #   0  every reviewer that ran produced AND posted a review; PR head did not move.
@@ -144,6 +149,10 @@ DEFAULT_REVIEWERS="claude,codex,grok,opencode"
 # every call because a rule told them to; a default does that without the rule, and for humans too.
 AUTHOR=""; PR=""; PARALLEL=1; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0
 REVIEWERS="$(panel_resolve PR_RELAY_REVIEWERS REVIEWERS "$DEFAULT_REVIEWERS")"
+# What the configuration says the panel IS, kept apart from REVIEWERS, which --reviewers overwrites.
+# The verdict file compares the seats a run asked for against this, so a shorter hand-typed list
+# can never read as a full panel.
+CONFIG_REVIEWERS="$REVIEWERS"
 # 500, because the panel runs reasoning models at high effort; see the CHANGELOG entry for what 300
 # cost. This literal is the LAST resort — AGENT_TIMEOUT in ~/.config/pr-review-relay/config is the one
 # place to change it, for this tool and for ship-feature's plan-review, which reads the same file.
@@ -258,7 +267,7 @@ AGY_GRACE=10
 # same arithmetic is how review-local's rc-124 message went stale one commit after the relay's
 # was fixed — the reviewers caught it, twice.
 AGY_OUTER_TIMEOUT=$((10#$AGENT_TIMEOUT + AGY_GRACE))
-CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0; NO_POST=0
+CONTEXT_FILE=""; MODE="link"; REVIEWERS_EXPLICIT=0; NO_POST=0; VERDICT_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --author)       AUTHOR="$2"; shift 2;;
@@ -273,6 +282,13 @@ while [ $# -gt 0 ]; do
     --dry-run)      DRY=1; shift;;
     --max-rounds)   MAX_ROUNDS="$2"; shift 2;;
     --reset)        RESET=1; shift;;
+    --verdict-file) [ $# -ge 2 ] || { echo "--verdict-file needs a path" >&2; exit 2; }; VERDICT_FILE="$2"; shift 2
+                    # Checked and cleared AT ONCE, before any later argument can fail, so a run that
+                    # dies early never leaves the previous round's file behind to be read as this one's.
+                    [ -n "$VERDICT_FILE" ] || { echo "--verdict-file needs a path" >&2; exit 2; }
+                    [ -d "$VERDICT_FILE" ] && { echo "--verdict-file '$VERDICT_FILE' is a directory" >&2; exit 2; }
+                    [ -d "$(dirname "$VERDICT_FILE")" ] || { echo "--verdict-file: directory of '$VERDICT_FILE' does not exist" >&2; exit 2; }
+                    rm -f "$VERDICT_FILE" || { echo "--verdict-file: cannot clear '$VERDICT_FILE'" >&2; exit 2; };;
     -h|--help)      relay_print_header "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -636,7 +652,89 @@ unset _origin_url _origin _oname _oowner
 STATUS_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create outcome temp dir"; echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
 # Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
 # trap already installed STATUS_DIR would be left behind.
-trap 'rm -rf "$STATUS_DIR"' EXIT
+# --- The verdict file ---------------------------------------------------------
+# With --verdict-file the relay leaves a machine-readable record of the round, so a caller that
+# must decide "is this round clean?" (the autonomous merge gate) does not have to read prose.
+# Without the flag NOTHING here runs and the output, the prompts and the exit codes are unchanged.
+#
+# The contract is one line per reviewer, written by the reviewer itself: the LAST non-empty line of
+# its review is exactly `VERDICT: clean` or `VERDICT: findings blockers=<N> should_fix=<M>`, and no
+# other line starts with `VERDICT:`. Anything else is `unknown`, which is NOT clean. Prose is never
+# interpreted: a reviewer that writes `clean` over a body listing a Blocker is the model's own claim
+# (the README says so); parsing around it would only pretend to catch it.
+#
+# It is written from the EXIT trap, so every terminal path after the outcome directory exists
+# records an `all_clean=false` file too (a round that hit the cap, failed, or was cut short) — and
+# `all_clean=true` needs every one of: exit 0, a real (non-dry, posted) round, the requested seats
+# equal to the CONFIGURED seats (the author removed from both), every requested seat run, none
+# benched, the head SHA readable and unchanged across the round, and every seat `clean`.
+VERDICT_DIR=""
+REQ_LIST=""; BENCHED_LIST=""
+if [ -n "$VERDICT_FILE" ]; then
+  VERDICT_DIR="$(mktemp -d)" || { rm -rf "$STATUS_DIR"; echo "cannot create temp dir for verdicts" >&2; exit 1; }
+fi
+# verdict-lib:start (test/test-verdict.sh lifts everything down to the :end marker and runs it)
+# Space-separated, sorted, unique seat names from a comma- or space-separated list; `agy` is the
+# same seat as `antigravity`. Optional 2nd arg: a name to leave out (the author).
+verdict_set() {
+  printf '%s\n' "$1" | tr ', ' '\n\n' | sed '/^$/d; s/^agy$/antigravity/' | { if [ -n "${2:-}" ]; then grep -vxF -- "$2"; else cat; fi; } | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+# stdin-free: $1 is the raw review body. Prints clean | findings | unknown.
+verdict_parse() {
+  local n last
+  n="$(printf '%s\n' "$1" | grep -c '^VERDICT:')"
+  [ "$n" = 1 ] || { echo unknown; return; }
+  last="$(printf '%s\n' "$1" | awk 'NF { l = $0 } END { print l }')"
+  if [ "$last" = "VERDICT: clean" ]; then echo clean
+  elif printf '%s' "$last" | grep -Eq '^VERDICT: findings blockers=[0-9]+ should_fix=[0-9]+$'; then echo findings
+  else echo unknown; fi
+}
+verdict_write() { # $1 = the exit status the relay is about to leave with
+  local rc="$1" req cfg ran_l="" bench_l="" seat k o v allc=1 tmp end_sha seats_out=""
+  req="$(verdict_set "$REQ_LIST")"
+  cfg="$(verdict_set "$CONFIG_REVIEWERS" "${AUTHOR:-}")"
+  bench_l="$BENCHED_LIST"
+  for seat in $req; do
+    k="$(status_key "$seat")"
+    v=unknown; [ -f "$VERDICT_DIR/$k" ] && v="$(cat "$VERDICT_DIR/$k" 2>/dev/null)"
+    case "$v" in clean|findings|unknown) ;; *) v=unknown;; esac
+    if [ -f "$STATUS_DIR/$k" ]; then
+      o="$(cat "$STATUS_DIR/$k" 2>/dev/null)"
+      if [ "$o" = bench ]; then bench_l="$bench_l $seat"; else ran_l="$ran_l $seat"; fi
+    fi
+    [ "$v" = clean ] || allc=0
+    seats_out="$seats_out$(printf 'seat.%s=%s' "$(printf '%s' "$seat" | tr -c 'A-Za-z0-9._-' '_')" "$v")
+"
+  done
+  ran_l="$(verdict_set "$ran_l")"; bench_l="$(verdict_set "$bench_l")"
+  end_sha="${NEW_SHA:-}"
+  local all=false
+  if [ "$rc" = 0 ] && [ "${DRY:-0}" = 0 ] && [ "${NO_POST:-0}" = 0 ] && [ -n "$req" ] && [ "$req" = "$cfg" ] \
+     && [ "$ran_l" = "$req" ] && [ -z "$bench_l" ] && [ "$allc" = 1 ] \
+     && printf '%s' "${HEAD_SHA:-}" | grep -Eq '^[0-9a-f]{40}$' && [ "$end_sha" = "${HEAD_SHA:-}" ]; then
+    all=true
+  fi
+  tmp="$(mktemp "$(dirname "$VERDICT_FILE")/.verdict.XXXXXXXX")" || { echo "✖ cannot write the verdict file" >&2; return 1; }
+  {
+    printf 'repo=%s\npr=%s\nhead_sha=%s\nround=%s\nexit=%s\nauthor=%s\n' "${REPO:-}" "${PR:-}" "${HEAD_SHA:-}" "${NEXT_ROUND:-0}" "$rc" "${AUTHOR:-}"
+    printf 'configured=%s\nrequested=%s\nran=%s\nbenched=%s\n' "$cfg" "$req" "$ran_l" "$bench_l"
+    printf '%s' "$seats_out"
+    printf 'all_clean=%s\nrun_id=%s\nts=%s\n' "$all" "$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$tmp" && mv -f "$tmp" "$VERDICT_FILE" || { rm -f "$tmp"; echo "✖ cannot install the verdict file" >&2; return 1; }
+}
+# verdict-lib:end
+# One EXIT handler for everything this script creates. It keeps the exit status it was entered with;
+# the only time it changes it is a verdict file that was asked for and could not be written on an
+# otherwise clean exit — a caller waiting for that file must not be told "0".
+relay_exit() {
+  local rc=$?
+  if [ -n "${VERDICT_FILE:-}" ]; then
+    verdict_write "$rc" || { [ "$rc" = 0 ] && rc=1; }
+  fi
+  rm -rf "${STATUS_DIR:-}" ${ATTACH_DIR:+"$ATTACH_DIR"} ${VERDICT_DIR:+"$VERDICT_DIR"}
+  exit "$rc"
+}
+trap relay_exit EXIT
 # The opencode reviewer stages the diff in a file and feeds it on stdin; that file
 # lives in its OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs
 # "$STATUS_DIR"/* and treats every file there as a reviewer outcome, so a staged
@@ -659,7 +757,7 @@ trap 'rm -rf "$STATUS_DIR"' EXIT
 ATTACH_DIR=""
 if opencode_is_selected || grok_is_selected; then
   ATTACH_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create attachment temp dir"; echo "cannot create temp dir for attachments" >&2; exit 1; }
-  trap 'rm -rf "$STATUS_DIR" "$ATTACH_DIR"' EXIT   # widen it now that both exist
+  # relay_exit already removes ATTACH_DIR now that it is set; no second trap to widen.
   relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
 fi
 # Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
@@ -941,6 +1039,15 @@ Be concise. Group findings by severity: Blocker / Should-fix / Nit.
 If it looks good, say so in one line.
 P
 fi
+unset PR_RELAY_VERDICT_RULES
+if [ -n "$VERDICT_FILE" ]; then
+  # One paragraph with no newline, so the grok and opencode seats, which build their own prompts,
+  # can append the same text after their last sentence (lib-grok.sh, lib-opencode.sh).
+  PR_RELAY_VERDICT_RULES="End the review with exactly one final line, with nothing after it: VERDICT: clean (zero Blockers and zero Should-fix) or VERDICT: findings blockers=<N> should_fix=<M>. A Should-fix is only a material problem of correctness, safety, deployability or verification; report every style, wording or preference item as a Nit, which never blocks. Start a line with VERDICT: only for that final line."
+  export PR_RELAY_VERDICT_RULES
+  BASE="${BASE}
+${PR_RELAY_VERDICT_RULES}"
+fi
 PROMPT="${CONTEXT_BLOCK}${BASE}"
 # Embed the (authoritative, gh-sourced) diff in the prompt. In local-context mode it's the
 # change to review, with the files on disk for full context; otherwise it's a FALLBACK so a
@@ -1124,6 +1231,9 @@ review_with() {
   # Read the body back, dropping the header line we wrote above. This is the value the rest of the
   # function used to get straight out of the command substitution.
   out="$(sed '1d' "$side" 2>/dev/null)"
+  # The raw review body, before it is wrapped or posted. A seat that never produced one has no file,
+  # and verdict_write reads a missing file as `unknown`.
+  [ -n "$VERDICT_DIR" ] && verdict_parse "$out" > "$VERDICT_DIR/$skey"
   printf '=== %s finished rc=%s %s ===\n' "$name" "$rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$side"
 
   # Out of quota? Decide BEFORE anything is posted, and look at BOTH streams.
@@ -1265,6 +1375,7 @@ for r in "${LIST[@]}"; do
   rkey="$(status_key "$r")"          # rkey has no spaces, so the string check is safe
   case " $SEEN_LIST " in *" $rkey "*) echo "  – skip $r (duplicate)"; continue;; esac
   SEEN_LIST="$SEEN_LIST $rkey"
+  REQ_LIST="$REQ_LIST $r"            # every seat this run was asked for, whatever becomes of it
   local_tool=$(tool_for "$r")
   if [ -z "$local_tool" ]; then
     if [ "$REVIEWERS_EXPLICIT" = 1 ]; then echo "  ! unknown reviewer '$r' (explicitly requested → fail)" >&2; echo fail > "$STATUS_DIR/$rkey"; else echo "  ! unknown reviewer '$r' (skip)"; fi
@@ -1282,7 +1393,7 @@ for r in "${LIST[@]}"; do
   _bench_until="$(bench_until "$r")"
   if [ -n "$_bench_until" ]; then
     echo "  ⏸ skip $r — benched until $(date -u -d "@$_bench_until" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -r "$_bench_until" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch $_bench_until") (out of quota)"
-    benched=$((benched + 1))
+    benched=$((benched + 1)); BENCHED_LIST="$BENCHED_LIST $r"
     continue
   fi
   if ! command -v "$local_tool" >/dev/null; then
