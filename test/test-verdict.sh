@@ -170,13 +170,14 @@ PANEL=claude,codex vrun --
 # both lose the author, so the round is full (round-2 review, opencode)
 PANEL=claude,codex,grok,opencode AUTHOR_ARG=claude vrun -- --reviewers claude,codex,grok,opencode
 [ "$RC" = 0 ] && [ "$(val requested)" = "codex grok opencode" ] && [ "$(val configured)" = "codex grok opencode" ] && [ "$(val all_clean)" = true ]; chk $? "author inside --reviewers (the ship-feature wrapper's shape): author dropped from both sides, all_clean=true"
-# `round` is the relay's per-SHA round counter: it advances when the head SHA changes, not on a re-run of one SHA
+# `round` is the relay's round counter for the PR: it advances whenever the head SHA changes, a return to an
+# earlier SHA included, and does not advance on a re-run of the same SHA
 rr() { env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/rcache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$1" PR_RELAY_CONFIG="$WORK/cfg" \
          bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --verdict-file "$VF" >/dev/null 2>&1; val round; }
 printf 'REVIEWERS=claude,codex\n' > "$WORK/cfg"; rm -rf "$WORK/rcache"; mkdir -p "$WORK/rcache"
 SHA_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; SHA_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 r1=$(rr $SHA_A); r2=$(rr $SHA_B); r3=$(rr $SHA_B); r4=$(rr $SHA_A)
-[ "$r1" = 1 ] && [ "$r2" = 2 ] && [ "$r3" = 2 ] ; chk $? "round: 1 on the first SHA, 2 on a new SHA, still 2 on a re-run of it (got $r1,$r2,$r3)"
+[ "$r1" = 1 ] && [ "$r2" = 2 ] && [ "$r3" = 2 ] && [ "$r4" = 3 ]; chk $? "round: 1 on the first SHA, 2 on a new SHA, still 2 on a re-run of it, 3 on a return to the first SHA — any head change is a new round (got $r1,$r2,$r3,$r4)"
 # the alias: --author agy is the antigravity seat, whichever way the config spells it
 PANEL=claude,codex,antigravity AUTHOR_ARG=agy vrun -- --reviewers claude,codex
 [ "$(val all_clean)" = true ] && [ "$(val author)" = antigravity ] && [ "$(val configured)" = "claude codex" ]; chk $? "--author agy with the config naming antigravity → the author is removed, round is full"
@@ -201,6 +202,9 @@ vrun SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1 -- --reviewers claude,codex
 [ "$RC" = 3 ] && [ "$(val exit)" = 3 ] && [ "$(val all_clean)" = false ]; chk $? "a timeout (exit 3) → all_clean=false, exit=3 recorded"
 vrun GH_SHA_DRIFT=1 GH_FIXED_SHA= -- --reviewers claude,codex
 [ "$RC" = 3 ] && [ "$(val all_clean)" = false ]; chk $? "head moved during the round → exit 3, all_clean=false"
+# head_sha binds the record to what the seats were shown: the head at the START of the round. This is
+# the only case in which start and end differ, so it is the only one that can tell them apart.
+[ "$(val head_sha)" = aaaaaaa1111111111111111111111111111111111 ]; chk $? "head moved: head_sha is the start-of-round SHA, not the end one (got $(val head_sha))"
 vrun -- --reviewers claude,codex --max-rounds 0
 [ "$RC" = 4 ] && [ "$(val exit)" = 4 ] && [ "$(val all_clean)" = false ]; chk $? "round cap (exit 4) → file written, all_clean=false"
 vrun -- --reviewers claude,codex --no-post
@@ -431,6 +435,29 @@ if ( set -m ) 2>/dev/null; then
 else
   echo "  skip (no job control in this shell: cannot kill a process group)"
 fi
+
+# --- the cleanup trap is armed as soon as STATUS_DIR exists (round-6 review, grok) -------------------
+# A kill in the gap between creating STATUS_DIR and setting the trap cannot be timed reliably, so the
+# test uses the one failure inside that gap that CAN be forced: the next `mktemp -d` (VERDICT_DIR). That
+# path has no cleanup of its own, so if the trap were set any later, STATUS_DIR would stay in TMPDIR.
+REAL_MKTEMP="$(command -v mktemp)"
+MB="$WORK/mktemp-bin"; mkdir -p "$MB"
+cat > "$MB/mktemp" <<MK
+#!/usr/bin/env bash
+case " \$* " in *" -d "*)
+  n=\$(( \$(cat "$WORK/mk.count" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$WORK/mk.count"
+  [ "\$n" = 2 ] && exit 1;;
+esac
+exec "$REAL_MKTEMP" "\$@"
+MK
+chmod +x "$MB/mktemp"
+rm -rf "$WORK/ttmp" "$WORK/cache"; mkdir -p "$WORK/ttmp" "$WORK/cache"; rm -f "$WORK/mk.count" "$WORK/sha_counter" "$VF"
+printf 'REVIEWERS=claude,codex\n' > "$WORK/cfg"
+env PATH="$MB:$BIN:$PATH" TMPDIR="$WORK/ttmp" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" \
+    PR_RELAY_CONFIG="$WORK/cfg" bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --verdict-file "$VF" >/dev/null 2>"$WORK/mk.err"; RC=$?
+[ "$RC" = 1 ] && grep -q 'cannot create temp dir for verdicts' "$WORK/mk.err" && [ "$(cat "$WORK/mk.count" 2>/dev/null)" = 2 ]; chk $? "the mktemp -d right after STATUS_DIR (VERDICT_DIR) fails → exit 1 (rc=$RC)"
+[ -z "$(ls -A "$WORK/ttmp" 2>/dev/null)" ]; chk $? "the trap, set right after STATUS_DIR, removed it: nothing left in TMPDIR ($(ls -A "$WORK/ttmp" 2>/dev/null | tr '\n' ' '))"
+[ "$(val all_clean)" = false ] && [ "$(val exit)" = 1 ]; chk $? "that exit still leaves a record: exit=1, all_clean=false"
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

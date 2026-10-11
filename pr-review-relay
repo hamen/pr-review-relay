@@ -654,12 +654,6 @@ unset _origin_url _origin _oname _oowner
 # (The fail-closed early-abort on an unreadable HEAD SHA lives AFTER the round-cap
 #  check below, so a PR already at the cap still reports exit 4, not 3.)
 
-# Per-reviewer outcome, written as files so it survives subshells under --parallel:
-# $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
-# hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
-STATUS_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create outcome temp dir"; echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
-# Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
-# trap already installed STATUS_DIR would be left behind.
 # Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
 # "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
 # prefix also guarantees the key is never a dotfile (which the tally glob "*"
@@ -690,9 +684,6 @@ REQ_LIST=""; BENCHED_LIST=""
 # round it never finished. Without this marker a 0 is recorded as `exit=killed`, and so is any
 # status of 128 or more: no deliberate exit here uses one, so only a signal can produce it.
 RELAY_EXIT_OK=0
-if [ -n "$VERDICT_FILE" ]; then
-  VERDICT_DIR="$(mktemp -d)" || { rm -rf "$STATUS_DIR"; echo "cannot create temp dir for verdicts" >&2; exit 1; }
-fi
 # verdict-lib:start (test/test-verdict.sh lifts everything down to the :end marker and runs it)
 # Space-separated, sorted, unique seat names from a comma- or space-separated list; `agy` is the
 # same seat as `antigravity`. Optional 2nd arg: a name to leave out (the author).
@@ -759,7 +750,19 @@ relay_exit() {
   rm -rf "${STATUS_DIR:-}" ${ATTACH_DIR:+"$ATTACH_DIR"} ${VERDICT_DIR:+"$VERDICT_DIR"}
   if [ "$fail" = 1 ]; then exit 1; fi
 }
+
+# Per-reviewer outcome, written as files so it survives subshells under --parallel:
+# $STATUS_DIR/<key> is "pending" (pre-seeded), "ok", or "fail". A reviewer that is
+# hard-killed before writing leaves its pre-seeded "pending" → counted as a failure.
+STATUS_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create outcome temp dir"; echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
+# Armed immediately, on the next line: if the VERDICT_DIR or ATTACH_DIR mktemp below fails we exit,
+# and without a trap already installed STATUS_DIR would be left behind. That is why relay_exit and
+# the verdict functions it calls are defined ABOVE this point: a trap that names a function not yet
+# defined cleans nothing. The VERDICT_DIR failure path has no `rm` of its own; the trap is its cleanup.
 trap relay_exit EXIT
+if [ -n "$VERDICT_FILE" ]; then
+  VERDICT_DIR="$(mktemp -d)" || { echo "cannot create temp dir for verdicts" >&2; exit 1; }
+fi
 # The opencode reviewer stages the diff in a file and feeds it on stdin; that file
 # lives in its OWN dir, deliberately NOT in $STATUS_DIR: the tally below globs
 # "$STATUS_DIR"/* and treats every file there as a reviewer outcome, so a staged
