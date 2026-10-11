@@ -353,6 +353,19 @@ if [ -n "${UPDATE_GOLDEN:-}" ]; then mkdir -p "$HERE/golden"; cp "$WORK/golden.n
 [ -s "$GOLD" ] && cmp -s "$GOLD" "$WORK/golden.now"; chk $? "WITHOUT the flag: the exit code and every prompt every seat receives are byte-identical to the golden capture"
 if [ -s "$GOLD" ] && ! cmp -s "$GOLD" "$WORK/golden.now"; then diff "$GOLD" "$WORK/golden.now" | head -20; fi
 
+# --- reviewers spelled differently / delivered differently (closing-round review, opencode) ----------
+# agy as a REVIEWER, not the author: pass 1 records the seat as antigravity, so the configured side must too.
+PANEL=claude,agy AUTHOR_ARG=codex vrun -- --reviewers claude,agy
+[ "$RC" = 0 ] && [ "$(val requested)" = "antigravity claude" ] && [ "$(val ran)" = "antigravity claude" ] && [ "$(val seat.antigravity)" = clean ] && [ "$(val all_clean)" = true ]; chk $? "agy as a reviewer (not the author), named in the config and in --reviewers → antigravity seat is captured, all_clean=true"
+PANEL=claude,antigravity AUTHOR_ARG=codex vrun -- --reviewers claude,agy
+[ "$(val all_clean)" = true ]; chk $? "config says antigravity, --reviewers says agy → same seat, all_clean=true"
+# cursor reads the prompt on stdin, antigravity in argv: neither goes through the grok or opencode prompt builders.
+rm -f "$SL" "$AL"
+PANEL=cursor,antigravity AUTHOR_ARG=claude vrun STDIN_LOG="$SL" ARGV_LOG="$AL" -- --reviewers cursor,antigravity
+[ "$(val all_clean)" = true ]; chk $? "cursor and antigravity seats: verdicts captured, all_clean=true"
+grep -q 'VERDICT: clean' "$SL"; chk $? "cursor prompt (stdin) carries the verdict rules"
+grep -q 'VERDICT: clean' "$AL"; chk $? "antigravity prompt (argv) carries the verdict rules"
+
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]
