@@ -687,7 +687,8 @@ REQ_LIST=""; BENCHED_LIST=""
 # Set on the two lines that deliberately `exit 0`. A signal also reaches the exit handler, and there
 # `$?` is the status of the last command that ran — usually 0 — not the signal, so a TERM'd relay
 # would otherwise record `exit=0`, and a kill after the final SHA check could even record a clean
-# round it never finished. Without this marker a 0 is recorded as `exit=killed`.
+# round it never finished. Without this marker a 0 is recorded as `exit=killed`, and so is any
+# status of 128 or more: no deliberate exit here uses one, so only a signal can produce it.
 RELAY_EXIT_OK=0
 if [ -n "$VERDICT_FILE" ]; then
   VERDICT_DIR="$(mktemp -d)" || { rm -rf "$STATUS_DIR"; echo "cannot create temp dir for verdicts" >&2; exit 1; }
@@ -711,7 +712,8 @@ verdict_parse() {
 }
 verdict_write() { # $1 = the exit status the relay is about to leave with
   local rc="$1" req cfg ran_l="" bench_l="" seat k o v allc=1 tmp end_sha seats_out="" vexit
-  vexit="$rc"; [ "$rc" = 0 ] && [ "${RELAY_EXIT_OK:-0}" != 1 ] && vexit=killed
+  vexit="$rc"
+  if [ "$rc" -ge 128 ] 2>/dev/null || { [ "$rc" = 0 ] && [ "${RELAY_EXIT_OK:-0}" != 1 ]; }; then vexit=killed; fi
   req="$(verdict_set "$REQ_LIST")"
   cfg="$(verdict_set "$CONFIG_REVIEWERS" "${AUTHOR:-}")"
   bench_l="$BENCHED_LIST"
@@ -744,16 +746,18 @@ verdict_write() { # $1 = the exit status the relay is about to leave with
   } > "$tmp" && mv -f "$tmp" "$VERDICT_FILE" || { rm -f "$tmp"; echo "✖ cannot install the verdict file" >&2; return 1; }
 }
 # verdict-lib:end
-# One EXIT handler for everything this script creates. It keeps the exit status it was entered with;
-# the only time it changes it is a verdict file that was asked for and could not be written on an
-# otherwise clean exit — a caller waiting for that file must not be told "0".
+# One EXIT handler for everything this script creates. It does NOT call `exit` on the normal path:
+# bash then leaves with the status it was already leaving with, and a signal stays that signal (an
+# `exit` inside the handler is how a TERM'd shell can end up reporting 0). The one change it makes is
+# a deliberate clean exit whose verdict file was asked for and could not be written — a caller
+# waiting for that file must not be told "0".
 relay_exit() {
-  local rc=$?
+  local rc=$? fail=0
   if [ -n "${VERDICT_FILE:-}" ]; then
-    verdict_write "$rc" || { [ "$rc" = 0 ] && rc=1; }
+    verdict_write "$rc" || { [ "$rc" = 0 ] && [ "${RELAY_EXIT_OK:-0}" = 1 ] && fail=1; }
   fi
   rm -rf "${STATUS_DIR:-}" ${ATTACH_DIR:+"$ATTACH_DIR"} ${VERDICT_DIR:+"$VERDICT_DIR"}
-  exit "$rc"
+  if [ "$fail" = 1 ]; then exit 1; fi
 }
 trap relay_exit EXIT
 # The opencode reviewer stages the diff in a file and feeds it on stdin; that file

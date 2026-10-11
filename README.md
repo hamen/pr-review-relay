@@ -696,12 +696,15 @@ exactly the verdict line and no other line may start with `VERDICT:`. A missing,
 duplicated line is `unknown`, which is not clean.
 
 The file is written when the relay exits once its outcome directory exists, so a round that failed
-or hit a cap leaves `all_clean=false` instead of a stale file from the round before. An exit before
-that point (a bad argument, no `gh`, no PR) writes no file at all; the file at the path was already
-removed when the flag was read, so there is never a stale one. An existing file at the
-path is removed as soon as the flag is read. If the file is asked for and cannot be written on an
-otherwise clean round, the relay exits 1 rather than 0. Without the flag nothing is written and
-the prompts, output and exit codes are unchanged.
+or hit a cap leaves `all_clean=false` instead of a stale file from the round before. A signal that
+ends the run records `exit=killed` and `all_clean=false`; the process still dies of that signal.
+SIGKILL runs no handler at all, so it leaves no file. An existing file at the path is removed when the
+flag is read, so an exit before the outcome directory exists (a bad argument after the flag, no
+`gh`, no PR) leaves no file at all. One case keeps the old file: a PATH entry inside the checkout,
+which the relay refuses (exit 2) before it runs any external command, `rm` included. No round ran,
+so check the exit status. If the file is asked for and cannot be written on an otherwise clean
+round, the relay exits 1 rather than 0. Without the flag nothing is written and the prompts,
+output and exit codes are unchanged.
 
 Two limits worth knowing. The verdict is the model's own claim about its own review: a seat can
 print `VERDICT: clean` over a review that is wrong, and the relay records that, it does not catch

@@ -244,7 +244,7 @@ LIB="$WORK/verdict-lib.sh"
 sed -n '/^# verdict-lib:start/,/^# verdict-lib:end/p' "$RELAY" > "$LIB"
 sed -n '/^status_key()/p' "$RELAY" >> "$LIB"
 [ -s "$LIB" ] && grep -q '^verdict_write()' "$LIB" && grep -q '^status_key()' "$LIB"; chk $? "the verdict code can be lifted from the script by its markers"
-unit() { # <rc> <setup commands run in the world before verdict_write> ; prints all_clean
+unit() { # <setup commands run in the world before verdict_write> [field, default all_clean] ; prints that field
   (
     set -u
     . "$LIB"
@@ -256,13 +256,15 @@ unit() { # <rc> <setup commands run in the world before verdict_write> ; prints 
     rc=0
     eval "$1"
     verdict_write "$rc" || echo "write-failed"
-    sed -n 's/^all_clean=//p' "$VERDICT_FILE"
+    sed -n "s/^${2:-all_clean}=//p" "$VERDICT_FILE"
     rm -rf "$D"
   )
 }
 [ "$(unit 'true')" = true ]; chk $? "unit: the baseline world is all_clean=true"
 [ "$(unit 'rc=3')" = false ]; chk $? "unit: exit 3 alone → false"
-[ "$(unit 'RELAY_EXIT_OK=0')" = false ]; chk $? "unit: status 0 without a deliberate exit 0 (a signal) alone → false"
+[ "$(unit 'RELAY_EXIT_OK=0')" = false ] && [ "$(unit 'RELAY_EXIT_OK=0' exit)" = killed ]; chk $? "unit: status 0 without a deliberate exit 0 (a signal) alone → false, exit=killed"
+[ "$(unit 'rc=143')" = false ] && [ "$(unit 'rc=143' exit)" = killed ]; chk $? "unit: a status of 128 or more (a signal) → false, exit=killed"
+[ "$(unit 'rc=3' exit)" = 3 ] && [ "$(unit 'true' exit)" = 0 ]; chk $? "unit: a deliberate status is recorded as itself (3, and 0 with the marker)"
 [ "$(unit 'rc=4')" = false ]; chk $? "unit: exit 4 alone → false"
 [ "$(unit 'DRY=1')" = false ]; chk $? "unit: dry run alone → false"
 [ "$(unit 'NO_POST=1')" = false ]; chk $? "unit: --no-post alone → false"
@@ -410,8 +412,10 @@ if ( set -m ) 2>/dev/null; then
       _pgid=$(ps -o pgid= -p "$_kid" 2>/dev/null | tr -d ' ')
       _w=0; while [ "$_w" -lt 200 ] && [ ! -e "$WORK/hangmark" ]; do sleep 0.1; _w=$((_w+1)); done
       if [ "$sig" = TERM ]; then
-        kill -TERM "$_kid" 2>/dev/null; _w=0
-        while [ "$_w" -lt 100 ] && kill -0 "$_kid" 2>/dev/null; do sleep 0.1; _w=$((_w+1)); done
+        # TERM the relay alone and WAIT for it, so its handler finishes before anything else is killed;
+        # the group KILL below only reaps the stub left hanging in `gh pr diff`.
+        kill -TERM "$_kid" 2>/dev/null
+        wait "$_kid" 2>/dev/null; echo "$?" > "$WORK/kstatus"
       fi
       kill -9 -"$_pgid" 2>/dev/null || kill -9 "$_kid" 2>/dev/null
       wait "$_kid" 2>/dev/null || true
@@ -420,7 +424,8 @@ if ( set -m ) 2>/dev/null; then
     if [ "$sig" = KILL ]; then
       [ ! -e "$VF" ]; chk $? "SIGKILL mid-round → no file at the path (the previous round's file is gone)"
     else
-      [ ! -e "$VF" ] || { [ "$(val all_clean)" = false ] && [ "$(val exit)" = killed ] && [ "$(count all_clean)" = 1 ]; }; chk $? "SIGTERM mid-round → no file, or a file that says all_clean=false and exit=killed (got: $(val all_clean)$( [ -e "$VF" ] && echo " exit=$(val exit)"))"
+      [ -e "$VF" ] && [ "$(val all_clean)" = false ] && [ "$(val exit)" = killed ] && [ "$(count all_clean)" = 1 ]; chk $? "SIGTERM mid-round → the handler writes all_clean=false, exit=killed (got: ${VF##*/} $( [ -e "$VF" ] && echo "all_clean=$(val all_clean) exit=$(val exit)" || echo missing))"
+      [ "$(cat "$WORK/kstatus" 2>/dev/null)" = 143 ]; chk $? "SIGTERM mid-round → the process still dies of the signal (status 143, got $(cat "$WORK/kstatus" 2>/dev/null))"
     fi
   done
 else
