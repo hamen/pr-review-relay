@@ -136,9 +136,11 @@ vrun() {
   local envs=()
   while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
   [ "${1:-}" = -- ] && shift
+  # The panel comes from a CONFIG FILE (REVIEWERS=...), the one place "configured" is read from.
+  printf 'REVIEWERS=%s\n' "${PANEL:-claude,codex}" > "$WORK/cfg"
   env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" \
-      PR_RELAY_REVIEWERS="${PANEL:-claude,codex}" "${envs[@]+"${envs[@]}"}" \
-    bash "$RELAY" --pr 1 --author antigravity --verdict-file "$VF" "$@" >"$WORK/out" 2>"$WORK/err"
+      PR_RELAY_CONFIG="$WORK/cfg" "${envs[@]+"${envs[@]}"}" \
+    bash "$RELAY" --pr 1 --author "${AUTHOR_ARG:-antigravity}" --verdict-file "$VF" "$@" >"$WORK/out" 2>"$WORK/err"
   RC=$?
 }
 val() { sed -n "s/^$1=//p" "$VF" 2>/dev/null | head -1; }
@@ -164,6 +166,16 @@ PANEL=claude,codex,antigravity vrun -- --reviewers claude,codex
 [ "$(val all_clean)" = true ] && [ "$(val configured)" = "claude codex" ]; chk $? "the author is removed from the configured seats"
 PANEL=claude,codex vrun --
 [ "$(val all_clean)" = true ]; chk $? "no --reviewers: the configured panel runs and is full"
+# the alias: --author agy is the antigravity seat, whichever way the config spells it
+PANEL=claude,codex,antigravity AUTHOR_ARG=agy vrun -- --reviewers claude,codex
+[ "$(val all_clean)" = true ] && [ "$(val author)" = antigravity ] && [ "$(val configured)" = "claude codex" ]; chk $? "--author agy with the config naming antigravity → the author is removed, round is full"
+PANEL=claude,codex,agy AUTHOR_ARG=antigravity vrun -- --reviewers claude,codex
+[ "$(val all_clean)" = true ] && [ "$(val configured)" = "claude codex" ]; chk $? "--author antigravity with the config naming agy → the author is removed, round is full"
+# an environment override must not shrink what "configured" means (round-1 review, codex)
+PANEL=claude,codex,grok vrun PR_RELAY_REVIEWERS=claude -- --reviewers claude
+[ "$RC" = 0 ] && [ "$(val configured)" = "claude codex grok" ] && [ "$(val requested)" = claude ] && [ "$(val all_clean)" = false ]; chk $? "PR_RELAY_REVIEWERS=claude over a 3-seat config → configured stays 3 seats, all_clean=false"
+PANEL=claude,codex,grok vrun PR_RELAY_REVIEWERS=claude --
+[ "$(val configured)" = "claude codex grok" ] && [ "$(val all_clean)" = false ]; chk $? "the same override without --reviewers (the env list runs) → still not full"
 
 # --- what a full round is NOT -----------------------------------------------------------------
 PANEL=claude,codex,grok vrun -- --reviewers claude,codex
@@ -256,6 +268,7 @@ unit() { # <rc> <setup commands run in the world before verdict_write> ; prints 
 [ "$(unit 'rm "$VERDICT_DIR/$(status_key codex)"')" = false ]; chk $? "unit: one seat with no verdict recorded → false"
 [ "$(unit 'echo CLEAN > "$VERDICT_DIR/$(status_key codex)"')" = false ]; chk $? "unit: a verdict value outside clean/findings/unknown → false"
 [ "$(unit 'REQ_LIST=""')" = false ]; chk $? "unit: nothing requested → false"
+[ "$(unit 'AUTHOR=agy; CONFIG_REVIEWERS="claude,codex,antigravity"')" = true ]; chk $? "unit: an author still spelled agy is removed from a config that spells antigravity"
 [ "$(unit 'REQ_LIST=" claude codex"; CONFIG_REVIEWERS="agy,claude,codex"; AUTHOR=antigravity')" = true ]; chk $? "unit: agy is the same seat as antigravity (the author) on the configured side"
 
 # --- no stale file, no bad path ---------------------------------------------------------------
@@ -278,26 +291,56 @@ chmod 755 "$WORK/v"
 # --- the prompts carry the rules only when the flag is given ------------------------------------
 PL="$WORK/prompt.log"; AL="$WORK/argv.log"; SL="$WORK/stdin.log"
 rm -f "$PL" "$AL" "$SL"
-vrun PROMPT_FILE_LOG="$PL" ARGV_LOG="$AL" STDIN_LOG="$SL" -- --reviewers claude,codex,grok,opencode
-PANEL=claude,codex,grok,opencode
-if [ "$RC" = 0 ]; then ok "four-seat round with the flag runs"; else bad "four-seat round with the flag runs (rc=$RC)"; fi
+PANEL=claude,codex,grok,opencode vrun PROMPT_FILE_LOG="$PL" ARGV_LOG="$AL" STDIN_LOG="$SL" -- --reviewers claude,codex,grok,opencode
+[ "$RC" = 0 ] && [ "$(val all_clean)" = true ] && [ "$(val seat.grok)" = clean ] && [ "$(val seat.opencode)" = clean ] && [ "$(val ran)" = "claude codex grok opencode" ]; chk $? "four-seat round (claude, codex, grok, opencode): every seat's verdict is captured, all_clean=true"
+PANEL=claude,codex,grok,opencode vrun OUT_grok='x\nVERDICT: findings blockers=0 should_fix=1' -- --reviewers claude,codex,grok,opencode
+[ "$(val seat.grok)" = findings ] && [ "$(val all_clean)" = false ]; chk $? "four-seat round: a grok finding is seen through the --prompt-file seat"
+PANEL=claude,codex,grok,opencode vrun OUT_opencode='x\nVERDICT: findings blockers=1 should_fix=0' -- --reviewers claude,codex,grok,opencode
+[ "$(val seat.opencode)" = findings ] && [ "$(val all_clean)" = false ]; chk $? "four-seat round: an opencode finding is seen through the opencode seat"
+rm -f "$PL" "$AL" "$SL"
+PANEL=claude,codex,grok,opencode vrun PROMPT_FILE_LOG="$PL" ARGV_LOG="$AL" STDIN_LOG="$SL" -- --reviewers claude,codex,grok,opencode
 grep -q 'VERDICT: clean' "$SL"; chk $? "claude/codex prompt (stdin) carries the verdict rules"
 grep -q 'VERDICT: clean' "$PL"; chk $? "grok prompt file carries the verdict rules"
 grep -q 'VERDICT: clean' "$AL"; chk $? "opencode prompt carries the verdict rules"
 grep -q 'material problem of correctness, safety, deployability or verification' "$SL"; chk $? "the rules say what a Should-fix is, and that the rest are Nits"
 rm -f "$PL" "$AL" "$SL" "$VF"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"
-env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" PR_RELAY_REVIEWERS="claude,codex,grok,opencode" \
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" PR_RELAY_CONFIG="$WORK/cfg" \
   PROMPT_FILE_LOG="$PL" ARGV_LOG="$AL" STDIN_LOG="$SL" PR_RELAY_VERDICT_RULES="SMUGGLED" \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex,grok,opencode >"$WORK/out" 2>"$WORK/err"; RC=$?
 [ "$RC" = 0 ] && ! grep -q 'VERDICT' "$SL" "$PL" "$AL" && ! grep -q SMUGGLED "$SL" "$PL" "$AL"; chk $? "WITHOUT the flag: exit 0, no VERDICT text in any prompt, and an exported PR_RELAY_VERDICT_RULES is ignored"
 [ ! -e "$VF" ]; chk $? "WITHOUT the flag: no verdict file is written"
 # the same exit codes with and without the flag, on a failing round
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"
-env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" PR_RELAY_REVIEWERS=claude,codex SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1 \
+env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" PR_RELAY_CONFIG="$WORK/cfg" SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1 \
   bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex >/dev/null 2>&1; RC0=$?
 vrun SLEEP_KEYS=codex PR_RELAY_AGENT_TIMEOUT=1 -- --reviewers claude,codex
 [ "$RC0" = "$RC" ] && [ "$RC" = 3 ]; chk $? "a failing round exits 3 with and without the flag"
+
+# --- GOLDEN: without the flag every prompt a seat receives is byte-identical to the one before this change --
+# capture_prompts <relay script> <out file>: a four-seat round with no flag; everything each seat was
+# handed (claude/codex on stdin, grok in its prompt file, opencode in argv), temp paths normalised.
+# Sequential, so the seats' order is fixed and nothing needs sorting (sorting would hide a reordering).
+# test/golden/prompts-without-verdict-flag.txt was produced by running THIS function against the
+# relay as it stood at origin/main 7f1f17d, before the flag existed. When a prompt is changed on
+# purpose, regenerate it with UPDATE_GOLDEN=1 bash test/test-verdict.sh and review the diff.
+capture_prompts() {
+  local relay="$1" out="$2" d="$WORK/cap"
+  rm -rf "$d" "$WORK/cache"; mkdir -p "$d" "$WORK/cache"
+  printf 'REVIEWERS=claude,codex,grok,opencode\n' > "$WORK/cfg"
+  env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" PR_RELAY_CONFIG="$WORK/cfg" \
+      STDIN_LOG="$d/stdin" PROMPT_FILE_LOG="$d/pf" ARGV_LOG="$d/argv" \
+    bash "$relay" --pr 1 --author antigravity --reviewers claude,codex,grok,opencode --sequential >"$d/out" 2>"$d/err"
+  echo "relay-exit=$?" > "$out"
+  for f in stdin pf argv; do
+    { printf '##### %s\n' "$f"; sed -E "s#$WORK#<WORK>#g; s#/(tmp|var/folders)[^ ]*/(tmp\.|tmp)[A-Za-z0-9._]*#<TMP>#g; s#/tmp/[A-Za-z0-9._/-]*#<TMP>#g; s#(grok-prompt|iso-grok)\.[A-Za-z0-9]+#\1.<RAND>#g" "$d/$f" 2>/dev/null; } >> "$out"
+  done
+}
+GOLD="$HERE/golden/prompts-without-verdict-flag.txt"
+capture_prompts "${GOLDEN_RELAY:-$RELAY}" "$WORK/golden.now"
+if [ -n "${UPDATE_GOLDEN:-}" ]; then mkdir -p "$HERE/golden"; cp "$WORK/golden.now" "$GOLD"; echo "  (golden regenerated: $GOLD)"; fi
+[ -s "$GOLD" ] && cmp -s "$GOLD" "$WORK/golden.now"; chk $? "WITHOUT the flag: the exit code and every prompt every seat receives are byte-identical to the golden capture"
+if [ -s "$GOLD" ] && ! cmp -s "$GOLD" "$WORK/golden.now"; then diff "$GOLD" "$WORK/golden.now" | head -20; fi
 
 echo "-------------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

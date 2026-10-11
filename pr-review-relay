@@ -149,10 +149,11 @@ DEFAULT_REVIEWERS="claude,codex,grok,opencode"
 # every call because a rule told them to; a default does that without the rule, and for humans too.
 AUTHOR=""; PR=""; PARALLEL=1; DRY=0; MAX_ROUNDS="${PR_RELAY_MAX_ROUNDS:-3}"; RESET=0
 REVIEWERS="$(panel_resolve PR_RELAY_REVIEWERS REVIEWERS "$DEFAULT_REVIEWERS")"
-# What the configuration says the panel IS, kept apart from REVIEWERS, which --reviewers overwrites.
-# The verdict file compares the seats a run asked for against this, so a shorter hand-typed list
-# can never read as a full panel.
-CONFIG_REVIEWERS="$REVIEWERS"
+# What the CONFIGURATION says the panel is: the config file's REVIEWERS (or the built-in default), not
+# REVIEWERS above, which --reviewers overwrites and PR_RELAY_REVIEWERS in the environment overrides.
+# The verdict file compares the seats a run asked for against this, so neither a shorter hand-typed
+# list nor an environment override can make a smaller panel read as the full one.
+CONFIG_REVIEWERS="${PANEL_CFG_REVIEWERS:-$DEFAULT_REVIEWERS}"
 # 500, because the panel runs reasoning models at high effort; see the CHANGELOG entry for what 300
 # cost. This literal is the LAST resort — AGENT_TIMEOUT in ~/.config/pr-review-relay/config is the one
 # place to change it, for this tool and for ship-feature's plan-review, which reads the same file.
@@ -652,6 +653,12 @@ unset _origin_url _origin _oname _oowner
 STATUS_DIR="$(mktemp -d)" || { relay_log "verdict exit=1 cannot create outcome temp dir"; echo "cannot create temp dir for outcome tracking" >&2; exit 1; }
 # Armed immediately: if the ATTACH_DIR mktemp below fails we exit, and without a
 # trap already installed STATUS_DIR would be left behind.
+# Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
+# "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
+# prefix also guarantees the key is never a dotfile (which the tally glob "*"
+# would silently skip) or "."/".." — either would reopen a fail-open hole.
+status_key() { printf 'k_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
+
 # --- The verdict file ---------------------------------------------------------
 # With --verdict-file the relay leaves a machine-readable record of the round, so a caller that
 # must decide "is this round clean?" (the autonomous merge gate) does not have to read prose.
@@ -677,7 +684,8 @@ fi
 # Space-separated, sorted, unique seat names from a comma- or space-separated list; `agy` is the
 # same seat as `antigravity`. Optional 2nd arg: a name to leave out (the author).
 verdict_set() {
-  printf '%s\n' "$1" | tr ', ' '\n\n' | sed '/^$/d; s/^agy$/antigravity/' | { if [ -n "${2:-}" ]; then grep -vxF -- "$2"; else cat; fi; } | sort -u | tr '\n' ' ' | sed 's/ $//'
+  local drop="${2:-}"; [ "$drop" = agy ] && drop=antigravity
+  printf '%s\n' "$1" | tr ', ' '\n\n' | sed '/^$/d; s/^agy$/antigravity/' | { if [ -n "$drop" ]; then grep -vxF -- "$drop"; else cat; fi; } | sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 # stdin-free: $1 is the raw review body. Prints clean | findings | unknown.
 verdict_parse() {
@@ -760,11 +768,6 @@ if opencode_is_selected || grok_is_selected; then
   # relay_exit already removes ATTACH_DIR now that it is set; no second trap to widen.
   relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
 fi
-# Map a reviewer name to a safe filename so a crafted --reviewers value (e.g.
-# "../../etc/foo") can never escape STATUS_DIR and clobber a file. The fixed "k_"
-# prefix also guarantees the key is never a dotfile (which the tally glob "*"
-# would silently skip) or "."/".." — either would reopen a fail-open hole.
-status_key() { printf 'k_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
 
 # The DIFF always comes from `gh pr diff` — it is authoritative (matches what GitHub shows,
 # handles fork PRs, never fooled by a stale/rebased local base), and it is a single cheap
