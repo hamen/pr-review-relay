@@ -166,6 +166,17 @@ PANEL=claude,codex,antigravity vrun -- --reviewers claude,codex
 [ "$(val all_clean)" = true ] && [ "$(val configured)" = "claude codex" ]; chk $? "the author is removed from the configured seats"
 PANEL=claude,codex vrun --
 [ "$(val all_clean)" = true ]; chk $? "no --reviewers: the configured panel runs and is full"
+# the wrapper's shape (ship-feature relay passes the WHOLE quorum, author included): requested and configured
+# both lose the author, so the round is full (round-2 review, opencode)
+PANEL=claude,codex,grok,opencode AUTHOR_ARG=claude vrun -- --reviewers claude,codex,grok,opencode
+[ "$RC" = 0 ] && [ "$(val requested)" = "codex grok opencode" ] && [ "$(val configured)" = "codex grok opencode" ] && [ "$(val all_clean)" = true ]; chk $? "author inside --reviewers (the ship-feature wrapper's shape): author dropped from both sides, all_clean=true"
+# `round` is the relay's per-SHA round counter: it advances when the head SHA changes, not on a re-run of one SHA
+rr() { env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/rcache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$1" PR_RELAY_CONFIG="$WORK/cfg" \
+         bash "$RELAY" --pr 1 --author antigravity --reviewers claude,codex --verdict-file "$VF" >/dev/null 2>&1; val round; }
+printf 'REVIEWERS=claude,codex\n' > "$WORK/cfg"; rm -rf "$WORK/rcache"; mkdir -p "$WORK/rcache"
+SHA_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; SHA_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+r1=$(rr $SHA_A); r2=$(rr $SHA_B); r3=$(rr $SHA_B); r4=$(rr $SHA_A)
+[ "$r1" = 1 ] && [ "$r2" = 2 ] && [ "$r3" = 2 ] ; chk $? "round: 1 on the first SHA, 2 on a new SHA, still 2 on a re-run of it (got $r1,$r2,$r3)"
 # the alias: --author agy is the antigravity seat, whichever way the config spells it
 PANEL=claude,codex,antigravity AUTHOR_ARG=agy vrun -- --reviewers claude,codex
 [ "$(val all_clean)" = true ] && [ "$(val author)" = antigravity ] && [ "$(val configured)" = "claude codex" ]; chk $? "--author agy with the config naming antigravity → the author is removed, round is full"

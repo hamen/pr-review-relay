@@ -678,11 +678,11 @@ are Nits and never block. The relay reads the raw review body and writes `KEY=va
 | key | meaning |
 |---|---|
 | `repo`, `pr`, `head_sha` | what was reviewed; `head_sha` is the head at the start of the round |
-| `round`, `exit` | the relay's per-SHA round number and the exit status it left with |
+| `round`, `exit` | the relay's round number (it advances when the head SHA changes, not when one SHA is re-run) and the exit status it left with |
 | `author` | the `--author` value |
 | `configured` | the seats in the configuration (`REVIEWERS`), author removed, sorted |
 | `requested` | the seats this run was asked for, sorted (deduplicated, author removed) |
-| `ran` | requested seats that were dispatched and not benched |
+| `ran` | requested seats that have an outcome this round and were not benched (a requested name that is not a known reviewer also appears here, as a failed seat, and keeps `all_clean` false) |
 | `benched` | seats left out because they are out of quota |
 | `seat.<name>` | `clean`, `findings` or `unknown` |
 | `all_clean` | `true` only if every condition below holds, otherwise `false` |
@@ -695,8 +695,10 @@ not move; every seat `clean`. The seat verdict parse is strict: the last non-emp
 exactly the verdict line and no other line may start with `VERDICT:`. A missing, malformed or
 duplicated line is `unknown`, which is not clean.
 
-The file is written when the relay exits, whichever way, so a round that failed or hit a cap
-leaves `all_clean=false` instead of a stale file from the round before. An existing file at the
+The file is written when the relay exits once its outcome directory exists, so a round that failed
+or hit a cap leaves `all_clean=false` instead of a stale file from the round before. An exit before
+that point (a bad argument, no `gh`, no PR) writes no file at all; the file at the path was already
+removed when the flag was read, so there is never a stale one. An existing file at the
 path is removed as soon as the flag is read. If the file is asked for and cannot be written on an
 otherwise clean round, the relay exits 1 rather than 0. Without the flag nothing is written and
 the prompts, output and exit codes are unchanged.
