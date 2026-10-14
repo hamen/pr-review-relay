@@ -3,18 +3,18 @@
 #
 # Same idea as pr-review-relay --author <self>, but for branches that aren't
 # pushed / don't have a PR open yet. Diffs the current branch against a base
-# ref (default: main), sends that diff to the other agents (claude / codex /
-# cursor / antigravity / opencode / qwen / grok) for review, and prints each review to the
-# screen. ("Read-only" is ENFORCED for opencode and grok — see the README caveats. Claude is
+# ref (default: main), sends that diff to the other agents (claude / codex / cursor / antigravity /
+# opencode / qwen / grok / pi_glm / pi_grok) for review, and prints each review to the screen.
+# ("Read-only" is ENFORCED for opencode, grok and the pi seats — see the README caveats. Claude is
 # pinned to a model here but NOT to plan/safe mode: this reviews your own branch, so there is no
 # untrusted author, and --safe-mode would only disable your own CLAUDE.md, hooks and MCP.)
 # Nothing is pushed, nothing is posted anywhere — this is
 # purely so you get a clean, reviewed branch before you open the PR.
 #
 # Usage:
-#   review-local [--author claude|codex|cursor|antigravity|opencode|qwen|grok] [--base <ref>] \
+#   review-local [--author claude|codex|cursor|antigravity|opencode|qwen|grok|pi_glm|pi_grok] [--base <ref>] \
 #                [--reviewers claude,codex,grok,opencode] [--sequential]
-#                (opencode, qwen, and grok are also supported, opt-in: name them explicitly)
+#                (opencode, qwen, grok, pi_glm and pi_grok are also supported, opt-in: name them explicitly)
 #   (reviewers run in PARALLEL by default; --sequential runs them one at a time, in panel order;
 #    --parallel is still accepted; the last of the two wins)
 #   (run from inside the repo, on the branch you want reviewed)
@@ -72,6 +72,9 @@ argv_limit_check || exit 2
 GROK_LIB="$SCRIPT_DIR/lib-grok.sh"
 [ -r "$GROK_LIB" ] || { echo "missing $GROK_LIB (keep it next to this script)" >&2; exit 1; }
 . "$GROK_LIB"
+PI_LIB="$SCRIPT_DIR/lib-pi.sh"
+[ -r "$PI_LIB" ] || { echo "missing $PI_LIB (keep it next to this script)" >&2; exit 1; }
+. "$PI_LIB"
 
 DEFAULT_REVIEWERS="claude,codex,grok,opencode"
 # PARALLEL by default, as in pr-review-relay — see the note there.
@@ -158,6 +161,7 @@ git rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "Base ref '$BASE' not f
 # After the repo checks: a reviewer-specific configuration error should not be the
 # first thing a user sees when the real problem is that they are not in a repo.
 opencode_is_selected && opencode_resolve_bin
+pi_is_selected && pi_resolve_bin
 
 echo "▶ Local review for branch '$BRANCH_LABEL' vs '$BASE' — author: ${AUTHOR:-none}"
 
@@ -173,9 +177,9 @@ trap 'rm -rf "$FAILDIR"' EXIT
 # as ATTACH_DIR rather than leaving a second temp dir with a different standard.
 relay_assert_tmpdir_outside_repo "$FAILDIR"
 
-# opencode (staged diff) and grok (prompt-file + isolated cwd) need ATTACH_DIR.
+# opencode (staged diff), grok and the pi seats (prompt file + isolated cwd) need ATTACH_DIR.
 ATTACH_DIR=""
-if opencode_is_selected || grok_is_selected; then
+if opencode_is_selected || grok_is_selected || pi_is_selected; then
   ATTACH_DIR="$(mktemp -d)" || { echo "cannot create temp dir for attachments" >&2; exit 1; }
   trap 'rm -rf "$ATTACH_DIR" "$FAILDIR"' EXIT
   relay_assert_tmpdir_outside_repo "$ATTACH_DIR"
@@ -204,7 +208,7 @@ Be concise. Group findings by severity: Blocker / Should-fix / Nit. If it looks
 good, say so in one line.
 P
 
-tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; qwen) echo qwen;; grok) echo grok;; *) echo "";; esac; }
+tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; qwen) echo qwen;; grok) echo grok;; pi_glm|pi_grok) echo "$PI_BIN";; *) echo "";; esac; }
 
 # Agents that read stdin (claude / codex / cursor / qwen) get the diff piped in, so a
 # large diff never hits the process argv limit (Windows caps it at ~32K chars).
@@ -213,6 +217,7 @@ tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo
 # under `set -o pipefail` reports 141 for a large diff the agent never drained.
 # Same approach as pr-review-relay.
 # grok ignores stdin: full diff goes in a --prompt-file; runs from an isolated cwd.
+# pi_glm / pi_grok get the full prompt on stdin, from an isolated cwd, with no tools (lib-pi.sh).
 review_with() {
   local name="$1" out="" rc=0 errf
   errf="$(mktemp)"
@@ -228,6 +233,10 @@ review_with() {
               "$errf" "$AGENT_TIMEOUT"); rc=$?;;
     grok)
       out=$(grok_review "$ATTACH_DIR" "$DIFF" "" \
+              "the in-progress local branch '$BRANCH_LABEL', diffed against '$BASE'" \
+              "$errf" "$AGENT_TIMEOUT"); rc=$?;;
+    pi_glm|pi_grok)
+      out=$(pi_review "$name" "$ATTACH_DIR" "$DIFF" "" \
               "the in-progress local branch '$BRANCH_LABEL', diffed against '$BASE'" \
               "$errf" "$AGENT_TIMEOUT"); rc=$?;;
   esac

@@ -169,6 +169,30 @@ got=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG=/dev/null \
   bash -c 'set -u; . "$0"; panel_seat_pins grok' "$LIB" 2>&1); rc=$?
 [ "$rc" = 0 ] && [ -z "$got" ] && ok "grok pins without lib-grok.sh print nothing, no error" || bad "grok without its lib: rc=$rc '$got'"
 
+# --- the pi seats (lib-pi.sh) ---------------------------------------------------
+# pins() above does not source lib-pi.sh, so a positive pi case through it would print nothing and
+# pass for the wrong reason — the same result as the negative case. pipins() sources it too.
+PLIB="$HERE/../lib-pi.sh"
+pipins() { # $1 = config body, $2 = seat, rest = VAR=value assignments for the call
+  local body="$1" seat="$2"; shift 2
+  printf '%s' "$body" > "$CFG"
+  env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" "$@" \
+    bash -c 'set -u; . "$0"; . "$1"; . "$2"; . "$3"; panel_config_load 2>/dev/null; panel_seat_pins "$4"' "$LIB" "$OLIB" "$GLIB" "$PLIB" "$seat"
+}
+out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
+  bash -c 'printf "MODEL_pi_glm=a\nEFFORT_pi_glm=b\nMODEL_pi_grok=c\nEFFORT_pi_grok=d\n" > "$2"; . "$0"; panel_config_load 2>&1 >/dev/null' "$LIB" x "$CFG")
+[ -z "$out" ] && ok "MODEL_/EFFORT_ keys for pi_glm and pi_grok load with no warning" || bad "pi seat keys warned about — got: $out"
+got=$(pipins '' pi_glm)
+[ "$got" = " (model=zai/glm-5.3, effort=low)" ] && ok "unpinned pi_glm shows zai/glm-5.3 / low" || bad "unpinned pi_glm: '$got'"
+got=$(pipins '' pi_grok)
+[ "$got" = " (model=xai/grok-4.7, effort=low)" ] && ok "unpinned pi_grok shows xai/grok-4.7 / low" || bad "unpinned pi_grok: '$got'"
+got=$(pipins $'MODEL_pi_grok=xai/grok-9\nEFFORT_pi_grok=medium\n' pi_grok)
+[ "$got" = " (model=xai/grok-9, effort=medium)" ] && ok "MODEL_pi_grok / EFFORT_pi_grok reach the pi_grok line" || bad "file pi_grok pins: '$got'"
+got=$(pipins $'EFFORT_pi_glm=medium\n' pi_glm PI_GLM_REVIEW_EFFORT=high PI_GLM_REVIEW_MODEL=zai/env)
+[ "$got" = " (model=zai/env, effort=high)" ] && ok "PI_GLM_REVIEW_* beat the config on the line too" || bad "env pi_glm pins: '$got'"
+got=$(pins '' pi_glm); rc=$?
+[ "$rc" = 0 ] && [ -z "$got" ] && ok "pi_glm pins without lib-pi.sh print nothing, no error" || bad "pi_glm without its lib: rc=$rc '$got'"
+
 # Parsing is fail-noisy, never fail-silent: a config that disappears without a word is the very
 # defect this file exists to remove.
 out=$(env -i HOME="$WORK" PATH=/usr/bin:/bin PR_RELAY_CONFIG="$CFG" \
