@@ -124,6 +124,8 @@ case ",\${QUOTA_ERR:-}," in *",\$key,"*) echo "Error: Individual quota reached. 
 case ",\${QUOTA_PAD:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 08m00s." >&2; exit 1;; esac
 case ",\${QUOTA_TEXT_OK:-}," in *",\$key,"*) echo "Looks good. Note the branch where quota reached is handled."; exit 0;; esac
 case ",\${QUOTA_OUT:-}," in *",\$key,"*) echo "Error: Individual quota reached. Resets in 2h30m0s."; exit 1;; esac
+# xAI's text, as the Grok Build CLI printed it on 2026-10-14. No "Resets in": the bench takes 6 h.
+case ",\${QUOTA_XAI:-}," in *",\$key,"*) echo "402 Payment Required: Grok Build usage balance exhausted" >&2; exit 1;; esac
 # Record our argv when asked, so a test can assert the command line the relay builds.
 # The bug this guards against is a flag silently going missing or being renamed, which
 # no output-shape assertion would ever notice.
@@ -1772,6 +1774,287 @@ if [ "$rc" = 0 ] && grep -q -- '--reasoning-effort medium' "$ARGV_LOG" && grep -
   echo "  ok   [0] review-local dispatches grok with medium + full diff"; PASS=$((PASS+1))
 else echo "  FAIL review-local grok (rc=$rc) argv=$(cat "$ARGV_LOG" 2>/dev/null) pl=$(head -5 "$PROMPT_FILE_LOG" 2>/dev/null) out=$out"; FAIL=$((FAIL+1)); fi
 
+# --- pi seats: the json stream reader (lib-pi.sh) ----------------------------
+# pi's exit code does not say whether a review came back: a `length` stop exits 0 in text mode, and
+# in json mode even an API error exits 0. The seat decides from the final assistant message, so the
+# reader IS the fail-closed rule. These run it directly on canned streams.
+PIR="$WORK/pi-reader"; mkdir -p "$PIR"
+PI_JS="$( . "$HERE/../lib-panel.sh"; . "$HERE/../lib-opencode.sh"; . "$HERE/../lib-pi.sh"; printf '%s' "$PI_FINAL_TEXT_JS" )"
+pi_read() { # <stream file> → PIR_OUT, PIR_ERR, PIR_RC
+  node -e "$PI_JS" < "$1" > "$PIR/out" 2> "$PIR/err"; PIR_RC=$?
+  PIR_OUT="$(cat "$PIR/out")"; PIR_ERR="$(cat "$PIR/err")"
+}
+pir_ok() { if [ "$2" = 0 ]; then echo "  ok   [-] pi reader: $1"; PASS=$((PASS+1)); else echo "  FAIL pi reader: $1 (rc=$PIR_RC out=$PIR_OUT err=$PIR_ERR)"; FAIL=$((FAIL+1)); fi; }
+PIR_USER='{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"the prompt"}]}}'
+printf '%s\n' '{"type":"session","version":3}' "$PIR_USER" \
+  '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Looks good."}],"usage":{"output":9}}}' \
+  '{"type":"agent_end"}' > "$PIR/s1"
+pi_read "$PIR/s1"; [ "$PIR_RC" = 0 ] && [ "$PIR_OUT" = "Looks good." ] && [ -z "$PIR_ERR" ]; pir_ok "stop + text → the text, exit 0, nothing on stderr" $?
+printf '%s\n' "$PIR_USER" '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"half a revi"}],"usage":{"output":32000}}}' > "$PIR/s2"
+pi_read "$PIR/s2"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && [ "$PIR_ERR" = "pi: no usable review (stopReason=length, output tokens=32000, text chars=11)" ]; pir_ok "length + text → nothing on stdout, the reason, exit 3" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"thinking","thinking":"..."}],"usage":{"output":45935}}}' > "$PIR/s3"
+pi_read "$PIR/s3"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && grep -qF 'stopReason=length, output tokens=45935, text chars=0' <<< "$PIR_ERR"; pir_ok "length without text → exit 3, text chars=0" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"error","content":[],"errorMessage":"400: {\"code\":\"1211\",\"message\":\"Unknown Model\"}"}}' > "$PIR/s4"
+pi_read "$PIR/s4"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && grep -qF 'stopReason=error, output tokens=?, text chars=0): 400: {"code":"1211","message":"Unknown Model"}' <<< "$PIR_ERR"; pir_ok "error stop → errorMessage on the reason line; a missing usage prints ?" $?
+# A failure can come AFTER some text (the connection drops mid-answer): the text must not rescue it.
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"error","content":[{"type":"text","text":"Half a review"}],"errorMessage":"socket hang up"}}' > "$PIR/s4b"
+pi_read "$PIR/s4b"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && grep -qF 'stopReason=error, output tokens=?, text chars=13): socket hang up' <<< "$PIR_ERR"; pir_ok "an error stop WITH text → exit 3, the partial text not printed" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"aborted","content":[{"type":"text","text":"Half"}]}}' > "$PIR/s4c"
+pi_read "$PIR/s4c"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && grep -qF 'stopReason=aborted' <<< "$PIR_ERR"; pir_ok "an aborted stop with text → exit 3" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"error","content":[],"errorMessage":"429: {\n  \"error\": \"Weekly/Monthly Limit Exhausted\"\r\n}"}}' > "$PIR/s5"
+pi_read "$PIR/s5"; [ "$PIR_RC" = 3 ] && [ "$(printf '%s\n' "$PIR_ERR" | wc -l | tr -d ' ')" = 1 ] && grep -qF 'Weekly/Monthly Limit Exhausted' <<< "$PIR_ERR"; pir_ok "a multi-line errorMessage stays ONE stderr line" $?
+printf '%s\n' '{"type":"session","version":3}' "$PIR_USER" '{"type":"agent_end"}' > "$PIR/s6"
+pi_read "$PIR/s6"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && [ "$PIR_ERR" = "pi: the event stream ended without a final assistant message" ]; pir_ok "no final assistant message (only the prompt echo) → exit 3" $?
+: > "$PIR/s7"; pi_read "$PIR/s7"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ]; pir_ok "an empty stream → exit 3" $?
+printf '%s\n' 'Warning: something pi printed' '{not json' \
+  '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Review."}],"usage":{"output":3}}}' > "$PIR/s8"
+pi_read "$PIR/s8"; [ "$PIR_RC" = 0 ] && [ "$PIR_OUT" = "Review." ] && [ -z "$PIR_ERR" ]; pir_ok "lines that are not JSON are skipped, not fatal" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"first turn"}]}}' \
+  '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"cut"}]}}' > "$PIR/s9"
+pi_read "$PIR/s9"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ]; pir_ok "only the LAST assistant message counts (an earlier stop does not rescue a final length)" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"cut"}]}}' \
+  '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"second"}]}}' > "$PIR/s10"
+pi_read "$PIR/s10"; [ "$PIR_RC" = 0 ] && [ "$PIR_OUT" = "second" ]; pir_ok "…and the last one is printed alone" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"  \n "}]}}' > "$PIR/s11"
+pi_read "$PIR/s11"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ]; pir_ok "stop with blank text → exit 3" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}' > "$PIR/s12"
+pi_read "$PIR/s12"; [ "$PIR_RC" = 3 ] && [ "$(printf '%s\n' "$PIR_ERR" | wc -l | tr -d ' ')" = 1 ] && grep -qF 'text chars=0' <<< "$PIR_ERR"; pir_ok "no content at all → one reason line, never a stack trace" $?
+
+# --- pi seats: pi_review itself, under set -u ----------------------------------
+# The PIPESTATUS capture is the line most likely to be "simplified" wrong later: assign
+# PIPESTATUS[0] to a variable and PIPESTATUS[1] is gone, which is an unbound variable under set -u.
+PID="$WORK/pi-direct"; mkdir -p "$PID/bin" "$PID/att"
+cat > "$PID/bin/pi" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${PID_CALLS:-}" ] && echo "$*" >> "$PID_CALLS"
+cat > /dev/null
+case "${PID_MODE:-ok}" in
+  ok)  echo '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"direct review"}]}}' ;;
+  124) exit 124 ;;
+esac
+exit 0
+STUB
+chmod +x "$PID/bin/pi"
+pid_run() { # env assignments... → PID_RC, PID_OUT, PID_ERR
+  : > "$PID/err"; : > "$PID/calls"
+  PID_OUT="$( env PATH="$PID/bin:$PATH" PID_CALLS="$PID/calls" "$@" bash -uo pipefail -c '
+    . "$1/lib-panel.sh"; . "$1/lib-opencode.sh"; . "$1/lib-pi.sh"
+    PI_BIN="$2/bin/pi"
+    pi_review pi_glm "$2/att" "+change" "" "a test diff" "$2/err" 20' _ "$HERE/.." "$PID" 2>&1 )"; PID_RC=$?
+  PID_ERR="$(cat "$PID/err")"
+}
+pid_run PID_MODE=ok
+[ "$PID_RC" = 0 ] && [ "$PID_OUT" = "direct review" ]; pir_ok "pi_review under set -u: a review → rc 0, the text" $?
+pid_run PID_MODE=124
+[ "$PID_RC" = 124 ]; pir_ok "pi_review under set -u: pi's 124 wins over the reader's 3 (got $PID_RC)" $?
+pid_run PID_MODE=ok PI_GLM_REVIEW_EFFORT=banana
+[ "$PID_RC" = 1 ] && [ ! -s "$PID/calls" ] && grep -qF "pi: invalid effort 'banana' for pi_glm (EFFORT_pi_glm / PI_GLM_REVIEW_EFFORT); valid: off minimal low medium high xhigh max" <<< "$PID_ERR"
+pir_ok "an effort pi does not know is refused before pi starts (pi only warns and runs at another level)" $?
+# The value is config text: two levels in one, or a glob, must not pass as a level.
+for _bad in 'low medium' 'medium high' '*' 'l?w' '?high' '[lm]ow'; do
+  pid_run PID_MODE=ok PI_GLM_REVIEW_EFFORT="$_bad"
+  [ "$PID_RC" = 1 ] && [ ! -s "$PID/calls" ] && grep -qF "pi: invalid effort '$_bad' for pi_glm" <<< "$PID_ERR"
+  pir_ok "effort '$_bad' is refused before pi starts (rc $PID_RC)" $?
+done
+# Every level the message lists is accepted, so the check and PI_EFFORT_LEVELS cannot drift apart.
+for _lvl in $(. "$HERE/../lib-pi.sh" && printf '%s' "$PI_EFFORT_LEVELS"); do
+  pid_run PID_MODE=ok PI_GLM_REVIEW_EFFORT="$_lvl"
+  [ "$PID_RC" = 0 ] && [ -s "$PID/calls" ]; pir_ok "listed effort '$_lvl' is accepted and reaches pi (rc $PID_RC)" $?
+done
+# No node → no reader → the model call must not start at all.
+mkdir -p "$PID/nonode"
+for b in timeout mktemp wc tr dirname basename cat; do _s=$(command -v "$b") && ln -sf "$_s" "$PID/nonode/$b"; done
+: > "$PID/err"; : > "$PID/calls"
+_o="$( env PATH="$PID/nonode" PID_CALLS="$PID/calls" "$BASH" -uo pipefail -c '
+  . "$1/lib-panel.sh"; . "$1/lib-opencode.sh"; . "$1/lib-pi.sh"
+  PI_BIN="$2/bin/pi"
+  pi_review pi_glm "$2/att" "+change" "" "a test diff" "$2/err" 20' _ "$HERE/.." "$PID" 2>&1 )"; _rc=$?
+[ "$_rc" = 1 ] && [ ! -s "$PID/calls" ] && grep -qF 'pi: node not found' "$PID/err"; pir_ok "no node on PATH → refused with the reason, pi never called (rc=$_rc)" $?
+
+# --- pi seats: the relay contract ----------------------------------------------
+# A stand-in for pi 1.1.0 in `-p --mode json`: one json event per line, the final assistant message
+# last. Both seats run this ONE binary, so the stub's key is its --model (zai/* → pi_glm,
+# xai/* → pi_grok), not its basename. The final message is built with JSON.stringify, so a text
+# with quotes, backslashes and newlines is still one valid JSON line.
+make_pi_agent() { # <dir>
+  cat > "$1/pi" <<'PI'
+#!/usr/bin/env bash
+model=""; prev=""
+for a in "$@"; do [ "$prev" = --model ] && model="$a"; prev="$a"; done
+case "$model" in zai/*) key=pi_glm;; xai/*) key=pi_grok;; *) key=pi;; esac
+case ",${SLEEP_KEYS:-}," in *",$key,"*) sleep 5;; esac
+[ -n "${ARGV_LOG:-}" ] && printf '%s %s\n' "$key" "$*" >> "$ARGV_LOG"
+[ -n "${PI_CWD_LOG:-}" ] && printf '%s %s\n' "$key" "$PWD" >> "$PI_CWD_LOG"
+if [ -n "${STDIN_LOG:-}" ]; then { printf '=== %s stdin ===\n' "$key"; cat; printf '\n'; } >> "$STDIN_LOG"; else cat > /dev/null; fi
+_ov="OUT_$key"
+if [ -n "${!_ov:-}" ]; then text="$(printf '%b' "${!_ov}")"
+elif [ "${PI_TEXT+set}" = set ]; then text="$PI_TEXT"
+else text="LGTM from $key."; fi
+node -e '
+const [stop, text, err, nofinal] = process.argv.slice(1);
+const w = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+w({ type: "session", version: 3 });
+w({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "(the prompt echo)" }] } });
+w({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x" } });
+if (nofinal !== "1") {
+  const m = { role: "assistant", stopReason: stop, content: [{ type: "thinking", thinking: "..." }], usage: { output: 42 } };
+  if (text !== "") m.content.push({ type: "text", text });
+  if (err !== "") m.errorMessage = err;
+  w({ type: "message_end", message: m });
+}
+w({ type: "agent_end" });
+' "${PI_STOP:-stop}" "$text" "${PI_ERROR:-}" "${PI_NO_FINAL:-}"
+exit "${PI_RC:-0}"
+PI
+  chmod +x "$1/pi"
+}
+make_pi_agent "$BIN"
+PIW="$WORK/pi-seat"; mkdir -p "$PIW" "$WORK/home" "$WORK/xdg" "$WORK/tmp"
+QB="$WORK/cache/pr-review-relay/benched"
+# pi_relay <env assignments...> -- <relay args...> → PI_RC, PI_OUT; posted bodies in $PIW/b/bodies
+pi_relay() {
+  local envs=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+  [ "${1:-}" = -- ] && shift
+  rm -rf "$WORK/cache" "$PIW/b"; mkdir -p "$WORK/cache" "$PIW/b"; rm -f "$WORK/sha_counter"
+  : > "$PIW/argv"; : > "$PIW/stdin"; : > "$PIW/cwd"
+  PI_OUT="$( env PATH="$BIN:$PATH" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" \
+      TMPDIR="$WORK/tmp" GH_SHA_COUNTER="$WORK/sha_counter" GH_BODY_DIR="$PIW/b" \
+      ARGV_LOG="$PIW/argv" STDIN_LOG="$PIW/stdin" PI_CWD_LOG="$PIW/cwd" \
+      PI_GLM_REVIEW_MODEL= PI_GLM_REVIEW_EFFORT= PI_GROK_REVIEW_MODEL= PI_GROK_REVIEW_EFFORT= \
+      ${envs[@]+"${envs[@]}"} bash "$RELAY" --pr 1 --author "${PI_AUTHOR:-claude}" "$@" 2>&1 )"; PI_RC=$?
+}
+pis_ok() { if [ "$2" = 0 ]; then echo "  ok   [$PI_RC] $1"; PASS=$((PASS+1)); else echo "  FAIL [rc=$PI_RC] $1: $(tail -6 <<< "$PI_OUT")"; FAIL=$((FAIL+1)); fi; }
+pi_posted() { grep -qF -- "$1" "$PIW/b/bodies" 2>/dev/null; }
+PI_FLAGS="--no-tools --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --no-session --offline"
+
+for _seat in pi_glm pi_grok; do
+  case "$_seat" in pi_glm) _m=zai/glm-5.3;; pi_grok) _m=xai/grok-4.7;; esac
+  pi_relay -- --reviewers "$_seat"
+  [ "$PI_RC" = 0 ] && pi_posted "LGTM from $_seat."; pis_ok "$_seat runs and its review is posted" $?
+  [ "$(grep "^$_seat " "$PIW/argv")" = "$_seat -p --mode json --model $_m --thinking low $PI_FLAGS" ]
+  pis_ok "$_seat argv is exactly the pinned one: -p, json, $_m, low, every isolation flag" $?
+  case "$(sed -n "s/^$_seat //p" "$PIW/cwd")" in */iso-pi.*) true;; *) false;; esac
+  pis_ok "$_seat runs from an empty iso-pi.* directory, not the checkout" $?
+  grep -qF -- '+change' "$PIW/stdin" && grep -qF -- '--- DIFF ---' "$PIW/stdin" \
+    && grep -qF 'You have no checkout, no tools and no network' "$PIW/stdin" && grep -qF 'Blocker / Should-fix / Nit' "$PIW/stdin"
+  pis_ok "$_seat gets the instructions and the full diff on stdin" $?
+  grep -qF -- "  → $_seat reviewing… (model=$_m, effort=low)" <<< "$PI_OUT"
+  pis_ok "$_seat's dispatch line shows the model and effort it runs" $?
+done
+
+# Pins. The would-run tool token is the absolute PI_BIN (opencode's shape, not grok's bare name).
+pi_relay PI_GLM_REVIEW_MODEL=zai/glm-9 PI_GLM_REVIEW_EFFORT=high -- --reviewers pi_glm --dry-run
+grep -qE 'would run: pi_glm \(/[^)]*/pi\) \(model=zai/glm-9, effort=high\)' <<< "$PI_OUT"
+pis_ok "--dry-run shows pi_glm's env pins and the absolute pi path" $?
+printf 'MODEL_pi_grok=xai/grok-9\nEFFORT_pi_grok=medium\n' > "$PIW/cfg"
+pi_relay PR_RELAY_CONFIG="$PIW/cfg" -- --reviewers pi_grok
+grep -q -- "^pi_grok -p --mode json --model xai/grok-9 --thinking medium " "$PIW/argv" && ! grep -q 'no reviewer seat named' <<< "$PI_OUT"
+pis_ok "MODEL_pi_grok / EFFORT_pi_grok from the config reach argv, with no unknown-seat warning" $?
+pi_relay PR_RELAY_CONFIG="$PIW/cfg" PI_GROK_REVIEW_EFFORT=minimal -- --reviewers pi_grok
+grep -q -- "--thinking minimal " "$PIW/argv"; pis_ok "the env beats the config for the effort" $?
+printf 'EFFORT_pi_glm=banana\n' > "$PIW/cfg-bad"
+pi_relay PR_RELAY_CONFIG="$PIW/cfg-bad" -- --reviewers pi_glm
+[ "$PI_RC" = 3 ] && ! grep -q '^pi_glm ' "$PIW/argv" && grep -qF "invalid effort 'banana' for pi_glm" <<< "$PI_OUT"
+pis_ok "EFFORT_pi_glm=banana → the seat fails with the reason, pi is never called" $?
+pi_relay PI_GROK_REVIEW_EFFORT=banana -- --reviewers pi_grok
+[ "$PI_RC" = 3 ] && ! grep -q '^pi_grok ' "$PIW/argv" && grep -qF "invalid effort 'banana' for pi_grok (EFFORT_pi_grok / PI_GROK_REVIEW_EFFORT)" <<< "$PI_OUT"
+pis_ok "PI_GROK_REVIEW_EFFORT=banana → the same, from the env" $?
+
+# Fail-closed: anything but a `stop` with text is a failed seat, with its reason, and nothing posted.
+pi_fc() { # <desc> <reason substring> <env assignments...>
+  local desc="$1" why="$2"; shift 2
+  pi_relay "$@" -- --reviewers pi_glm
+  [ "$PI_RC" = 3 ] && ! pi_posted 'LGTM from pi_glm' && grep -qF -- "$why" <<< "$PI_OUT"; pis_ok "$desc" $?
+}
+pi_fc "a length stop with text → round not clean, the cut review is NOT posted" "stopReason=length, output tokens=42, text chars=17" PI_STOP=length
+pi_fc "a length stop without text → round not clean" "stopReason=length, output tokens=42, text chars=0" PI_STOP=length PI_TEXT=
+pi_fc "an error stop (pi exits 0) → round not clean, the API error shown" "stopReason=error, output tokens=42, text chars=0): 400: Unknown Model" PI_STOP=error PI_TEXT= "PI_ERROR=400: Unknown Model"
+pi_fc "an error stop after some text → round not clean, the partial text NOT posted" "stopReason=error, output tokens=42, text chars=17): connection reset" PI_STOP=error "PI_ERROR=connection reset"
+pi_fc "a stop with an empty text → round not clean" "stopReason=stop, output tokens=42, text chars=0" PI_TEXT=
+pi_fc "no final assistant message → round not clean" "ended without a final assistant message" PI_NO_FINAL=1
+pi_fc "a timeout → reported as a timeout: pi's 124 wins over the reader's 3" "timed out after 1s" SLEEP_KEYS=pi_glm PR_RELAY_AGENT_TIMEOUT=1
+pi_relay PI_RC=1 -- --reviewers pi_glm
+[ "$PI_RC" = 3 ] && pi_posted 'LGTM from pi_glm.' && grep -qF 'pi_glm: exited with code 1' <<< "$PI_OUT"
+pis_ok "pi exits 1 after a valid review → posted, round not clean (the relay's rule for every seat)" $?
+
+# The bench. A benched seat does not count as "ran", so each case keeps a second seat that succeeds.
+pi_relay PI_STOP=error PI_TEXT= "PI_ERROR=429: Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-20 10:00:00" -- --reviewers codex,pi_glm
+[ "$PI_RC" = 0 ] && grep -qF 'pi_glm: out of quota — benched until' <<< "$PI_OUT" && grep -q "^pi_glm	" "$QB" && pi_posted 'LGTM from codex.'
+pis_ok "z.ai's weekly/monthly limit → pi_glm benched, codex posted, round clean" $?
+pi_relay PI_STOP=error PI_TEXT= "PI_ERROR=429: Weekly/Monthly Limit Exhausted." -- --reviewers pi_glm
+[ "$PI_RC" = 3 ] && grep -qF 'No reviewers ran' <<< "$PI_OUT" && grep -qF '1 reviewer(s) are benched' <<< "$PI_OUT" && grep -q "^pi_glm	" "$QB"
+pis_ok "a lone benched pi seat → bench entry written, round 3: a benched seat is not a pass" $?
+pi_relay QUOTA_XAI=grok -- --reviewers codex,grok
+[ "$PI_RC" = 0 ] && grep -qF 'grok: out of quota — benched until' <<< "$PI_OUT" && grep -q "^grok	" "$QB"
+pis_ok "xAI's 'usage balance exhausted' → grok benched, round clean" $?
+pi_relay "PI_TEXT=Fine. The limit exhausted branch is handled." -- --reviewers pi_glm
+[ "$PI_RC" = 0 ] && pi_posted 'limit exhausted branch' && [ ! -s "$QB" ]
+pis_ok "a review that says 'limit exhausted' and exits 0 is posted, not benched" $?
+for _e in "rate limit exhausted, retry later" "context limit exhausted"; do
+  pi_relay PI_STOP=error PI_TEXT= "PI_ERROR=$_e" -- --reviewers codex,pi_glm
+  [ "$PI_RC" = 3 ] && ! grep -q "^pi_glm	" "$QB" 2>/dev/null && grep -qF -- "$_e" <<< "$PI_OUT"
+  pis_ok "'$_e' fails the round and benches nothing" $?
+done
+
+pi_relay LINK_DIFF_FALLBACK_MAX_BYTES=1 -- --reviewers pi_glm
+[ "$PI_RC" = 0 ] && grep -qF -- '+change' "$PIW/stdin"; pis_ok "LINK_DIFF_FALLBACK_MAX_BYTES=1: pi_glm still gets the full diff" $?
+PI_AUTHOR=pi_glm pi_relay -- --reviewers pi_glm
+[ "$PI_RC" = 3 ] && ! grep -q '^pi_glm ' "$PIW/argv"; pis_ok "--author pi_glm --reviewers pi_glm → no reviewers, round 3" $?
+
+# Not installed but named → the round fails (grok's path), never exit 2.
+PINOBIN="$WORK/pi-nobin"; mkdir -p "$PINOBIN"
+for _t in gh codex claude; do ln -sf "$BIN/$_t" "$PINOBIN/$_t"; done
+ln -sf "$(command -v node)" "$PINOBIN/node"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
+PI_OUT=$( env PATH="$PINOBIN:/usr/bin:/bin" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" \
+  TMPDIR="$WORK/tmp" GH_SHA_COUNTER="$WORK/sha_counter" bash "$RELAY" --pr 1 --author claude --reviewers pi_glm 2>&1 ); PI_RC=$?
+[ "$PI_RC" = 3 ] && grep -qF 'pi not installed but explicitly requested → fail' <<< "$PI_OUT"
+pis_ok "pi not on PATH but named → the round fails (3), not exit 2" $?
+
+# Containment, on the trusted-directory shape: every PATH entry is OUTSIDE the checkout, so
+# relay_assert_path_outside_repo passes and only the binary check can catch `pi -> <checkout>/…`.
+# One link only, so this exercises the pi message, not the 40-link bound.
+mkdir -p "$WORK/trustedpi"; ln -sf "$WORK/dotpath/malicious" "$WORK/trustedpi/pi"
+rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"; : > "$PIW/argv"
+PI_OUT=$( cd "$WORK/dotpath" && env PATH="$WORK/trustedpi:$BIN:/usr/bin:/bin" XDG_CACHE_HOME="$WORK/cache" \
+  GH_SHA_COUNTER="$WORK/sha_counter" ARGV_LOG="$PIW/argv" \
+  bash "$RELAY" --pr 1 --author claude --reviewers codex,pi_glm 2>&1 ); PI_RC=$?
+[ "$PI_RC" = 2 ] && [ ! -s "$PIW/argv" ] && grep -qF 'refusing to run pi' <<< "$PI_OUT" \
+  && grep -qF 'dotpath/malicious' <<< "$PI_OUT" && ! grep -q 'PR_RELAY_OPENCODE_BIN' <<< "$PI_OUT"
+pis_ok "a pi that resolves into the checkout stops the relay (2) before any seat, with a pi message" $?
+
+# review-local: the same seats, the same reader.
+PIRL="$WORK/pirl"; rm -rf "$PIRL"; mkdir -p "$PIRL"
+( cd "$PIRL" && git init -q && git config user.email t@t && git config user.name t \
+  && echo a > f && git add f && git commit -q -m i && echo pi-local-change >> f && git add f && git commit -q -m c )
+pi_local() { # <env assignments...> -- <review-local args...>
+  local envs=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+  [ "${1:-}" = -- ] && shift
+  : > "$PIW/argv"; : > "$PIW/stdin"; : > "$PIW/cwd"
+  PI_OUT="$( cd "$PIRL" && env PATH="$BIN:$PATH" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" XDG_CACHE_HOME="$WORK/cache" \
+      TMPDIR="$WORK/tmp" ARGV_LOG="$PIW/argv" STDIN_LOG="$PIW/stdin" PI_CWD_LOG="$PIW/cwd" \
+      PI_GLM_REVIEW_MODEL= PI_GLM_REVIEW_EFFORT= ${envs[@]+"${envs[@]}"} \
+      bash "$HERE/../review-local" --author claude --base HEAD~1 "$@" 2>&1 )"; PI_RC=$?
+}
+pi_local -- --reviewers pi_glm
+[ "$PI_RC" = 0 ] && [ "$(grep '^pi_glm ' "$PIW/argv")" = "pi_glm -p --mode json --model zai/glm-5.3 --thinking low $PI_FLAGS" ] \
+  && grep -qF -- '+pi-local-change' "$PIW/stdin" && grep -qF 'LGTM from pi_glm.' <<< "$PI_OUT"
+pis_ok "review-local runs pi_glm with the pinned argv and the branch diff on stdin" $?
+case "$(sed -n 's/^pi_glm //p' "$PIW/cwd")" in */iso-pi.*) true;; *) false;; esac
+pis_ok "review-local runs pi_glm from an iso-pi.* directory" $?
+pi_local PI_STOP=length -- --reviewers pi_glm
+[ "$PI_RC" = 3 ] && ! grep -qF 'LGTM from pi_glm.' <<< "$PI_OUT" && grep -qF 'stopReason=length' <<< "$PI_OUT"
+pis_ok "review-local: a length stop is a failed seat, the cut review is not printed as one" $?
+printf '#!/usr/bin/env bash\necho PWNED\n' > "$PIRL/malicious"; chmod +x "$PIRL/malicious"
+mkdir -p "$WORK/trustedpi2"; ln -sf "$PIRL/malicious" "$WORK/trustedpi2/pi"; : > "$PIW/argv"
+PI_OUT=$( cd "$PIRL" && env PATH="$WORK/trustedpi2:$BIN:/usr/bin:/bin" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg" \
+  TMPDIR="$WORK/tmp" ARGV_LOG="$PIW/argv" bash "$HERE/../review-local" --author claude --reviewers codex,pi_glm --base HEAD~1 2>&1 ); PI_RC=$?
+[ "$PI_RC" = 2 ] && [ ! -s "$PIW/argv" ] && grep -qF 'refusing to run pi' <<< "$PI_OUT" && ! grep -q 'PR_RELAY_OPENCODE_BIN' <<< "$PI_OUT"
+pis_ok "review-local: a pi inside the checkout stops it at startup (2)" $?
+rm -f "$PIRL/malicious"
+
 # --- cursor invocation contract ----------------------------------------------------
 # cursor-agent's own default model is "Auto", which routes to the frontier models: it bills
 # the small "Other Models" quota AND may pick a Claude model, so a Claude-authored PR gets
@@ -1964,17 +2247,17 @@ else echo "  FAIL review-local ignored CURSOR_REVIEW_MODEL — argv: $(cat "$CUR
 # and exits 0 without touching gh, so it's a clean probe.
 SLINK_BIN="$WORK/slinkbin"; mkdir -p "$SLINK_BIN"
 ln -s "$RELAY" "$SLINK_BIN/pr-review-relay"
-if out=$(bash "$SLINK_BIN/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then
+if out=$(bash "$SLINK_BIN/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok|pi)'; then
   echo "  ok   [-] absolute symlink invocation resolves the sibling lib"; PASS=$((PASS+1))
 else
   echo "  FAIL absolute symlink invocation could not find lib-opencode.sh"; FAIL=$((FAIL+1))
 fi
 # A RELATIVE symlink target must resolve against the LINK's directory, not the cwd.
 REALD="$WORK/real"; mkdir -p "$REALD"
-cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../lib-panel.sh" "$HERE/../lib-argv.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
+cp "$RELAY" "$HERE/../lib-opencode.sh" "$HERE/../lib-grok.sh" "$HERE/../lib-pi.sh" "$HERE/../lib-panel.sh" "$HERE/../lib-argv.sh" "$HERE/../wrap-collapsed-pr-comment.mjs" "$REALD/" 2>/dev/null
 LINKD="$WORK/linkbin"; mkdir -p "$LINKD"
 ( cd "$LINKD" && ln -s "../real/pr-review-relay" pr-review-relay )
-if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then
+if out=$( cd "$WORK" && bash "$LINKD/pr-review-relay" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok|pi)'; then
   echo "  ok   [-] relative symlink resolves against the link's own dir"; PASS=$((PASS+1))
 else
   echo "  FAIL relative symlink did not resolve the lib"; FAIL=$((FAIL+1))
@@ -1982,7 +2265,7 @@ fi
 # Invoked as a BARE filename from the link's own dir (`bash pr-review-relay`): $_self has no
 # slash, so the relative-target branch must resolve against the cwd, not build a bogus
 # "pr-review-relay/../real/..." path. Regression for the no-slash case.
-if out=$( cd "$LINKD" && bash pr-review-relay --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)|cannot resolve'; then
+if out=$( cd "$LINKD" && bash pr-review-relay --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok|pi)|cannot resolve'; then
   echo "  ok   [-] bare-filename relative symlink resolves (no-slash \$_self)"; PASS=$((PASS+1))
 else
   echo "  FAIL bare-filename relative symlink broke (no-slash case): $(printf '%s' "$out" | head -1)"; FAIL=$((FAIL+1))
@@ -1990,7 +2273,7 @@ fi
 # The same bootstrap lives in review-local; symlink it too so the two can't drift.
 cp "$HERE/../review-local" "$REALD/" 2>/dev/null
 RLINK="$WORK/rlinkbin"; mkdir -p "$RLINK"; ln -s "$REALD/review-local" "$RLINK/review-local"
-if out=$(bash "$RLINK/review-local" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok)'; then
+if out=$(bash "$RLINK/review-local" --help 2>&1) && ! printf '%s' "$out" | grep -qE 'missing.*lib-(opencode|grok|pi)'; then
   echo "  ok   [-] review-local resolves the sibling lib through a symlink"; PASS=$((PASS+1))
 else
   echo "  FAIL review-local symlink did not resolve the lib"; FAIL=$((FAIL+1))

@@ -32,7 +32,7 @@
 #           and #29). Kept so an older ship-feature that still reads them gets no warning here;
 #           a current one reports them itself, from plan-review.
 # claude_fallback is not a seat: it is claude's second choice when the first model is unavailable.
-PANEL_SEATS="claude claude_fallback codex cursor antigravity grok opencode qwen glm gemini kimi3 grok45high"
+PANEL_SEATS="claude claude_fallback codex cursor antigravity grok opencode qwen pi_glm pi_grok glm gemini kimi3 grok45high"
 
 # PANEL_CFG_* is this loader's OUTPUT, never an input. Without this reset an exported
 # PANEL_CFG_REVIEWERS=cursor acts as a fifth, undocumented precedence layer that outranks the
@@ -192,10 +192,11 @@ panel_resolve() {
 # with no pin at all (qwen) and for any name not listed below — never an error.
 #
 # Reads the globals pr-review-relay and review-local set at load time (CLAUDE_REVIEW_MODEL,
-# CODEX_REVIEW_EFFORT, …), and calls grok_resolve_* / opencode_resolve_model from lib-grok.sh /
-# lib-opencode.sh. Both scripts source this file BEFORE those two, which is fine because this runs
-# at DISPATCH time, never at load time. A caller that sources this file alone (pr-review-distill)
-# gets nothing for grok/opencode instead of "command not found" — the `command -v` guards.
+# CODEX_REVIEW_EFFORT, …), and calls grok_resolve_* / opencode_resolve_model / pi_resolve_* from
+# lib-grok.sh / lib-opencode.sh / lib-pi.sh. Both scripts source this file BEFORE those, which is
+# fine because this runs at DISPATCH time, never at load time. A caller that sources this file alone
+# (pr-review-distill) gets nothing for grok/opencode/pi instead of "command not found" — the
+# `command -v` guards.
 # `${VAR:-}` throughout: both callers run under `set -u`.
 panel_seat_pins() { # <seat>
   local _psp_m=
@@ -216,6 +217,10 @@ panel_seat_pins() { # <seat>
       command -v opencode_resolve_model >/dev/null 2>&1 || return 0
       _psp_m="$(opencode_resolve_model)"
       printf ' (model=%s)' "${_psp_m:-cli default}" ;;
+    pi_glm|pi_grok)
+      # effort= like every other seat, and like the EFFORT_<seat> key; pi receives it as --thinking.
+      command -v pi_resolve_model >/dev/null 2>&1 || return 0
+      printf ' (model=%s, effort=%s)' "$(pi_resolve_model "$1")" "$(pi_resolve_effort "$1")" ;;
   esac
   return 0
 }

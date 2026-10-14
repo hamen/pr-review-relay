@@ -121,6 +121,21 @@ AG
   chmod +x "$BIN/$1"
 }
 for a in claude codex cursor-agent agy opencode qwen grok; do make_agent "$a"; done
+# pi: both pi seats run this ONE binary, so the key comes from --model (zai/* → pi_glm,
+# xai/* → pi_grok), and OUT_<key> is OUT_pi_glm, never OUT_pi. pi speaks a json stream, so the text
+# (OUT_<key> expanded with %b, as the stubs above do) is JSON-encoded by node and written by node:
+# printf '%b' on the encoded line would expand its \n and \" escapes and break it.
+cat > "$BIN/pi" <<'PI'
+#!/usr/bin/env bash
+model=""; prev=""
+for a in "$@"; do [ "$prev" = --model ] && model="$a"; prev="$a"; done
+case "$model" in zai/*) key=pi_glm;; xai/*) key=pi_grok;; *) key=pi;; esac
+if [ -n "${STDIN_LOG:-}" ]; then { printf '=== %s stdin ===\n' "$key"; cat; printf '\n'; } >> "$STDIN_LOG"; else cat > /dev/null; fi
+var="OUT_$key"
+if [ -n "${!var:-}" ]; then text="$(printf '%b' "${!var}")"; else text="$(printf 'Looks good.\nVERDICT: clean')"; fi
+node -e 'process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: process.argv[1] }] } }) + "\n")' "$text"
+PI
+chmod +x "$BIN/pi"
 SHA40=0123456789abcdef0123456789abcdef01234567
 
 PASS=0; FAIL=0
@@ -321,6 +336,14 @@ grep -q 'VERDICT: clean' "$SL"; chk $? "claude/codex prompt (stdin) carries the 
 grep -q 'VERDICT: clean' "$PL"; chk $? "grok prompt file carries the verdict rules"
 grep -q 'VERDICT: clean' "$AL"; chk $? "opencode prompt carries the verdict rules"
 grep -q 'material problem of correctness, safety, deployability or verification' "$SL"; chk $? "the rules say what a Should-fix is, and that the rest are Nits"
+rm -f "$PL" "$AL" "$SL"
+PANEL=claude,codex,pi_glm vrun STDIN_LOG="$SL" -- --reviewers claude,codex,pi_glm
+[ "$RC" = 0 ] && [ "$(val seat.pi_glm)" = clean ] && sed -n '/^=== pi_glm stdin ===$/,$p' "$SL" | grep -q 'VERDICT: clean'
+chk $? "pi_glm prompt (stdin) carries the verdict rules, and its clean verdict is captured"
+PANEL=claude,codex,pi_glm vrun OUT_pi_glm='x\nVERDICT: findings blockers=1 should_fix=0' -- --reviewers claude,codex,pi_glm
+[ "$(val seat.pi_glm)" = findings ] && [ "$(val all_clean)" = false ]; chk $? "a pi_glm finding is seen through the json stream (OUT_pi_glm, keyed by --model)"
+PANEL=claude,codex,pi_glm vrun OUT_pi_glm='He wrote "C:\\tmp" and left.\nVERDICT: findings blockers=1 should_fix=0' -- --reviewers claude,codex,pi_glm
+[ "$(val seat.pi_glm)" = findings ]; chk $? "a pi review with a quote, a backslash and a newline still parses (one JSON line)"
 rm -f "$PL" "$AL" "$SL" "$VF"
 rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"
 env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" GH_FIXED_SHA="$SHA40" PR_RELAY_CONFIG="$WORK/cfg" \

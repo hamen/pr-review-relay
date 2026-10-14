@@ -27,6 +27,34 @@ All notable changes to **pr-review-relay** are documented here. This project fol
   own review; the file records it, it does not verify it.
 - `test/test-verdict.sh`, wired into `bin/ci`: the file in every round shape, 12 parse cases, and
   the writer lifted from the script and fed a world with exactly one thing wrong at a time.
+- **Two reviewer seats on the [pi](https://pi.dev) runner: `pi_glm` (`zai/glm-5.3`) and `pi_grok`
+  (`xai/grok-4.7`).** Why: on a 298 KB pull request the `opencode` seat (GLM) came back empty twice —
+  opencode caps a reply at 32K output tokens and GLM spent all of them reasoning — and the `grok`
+  seat (Grok Build CLI) timed out twice at 900 s. Through pi, the same 332 KB prompt took 120 s
+  (GLM, `low`) and 352 s (Grok, `low`), both with specific findings. Both seats are opt-in, and
+  `DEFAULT_REVIEWERS` is unchanged.
+  - The new `lib-pi.sh`, sourced by `pr-review-relay` and `review-local` (install it next to them;
+    both refuse to start without it), runs `pi -p --mode json` with `--no-tools` and nine more
+    isolation flags, from an empty cwd outside the checkout, with the whole prompt and the full diff
+    on stdin. A `pi` that resolves into the checkout under review stops the relay with exit 2.
+  - **The stop-reason rule.** pi's json mode exits 0 even on an API error, so a `node` reader takes
+    the last assistant message and accepts only `stopReason: stop` with non-blank text. A `length`
+    stop, an `error` stop, empty text or no final message fails the seat with one reason line on
+    stderr (`pi: no usable review (stopReason=…, output tokens=…, text chars=…)`, plus the
+    provider's `errorMessage`). A truncated review is never posted; pi's own non-zero exit wins.
+  - Pins: `MODEL_pi_glm` / `EFFORT_pi_glm`, `MODEL_pi_grok` / `EFFORT_pi_grok` (env
+    `PI_GLM_REVIEW_*`, `PI_GROK_REVIEW_*`). Both efforts default to `low`, which fits the 500 s
+    default timeout; `medium` needs 900 s. The effort goes to `--thinking` and is checked against
+    `off minimal low medium high xhigh max` first: pi only warns on a bad level and runs at its own
+    default, so a typo would otherwise run unseen.
+  - `node` is needed by these two seats; a missing `node` fails the seat before pi starts.
+
+### Changed
+
+- **The bench recognises two more out-of-quota texts:** z.ai's `Weekly/Monthly Limit Exhausted`
+  and xAI's `usage balance exhausted`. Exactly those phrases, not a bare "limit exhausted", which
+  would also bench a seat on a transient rate limit or a context-length error. Neither carries a
+  reset duration, so they take the existing 6-hour default.
 
 ### Fixed
 

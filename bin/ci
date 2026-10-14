@@ -52,6 +52,7 @@ for f in \
   pr-review-consensus \
   lib-opencode.sh \
   lib-grok.sh \
+  lib-pi.sh \
   lib-panel.sh \
   lib-argv.sh \
   bin/ci \
