@@ -1772,6 +1772,87 @@ if [ "$rc" = 0 ] && grep -q -- '--reasoning-effort medium' "$ARGV_LOG" && grep -
   echo "  ok   [0] review-local dispatches grok with medium + full diff"; PASS=$((PASS+1))
 else echo "  FAIL review-local grok (rc=$rc) argv=$(cat "$ARGV_LOG" 2>/dev/null) pl=$(head -5 "$PROMPT_FILE_LOG" 2>/dev/null) out=$out"; FAIL=$((FAIL+1)); fi
 
+# --- pi seats: the json stream reader (lib-pi.sh) ----------------------------
+# pi's exit code does not say whether a review came back: a `length` stop exits 0 in text mode, and
+# in json mode even an API error exits 0. The seat decides from the final assistant message, so the
+# reader IS the fail-closed rule. These run it directly on canned streams.
+PIR="$WORK/pi-reader"; mkdir -p "$PIR"
+PI_JS="$( . "$HERE/../lib-panel.sh"; . "$HERE/../lib-opencode.sh"; . "$HERE/../lib-pi.sh"; printf '%s' "$PI_FINAL_TEXT_JS" )"
+pi_read() { # <stream file> → PIR_OUT, PIR_ERR, PIR_RC
+  node -e "$PI_JS" < "$1" > "$PIR/out" 2> "$PIR/err"; PIR_RC=$?
+  PIR_OUT="$(cat "$PIR/out")"; PIR_ERR="$(cat "$PIR/err")"
+}
+pir_ok() { if [ "$2" = 0 ]; then echo "  ok   [-] pi reader: $1"; PASS=$((PASS+1)); else echo "  FAIL pi reader: $1 (rc=$PIR_RC out=$PIR_OUT err=$PIR_ERR)"; FAIL=$((FAIL+1)); fi; }
+PIR_USER='{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"the prompt"}]}}'
+printf '%s\n' '{"type":"session","version":3}' "$PIR_USER" \
+  '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Looks good."}],"usage":{"output":9}}}' \
+  '{"type":"agent_end"}' > "$PIR/s1"
+pi_read "$PIR/s1"; [ "$PIR_RC" = 0 ] && [ "$PIR_OUT" = "Looks good." ] && [ -z "$PIR_ERR" ]; pir_ok "stop + text → the text, exit 0, nothing on stderr" $?
+printf '%s\n' "$PIR_USER" '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"half a revi"}],"usage":{"output":32000}}}' > "$PIR/s2"
+pi_read "$PIR/s2"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && [ "$PIR_ERR" = "pi: no usable review (stopReason=length, output tokens=32000, text chars=11)" ]; pir_ok "length + text → nothing on stdout, the reason, exit 3" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"thinking","thinking":"..."}],"usage":{"output":45935}}}' > "$PIR/s3"
+pi_read "$PIR/s3"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && grep -qF 'stopReason=length, output tokens=45935, text chars=0' <<< "$PIR_ERR"; pir_ok "length without text → exit 3, text chars=0" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"error","content":[],"errorMessage":"400: {\"code\":\"1211\",\"message\":\"Unknown Model\"}"}}' > "$PIR/s4"
+pi_read "$PIR/s4"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && grep -qF 'stopReason=error, output tokens=?, text chars=0): 400: {"code":"1211","message":"Unknown Model"}' <<< "$PIR_ERR"; pir_ok "error stop → errorMessage on the reason line; a missing usage prints ?" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"error","content":[],"errorMessage":"429: {\n  \"error\": \"Weekly/Monthly Limit Exhausted\"\r\n}"}}' > "$PIR/s5"
+pi_read "$PIR/s5"; [ "$PIR_RC" = 3 ] && [ "$(printf '%s\n' "$PIR_ERR" | wc -l | tr -d ' ')" = 1 ] && grep -qF 'Weekly/Monthly Limit Exhausted' <<< "$PIR_ERR"; pir_ok "a multi-line errorMessage stays ONE stderr line" $?
+printf '%s\n' '{"type":"session","version":3}' "$PIR_USER" '{"type":"agent_end"}' > "$PIR/s6"
+pi_read "$PIR/s6"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ] && [ "$PIR_ERR" = "pi: the event stream ended without a final assistant message" ]; pir_ok "no final assistant message (only the prompt echo) → exit 3" $?
+: > "$PIR/s7"; pi_read "$PIR/s7"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ]; pir_ok "an empty stream → exit 3" $?
+printf '%s\n' 'Warning: something pi printed' '{not json' \
+  '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Review."}],"usage":{"output":3}}}' > "$PIR/s8"
+pi_read "$PIR/s8"; [ "$PIR_RC" = 0 ] && [ "$PIR_OUT" = "Review." ] && [ -z "$PIR_ERR" ]; pir_ok "lines that are not JSON are skipped, not fatal" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"first turn"}]}}' \
+  '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"cut"}]}}' > "$PIR/s9"
+pi_read "$PIR/s9"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ]; pir_ok "only the LAST assistant message counts (an earlier stop does not rescue a final length)" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"cut"}]}}' \
+  '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"second"}]}}' > "$PIR/s10"
+pi_read "$PIR/s10"; [ "$PIR_RC" = 0 ] && [ "$PIR_OUT" = "second" ]; pir_ok "…and the last one is printed alone" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"  \n "}]}}' > "$PIR/s11"
+pi_read "$PIR/s11"; [ "$PIR_RC" = 3 ] && [ -z "$PIR_OUT" ]; pir_ok "stop with blank text → exit 3" $?
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}' > "$PIR/s12"
+pi_read "$PIR/s12"; [ "$PIR_RC" = 3 ] && [ "$(printf '%s\n' "$PIR_ERR" | wc -l | tr -d ' ')" = 1 ] && grep -qF 'text chars=0' <<< "$PIR_ERR"; pir_ok "no content at all → one reason line, never a stack trace" $?
+
+# --- pi seats: pi_review itself, under set -u ----------------------------------
+# The PIPESTATUS capture is the line most likely to be "simplified" wrong later: assign
+# PIPESTATUS[0] to a variable and PIPESTATUS[1] is gone, which is an unbound variable under set -u.
+PID="$WORK/pi-direct"; mkdir -p "$PID/bin" "$PID/att"
+cat > "$PID/bin/pi" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${PID_CALLS:-}" ] && echo "$*" >> "$PID_CALLS"
+cat > /dev/null
+case "${PID_MODE:-ok}" in
+  ok)  echo '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"direct review"}]}}' ;;
+  124) exit 124 ;;
+esac
+exit 0
+STUB
+chmod +x "$PID/bin/pi"
+pid_run() { # env assignments... → PID_RC, PID_OUT, PID_ERR
+  : > "$PID/err"; : > "$PID/calls"
+  PID_OUT="$( env PATH="$PID/bin:$PATH" PID_CALLS="$PID/calls" "$@" bash -uo pipefail -c '
+    . "$1/lib-panel.sh"; . "$1/lib-opencode.sh"; . "$1/lib-pi.sh"
+    PI_BIN="$2/bin/pi"
+    pi_review pi_glm "$2/att" "+change" "" "a test diff" "$2/err" 20' _ "$HERE/.." "$PID" 2>&1 )"; PID_RC=$?
+  PID_ERR="$(cat "$PID/err")"
+}
+pid_run PID_MODE=ok
+[ "$PID_RC" = 0 ] && [ "$PID_OUT" = "direct review" ]; pir_ok "pi_review under set -u: a review → rc 0, the text" $?
+pid_run PID_MODE=124
+[ "$PID_RC" = 124 ]; pir_ok "pi_review under set -u: pi's 124 wins over the reader's 3 (got $PID_RC)" $?
+pid_run PID_MODE=ok PI_GLM_REVIEW_EFFORT=banana
+[ "$PID_RC" = 1 ] && [ ! -s "$PID/calls" ] && grep -qF "pi: invalid effort 'banana' for pi_glm (EFFORT_pi_glm / PI_GLM_REVIEW_EFFORT); valid: off minimal low medium high xhigh max" <<< "$PID_ERR"
+pir_ok "an effort pi does not know is refused before pi starts (pi only warns and runs at another level)" $?
+# No node → no reader → the model call must not start at all.
+mkdir -p "$PID/nonode"
+for b in timeout mktemp wc tr dirname basename cat; do _s=$(command -v "$b") && ln -sf "$_s" "$PID/nonode/$b"; done
+: > "$PID/err"; : > "$PID/calls"
+_o="$( env PATH="$PID/nonode" PID_CALLS="$PID/calls" "$BASH" -uo pipefail -c '
+  . "$1/lib-panel.sh"; . "$1/lib-opencode.sh"; . "$1/lib-pi.sh"
+  PI_BIN="$2/bin/pi"
+  pi_review pi_glm "$2/att" "+change" "" "a test diff" "$2/err" 20' _ "$HERE/.." "$PID" 2>&1 )"; _rc=$?
+[ "$_rc" = 1 ] && [ ! -s "$PID/calls" ] && grep -qF 'pi: node not found' "$PID/err"; pir_ok "no node on PATH → refused with the reason, pi never called (rc=$_rc)" $?
+
 # --- cursor invocation contract ----------------------------------------------------
 # cursor-agent's own default model is "Auto", which routes to the frontier models: it bills
 # the small "Other Models" quota AND may pick a Claude model, so a Claude-authored PR gets
