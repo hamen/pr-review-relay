@@ -177,8 +177,10 @@ pi_review() {
   esac
   model="$(pi_resolve_model "$seat")"
   effort="$(pi_resolve_effort "$seat")"
-  case " $PI_EFFORT_LEVELS " in
-    *" $effort "*) ;;
+  # Exact alternatives, never a match against the list: the value is config text, so as a pattern
+  # `low medium`, `*` or `l?w` would pass. Keep in step with PI_EFFORT_LEVELS (a test pins it).
+  case "$effort" in
+    off|minimal|low|medium|high|xhigh|max) ;;
     *)
       echo "pi: invalid effort '$effort' for $seat (EFFORT_$seat / $(printf '%s' "$seat" | tr '[:lower:]' '[:upper:]')_REVIEW_EFFORT); valid: $PI_EFFORT_LEVELS" >> "$errf"
       return 1 ;;

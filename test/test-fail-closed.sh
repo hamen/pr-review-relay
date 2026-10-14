@@ -1850,6 +1850,17 @@ pid_run PID_MODE=124
 pid_run PID_MODE=ok PI_GLM_REVIEW_EFFORT=banana
 [ "$PID_RC" = 1 ] && [ ! -s "$PID/calls" ] && grep -qF "pi: invalid effort 'banana' for pi_glm (EFFORT_pi_glm / PI_GLM_REVIEW_EFFORT); valid: off minimal low medium high xhigh max" <<< "$PID_ERR"
 pir_ok "an effort pi does not know is refused before pi starts (pi only warns and runs at another level)" $?
+# The value is config text: two levels in one, or a glob, must not pass as a level.
+for _bad in 'low medium' 'medium high' '*' 'l?w' '?high' '[lm]ow'; do
+  pid_run PID_MODE=ok PI_GLM_REVIEW_EFFORT="$_bad"
+  [ "$PID_RC" = 1 ] && [ ! -s "$PID/calls" ] && grep -qF "pi: invalid effort '$_bad' for pi_glm" <<< "$PID_ERR"
+  pir_ok "effort '$_bad' is refused before pi starts (rc $PID_RC)" $?
+done
+# Every level the message lists is accepted, so the check and PI_EFFORT_LEVELS cannot drift apart.
+for _lvl in $(. "$HERE/../lib-pi.sh" && printf '%s' "$PI_EFFORT_LEVELS"); do
+  pid_run PID_MODE=ok PI_GLM_REVIEW_EFFORT="$_lvl"
+  [ "$PID_RC" = 0 ] && [ -s "$PID/calls" ]; pir_ok "listed effort '$_lvl' is accepted and reaches pi (rc $PID_RC)" $?
+done
 # No node → no reader → the model call must not start at all.
 mkdir -p "$PID/nonode"
 for b in timeout mktemp wc tr dirname basename cat; do _s=$(command -v "$b") && ln -sf "$_s" "$PID/nonode/$b"; done
