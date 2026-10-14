@@ -48,8 +48,8 @@ PI_EFFORT_LEVELS="off minimal low medium high xhigh max"
 # One resolver each, used by pi_review AND by the dispatch line (panel_seat_pins), so the line
 # always shows what the seat actually runs.
 #
-# Both efforts default to `low`. Measured on a 298 KB PR (hamen/app-tools#115): glm-5.3 at `low`
-# finished in 120 s, grok-4.7 at `low` in 352 s — both inside the shipped 500 s AGENT_TIMEOUT. At
+# Both efforts default to `low`. Measured on a 298 KB diff with a 33 KB context file: glm-5.3 at
+# `low` finished in 120 s, grok-4.7 at `low` in 352 s — both inside the shipped 500 s AGENT_TIMEOUT. At
 # `medium` they took 731 s and 792 s, which fit only a 900 s timeout. Pin `medium` in the config
 # together with AGENT_TIMEOUT=900 or more.
 pi_resolve_model() { # <seat>

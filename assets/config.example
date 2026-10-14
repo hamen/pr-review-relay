@@ -49,7 +49,18 @@ MODEL_opencode=openrouter/z-ai/glm-5.2
 MODEL_cursor=composer-2.5
 MODEL_antigravity=Gemini 3.1 Pro (High)
 
+# The two pi seats (opt-in: add pi_glm / pi_grok to REVIEWERS). One pi binary, so one pair of keys
+# per seat. The model is a pi provider/model id, as `pi --list-models` prints it.
+#MODEL_pi_glm=zai/glm-5.3
+#MODEL_pi_grok=xai/grok-4.7
+
 # Reasoning effort, where the agent supports it.
 #EFFORT_claude=
 #EFFORT_codex=
 #EFFORT_grok=medium
+# The pi seats pass this to `pi --thinking`. Valid: off minimal low medium high xhigh max; any other
+# value fails the seat (pi itself would only warn and run at its own default). Pin `medium` only
+# with AGENT_TIMEOUT=900 or more: on a ~300 KB diff it took 731 s (GLM) and 792 s (Grok), against
+# 120 s and 352 s at `low`.
+#EFFORT_pi_glm=low
+#EFFORT_pi_grok=low

@@ -138,6 +138,16 @@ cross-review for free: let whoever opened the PR delegate the review to the othe
     (`QWEN_DEFAULT_AUTH_TYPE`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). Opt-in: name it
     explicitly in `--reviewers`.
   - ⚡ [`grok`](https://grok.com) (Grok Build CLI) — uses `grok --prompt-file … -m grok-4.6 --reasoning-effort medium --permission-mode plan --sandbox read-only --deny '*'` from an isolated cwd (full diff always embedded; stdin is ignored). Model and effort come from `MODEL_grok` / `EFFORT_grok` (defaults `grok-4.6` / `medium`) — the same keys ship-feature's plan-review `grok` seat reads.
+  - 🥧 [`pi`](https://pi.dev) (pi coding agent) **1.1.0**, plus **`node`** — two seats on the one
+    binary: `pi_glm` (default model `zai/glm-5.3`) and `pi_grok` (default `xai/grok-4.7`). Each runs
+    `pi -p --mode json --model <m> --thinking <effort> --no-tools --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --no-session --offline`
+    from an isolated cwd, with the whole prompt on stdin; `node` reads pi's json event stream and
+    keeps the final answer. Model and effort come from `MODEL_pi_glm` / `EFFORT_pi_glm` and
+    `MODEL_pi_grok` / `EFFORT_pi_grok` (both efforts default to `low`); the effort value goes to
+    pi's `--thinking`. Auth is pi's own login (`pi auth check --provider zai`, `--provider xai`).
+    Every flag above was checked against 1.1.0. A pi that drops or renames one refuses it with
+    `Error: Unknown option: …`, so both seats fail every round, loudly, until the flag is fixed here.
+    Opt-in: name them in `--reviewers` or in `REVIEWERS`.
 
 You only need the agents you actually want as reviewers.
 
@@ -158,6 +168,7 @@ curl -fsSL "$REPO/pr-review-consensus" -o "$BIN/pr-review-consensus"
 curl -fsSL "$REPO/wrap-collapsed-pr-comment.mjs" -o "$BIN/wrap-collapsed-pr-comment.mjs"
 curl -fsSL "$REPO/lib-opencode.sh" -o "$BIN/lib-opencode.sh"
 curl -fsSL "$REPO/lib-grok.sh" -o "$BIN/lib-grok.sh"
+curl -fsSL "$REPO/lib-pi.sh" -o "$BIN/lib-pi.sh"
 curl -fsSL "$REPO/lib-panel.sh" -o "$BIN/lib-panel.sh"
 curl -fsSL "$REPO/lib-argv.sh" -o "$BIN/lib-argv.sh"
 chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN/pr-review-distill" "$BIN/pr-review-collapse-comments" "$BIN/pr-review-consensus"
@@ -167,7 +178,7 @@ chmod +x "$BIN/pr-review-relay" "$BIN/review-local" "$BIN/pr-review-fetch" "$BIN
 
 `pr-review-relay`, `pr-review-collapse-comments`, and `pr-review-consensus` expect `wrap-collapsed-pr-comment.mjs` in the same directory as those scripts (as in this repo). If you install only into `$BIN`, keep the `.mjs` file there too. `review-local` doesn't need it (it never posts anywhere).
 
-`pr-review-relay` and `review-local` both source **`lib-opencode.sh`** and **`lib-grok.sh`** from their own directory — shared OpenCode and Grok reviewer policies so the two scripts cannot drift on security-relevant settings. Both refuse to start if either lib is missing.
+`pr-review-relay` and `review-local` both source **`lib-opencode.sh`**, **`lib-grok.sh`** and **`lib-pi.sh`** from their own directory — shared OpenCode, Grok and pi reviewer policies so the two scripts cannot drift on security-relevant settings. Both refuse to start if any of the three is missing.
 
 **`lib-panel.sh`** is sourced by `pr-review-relay`, `review-local` and `pr-review-distill`, and they refuse to start without it. It is the one place that answers "who reviews, with which model" — install it alongside the others or those three stop at startup.
 
@@ -182,6 +193,7 @@ Linux refuses to start a process when ONE argument string is over 131072 bytes (
 | `codex`, `claude` | **stdin** (the prompt; in `--diff` mode the prompt, a blank line, then the diff) | No |
 | `cursor` | stdin | No |
 | `grok` | `--prompt-file` | No |
+| `pi_glm`, `pi_grok` | stdin (the full diff, always embedded) | No |
 | `qwen`, `antigravity` (`-p`), `opencode` (`-- "$oc_prompt"`) | one argv string | Guarded |
 
 A guarded seat whose argv string (plus its NUL) is over `122880` bytes does **not start**. It prints the reason on stderr — `qwen: prompt is 140123 B, over the argv limit (122880 B, counting the terminating NUL) — shorten the --context-file or use another seat` (for antigravity in `--diff` mode the hint names the diff) — posts nothing, and fails the round (exit 3); the other seats still run and post. The default is 8 KiB under the kernel's number on purpose, so a qwen or antigravity prompt of 122880–131071 bytes, which used to run, is now refused. `PR_RELAY_ARGV_MAX_BYTES` overrides the limit **for tests only**; a value that is not a number, is 0, or is above 131072 stops the relay at startup (exit 2).
@@ -213,6 +225,23 @@ MODEL_opencode=openrouter/z-ai/glm-5.2
 Each seat's dispatch line shows what it resolved to — `→ grok reviewing… (model=grok-4.7, effort=medium)` — and so does `--dry-run`'s `would run:` line, so a pin can be checked without running a review.
 
 A `MODEL_<seat>` key uses the **seat** name you pass to `--reviewers`, so you never need to know that opencode's variable is `PR_RELAY_OPENCODE_MODEL` and antigravity's is `AGY_REVIEW_MODEL`. (`MODEL_agy` still works as an alias of `MODEL_antigravity`.) A suffix that names no seat is kept — ship-feature reads this same file and knows seats this repo does not — but it is reported on stderr, so a typo cannot pass for a setting that quietly had no effect.
+
+The two pi seats share one binary, so each has its own pair of keys:
+
+| Config key | Environment variable | Default | Valid values |
+|---|---|---|---|
+| `MODEL_pi_glm` | `PI_GLM_REVIEW_MODEL` | `zai/glm-5.3` | any model `pi --list-models` shows |
+| `EFFORT_pi_glm` | `PI_GLM_REVIEW_EFFORT` | `low` | `off` `minimal` `low` `medium` `high` `xhigh` `max` |
+| `MODEL_pi_grok` | `PI_GROK_REVIEW_MODEL` | `xai/grok-4.7` | any model `pi --list-models` shows |
+| `EFFORT_pi_grok` | `PI_GROK_REVIEW_EFFORT` | `low` | `off` `minimal` `low` `medium` `high` `xhigh` `max` |
+
+The effort goes to pi's `--thinking`. pi itself does **not** refuse a bad level: it prints a warning
+and runs at the level from its own settings, while the dispatch line would print your typo. So the
+relay checks the value first, and any other value fails the seat with
+`pi: invalid effort '<value>' for <seat> (EFFORT_<seat> / <SEAT>_REVIEW_EFFORT); valid: …` — pi is
+not called. **Pin `medium` only together with `AGENT_TIMEOUT` of 900 or more.** Measured on a
+298 KB diff with a 33 KB context file: GLM `low` 120 s, Grok `low` 352 s — both inside the default
+500 s — but GLM `medium` 731 s and Grok `medium` 792 s. A small PR takes seconds at any level.
 
 Precedence, strongest first: the command-line flag, then the environment variable, then this file, then the default in the script. An **empty value means "not configured"** and falls through — it does not disable anything.
 
@@ -744,7 +773,13 @@ The safeguards are what make this acceptable:
 - **It is announced on every round**, and the verdict says `PARTIAL cross-review` with the reason.
   A thinner panel is never presented as a full one.
 - **Only an explicit quota message benches.** A timeout or a crash still fails the round — those are
-  usually a large diff or a bad afternoon, and hiding them would hide a regression.
+  usually a large diff or a bad afternoon, and hiding them would hide a regression. The recognised
+  texts, matched case-insensitively and only when the seat exited non-zero: `quota reached`,
+  `quota exceeded`, `out of quota`, `usage limit reached`, `rate limit exceeded … upgrade`, z.ai's
+  `Weekly/Monthly Limit Exhausted` and xAI's `usage balance exhausted`. A bare `limit exhausted` is
+  deliberately **not** on the list: a transient rate limit or a context-length error would bench a
+  healthy seat for hours. Neither of the last two texts carries a `Resets in` duration, so they take
+  the 6-hour default.
 - **An empty panel is still exit 3.** If everything is benched, nothing was reviewed, and that is
   never clean.
 
@@ -793,7 +828,7 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
 
 ## 📋 Notes & caveats
 
-- **⚠️ OpenCode, Grok and Claude are enforced read-only (codex, antigravity and cursor are asked).** The rest are asked not to modify
+- **⚠️ OpenCode, Grok, the pi seats and Claude are enforced read-only (codex, antigravity and cursor are asked).** The rest are asked not to modify
   anything and normally don't — but a prompt is not a boundary, and the thing they are reading is
   exactly what would try to argue them out of one. They all predate the OpenCode work and are
   documented rather than quietly changed: tightening any of them affects that agent's reviews and
@@ -836,6 +871,41 @@ picked a `bash` through `PATH` before the first line runs. Nothing a script does
     `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` on the invocation purely to keep the yolo-no-sandbox banner off
     the captured review output — it changes nothing about what the reviewer may do.
 - **Grok is also enforced (tool-less + sandbox):** `grok --prompt-file … --deny '*' --sandbox read-only --permission-mode plan`. Headless Grok **ignores stdin**, so the full diff is always embedded in the prompt-file (the link-mode size threshold that strips inline diffs for other agents does **not** apply to Grok). `--deny '*'` removes tools so a malicious PR cannot drive host file reads via tools; the sandbox blocks writes and (on Linux) child network. Checkout-scoped `.grok` is avoided via an isolated cwd. **Residual:** global `~/.grok` config/plugins may still load — treat that as a trust boundary, not a sealed sandbox.
+- **The pi seats (`pi_glm`, `pi_grok`) are enforced by having nothing to use.** Each flag, and why:
+  - `--no-tools` — no tool section in the system prompt at all, so the model cannot read the host or
+    run a command. The diff reaches it on stdin, always whole: the link-mode size threshold that
+    strips inline diffs for other agents does **not** apply here.
+  - `--no-extensions` — a pi extension runs code when pi starts; a globally installed one (a chat
+    bridge, say) could forward the diff. Measured: a test extension's startup marker appears without
+    the flag and not with it.
+  - `--no-context-files`, `--no-mcp`, `--no-skills`, `--no-prompt-templates`, `--no-themes` — nothing
+    from `~/.pi` or `~/.agents` shapes the review. Measured: without `--no-context-files` the global
+    `AGENTS.md` was loaded and the review came back in another language; without `--no-mcp` the MCP
+    servers were listed.
+  - `--no-session` — a saved session would keep the full diff on disk under `~/.pi`.
+  - `--offline` — no network calls at startup (model catalog, version check). The model call still
+    goes, and by pi 1.1.0's code it does not block an OAuth token refresh.
+  - `--no-approve` — project files in the working directory are ignored. That directory is an empty
+    `iso-pi.*` under the relay's temp dir, outside the checkout, so this is the second layer.
+  - A `pi` on `PATH` that resolves into the checkout under review stops the whole relay at startup
+    with exit 2, as for opencode: the branch would be choosing the reviewer.
+
+  **The stop-reason rule.** In `--mode json` pi exits 0 even when the API call failed; the error is
+  only in the final message's `errorMessage`. So the seat accepts exactly one shape: the last
+  assistant message has `stopReason: stop` and some non-blank text. Anything else — `length`,
+  `error`, `aborted`, empty text, no final message — fails the seat with one line,
+  `pi: no usable review (stopReason=<r>, output tokens=<n>, text chars=<n>)`, plus `: <errorMessage>`
+  when there is one. A review cut off at the token limit is never posted as if it were whole. pi's
+  own non-zero exit wins, so a timeout still reads "timed out after …".
+
+  **Why these seats exist.** On a 298 KB pull request the `opencode` seat (GLM) came back empty twice:
+  opencode caps a reply at 32K output tokens and GLM spent all of them reasoning. The `grok` seat
+  (Grok Build CLI) timed out twice at 900 s. The same prompt through pi: GLM `low` 120 s, Grok `low`
+  352 s, both with specific findings. GLM's max output through pi is 131K tokens.
+
+  **Residual:** pi's global settings still load (the reason the relay checks the effort itself — see
+  the pi key table under "Configure the panel"), and the effects of `--no-prompt-templates`, `--no-themes` and `--no-approve`
+  cannot be observed with an empty cwd and no tools: they are layers, not measured barriers.
 - **OpenCode is the exception, and it is enforced:** `opencode --pure run` with a primary agent the
   relay defines itself and an inline default-deny policy. `--pure` matters — it stops external plugins,
   which execute at startup regardless of permissions.
